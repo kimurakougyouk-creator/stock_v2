@@ -115,4 +115,68 @@ for ticker in tickers:
 
     print(f"{ticker} : 指標計算完了")
 
-print("ここまで完成")
+    df["Buy"] = (
+        (df["Close"] > df["MA25"]) &
+        (df["MA25"] > df["MA75"]) &
+        (df["MA5"] > df["MA25"]) &
+        (df["RSI"] > 50) &
+        (df["RSI"] < 70) &
+        (df["MACD"] > df["Signal"]) &
+        (df["Volume"] > df["VOL20"])
+    )
+
+    print(f"{ticker} : Buyシグナル作成完了")
+
+    print(f"{ticker} : バックテスト開始")
+
+    position = False
+    buy_price = 0
+    buy_date = None
+
+    trades = []
+
+    for i in range(len(df)):
+
+        # 買い
+        if not position and df["Buy"].iloc[i]:
+
+            position = True
+            buy_price = df["Close"].iloc[i]
+            buy_date = df.index[i]
+
+            print(f"買い : {buy_date.date()}  {buy_price:.2f}")
+
+        # 売り
+        elif position:
+
+            sell_signal = (
+                (df["Close"].iloc[i] < df["MA25"].iloc[i]) or
+                (df["MACD"].iloc[i] < df["Signal"].iloc[i])
+            )
+
+            if sell_signal:
+
+                sell_price = df["Close"].iloc[i]
+                sell_date = df.index[i]
+
+                profit = (
+                    (sell_price - buy_price)
+                    / buy_price
+                    * 100
+                )
+
+                trades.append([
+                    buy_date,
+                    sell_date,
+                    buy_price,
+                    sell_price,
+                    profit
+                ])
+
+                print(
+                    f"売り : {sell_date.date()}  "
+                    f"{sell_price:.2f}  "
+                    f"{profit:.2f}%"
+                )
+
+                position = False
