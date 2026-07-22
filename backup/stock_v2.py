@@ -155,7 +155,7 @@ for ticker in tickers:
             print(f"買い : {buy_date.date()}  {buy_price:.2f}")
 
         # 売り
-        if position:
+                if position:
 
             highest_price = max(highest_price, df["Close"].iloc[i])
 
