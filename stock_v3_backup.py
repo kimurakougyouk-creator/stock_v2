@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 import smtplib
 
 from openpyxl import Workbook
@@ -11,8 +12,8 @@ from email.mime.multipart import MIMEMultipart
 # Gmail設定
 # ==========================
 
-EMAIL_ADDRESS = "あなたのGmail"
-APP_PASSWORD = "アプリパスワード"
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 # ==========================
 # バックテストする銘柄
