@@ -5,7 +5,7 @@ from config import PERIOD, INTERVAL, EMAIL_ADDRESS, APP_PASSWORD
 from indicators import add_indicators
 from strategy import create_buy_signal
 from backtest import run_backtest
-from optimizer import find_best_setting
+from optimizer import find_best_setting, MIN_TRADES
 from report import save_report
 from mail import send_mail
 
@@ -48,6 +48,10 @@ def main():
 
         result = best["result"]
 
+        if result is None:
+            print(f"最低売買回数({MIN_TRADES})を満たす設定がありませんでした。")
+            continue
+
         print(f"最適ATR : {best['atr']}")
         print(f"最適MA  : {best['ma']}")
         print(f"最適RSI : {best['rsi']}")
@@ -56,7 +60,7 @@ def main():
         print(f"ATR = {best['atr']}")
         print(f"MA = {best['ma']}  RSI = {best['rsi']}")
 
-        save_report(result["trades"], f"{ticker}_report.xlsx")
+        save_report(result["trades"], f"{ticker}_report.xlsx", result)
 
         settings_df = pd.DataFrame(
             all_results,
@@ -69,8 +73,11 @@ def main():
                 "TradeCount",
                 "ProfitPerTrade",
                 "ProfitYen",
+                "FinalCapital",
+                "TotalCommission",
                 "AverageHoldDays",
                 "MaxDrawdown",
+                "Eligible",
             ]
         )
 
@@ -81,7 +88,8 @@ def main():
         print(
             f"売買回数: {result['trade_count']}  "
             f"勝率: {result['win_rate']:.1f}%  "
-            f"利益率: {result['total_profit']:.2f}%"
+            f"利益率: {result['total_profit']:.2f}%  "
+            f"最終資産: {result['final_capital']:.0f}円"
         )
 
         summary.append([
@@ -91,7 +99,10 @@ def main():
             result["total_profit"],
             best["atr"],
             best["ma"],
-            best["rsi"]
+            best["rsi"],
+            result["final_capital"],
+            result["net_profit_yen"],
+            result["total_commission"]
         ])
 
     summary_df = pd.DataFrame(
@@ -103,7 +114,10 @@ def main():
             "TotalProfit",
             "BestATR",
             "BestMA",
-            "BestRSI"
+            "BestRSI",
+            "FinalCapital",
+            "NetProfitYen",
+            "TotalCommission"
         ]
     )
 
