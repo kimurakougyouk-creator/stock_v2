@@ -2,8 +2,10 @@
 # Gmail設定
 # ==========================
 
+import os
+
 EMAIL_ADDRESS = "s.ossan777777@gmail.com"
-APP_PASSWORD ="canwpdgyhcjvnwfk"
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 # ==========================
 # 初期資金
@@ -12,45 +14,18 @@ APP_PASSWORD ="canwpdgyhcjvnwfk"
 INITIAL_CAPITAL = 1_000_000
 
 # ==========================
-# ATR倍率候補
+# バックテスト条件
 # ==========================
 
-A# ==========================
-# Gmail設定
-# ==========================
-
-EMAIL_ADDRESS = "s.ossan777777@gmail.com"
-APP_PASSWORD ="canwpdgyhcjvnwfk"
-
-# ==========================
-# 初期資金
-# ==========================
-
-INITIAL_CAPITAL = 1_000_000
+COMMISSION_RATE = 0.001
+SLIPPAGE_RATE = 0.001
+MIN_TRADES = 5
 
 # ==========================
 # ATR倍率候補
 # ==========================
 
 ATR_LIST = [
-    2.0,
-    2.5,
-    3.0,
-]
-
-MA_LIST = [
-    (5, 25, 75),
-    (5, 20, 60),
-    (10, 25, 75),
-    (10, 30, 90),
-    (20, 50, 100),
-]
-
-# ==========================
-# RSI候補
-# (RSI_LOW, RSI_HIGH)
-# ==========================
-TR_LIST = [
     2.0,
     2.5,
     3.0,
@@ -79,7 +54,7 @@ RSI_LIST = [
 # データ取得期間
 # ==========================
 
-PERIOD = "6mo"
+PERIOD = "5y"
 INTERVAL = "1d"
 
 # ==========================

@@ -2,14 +2,24 @@
 # Gmail設定
 # ==========================
 
+import os
+
 EMAIL_ADDRESS = "s.ossan777777@gmail.com"
-APP_PASSWORD ="canwpdgyhcjvnwfk"
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 # ==========================
 # 初期資金
 # ==========================
 
 INITIAL_CAPITAL = 1_000_000
+
+# ==========================
+# バックテスト条件
+# ==========================
+
+COMMISSION_RATE = 0.001
+SLIPPAGE_RATE = 0.001
+MIN_TRADES = 5
 
 # ==========================
 # ATR倍率候補
@@ -44,7 +54,7 @@ RSI_LIST = [
 # データ取得期間
 # ==========================
 
-PERIOD = "6mo"
+PERIOD = "5y"
 INTERVAL = "1d"
 
 # ==========================
