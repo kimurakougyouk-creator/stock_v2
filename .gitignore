@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated backtest reports and result artifacts
+results/
+*.xlsx
+*.png
+*_report.xlsx
+*_settings.xlsx
+summary_report.xlsx
