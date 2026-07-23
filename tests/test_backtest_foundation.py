@@ -39,6 +39,8 @@ def test_total_profit_uses_final_capital_with_costs():
         initial_capital=1_000_000,
         commission_rate=0.0,
         slippage_rate=0.0,
+        max_loss_pct=1.0,
+        lot_size=1,
     )
 
     assert result["final_capital"] == 1_100_000
@@ -64,6 +66,8 @@ def test_daily_asset_curve_tracks_unrealized_drawdown():
         slippage_rate=0.0,
         take_profit_pct=0.50,
         stop_loss_pct=0.50,
+        max_loss_pct=1.0,
+        lot_size=1,
     )
 
     assert [point["capital"] for point in result["asset_curve"]] == [1_000_000, 800_000, 1_200_000]
@@ -147,6 +151,75 @@ def test_backtest_exits_with_trailing_stop():
 
     assert result["trade_count"] == 1
     assert result["trades"][0]["exit_reason"] == "trailing_stop"
+
+
+def test_position_size_uses_risk_and_lot_size():
+    df = FakeFrame([
+        {"date": datetime(2024, 1, 1), "Close": 100.0, "ATR": 50.0, "Buy": True},
+        {"date": datetime(2024, 1, 2), "Close": 101.0, "ATR": 50.0, "Buy": False},
+    ])
+
+    result = run_backtest(
+        df,
+        atr_multiplier=2.5,
+        initial_capital=1_000_000,
+        commission_rate=0.0,
+        slippage_rate=0.0,
+        take_profit_pct=0.50,
+        stop_loss_pct=0.05,
+        max_loss_pct=0.01,
+        lot_size=100,
+    )
+
+    trade = result["trades"][0]
+    assert trade["shares"] == 2000
+    assert trade["risk_amount"] == 10_000
+    assert trade["capital_usage"] == 20.0
+
+
+def test_position_size_does_not_exceed_available_capital():
+    df = FakeFrame([
+        {"date": datetime(2024, 1, 1), "Close": 100.0, "ATR": 50.0, "Buy": True},
+        {"date": datetime(2024, 1, 2), "Close": 101.0, "ATR": 50.0, "Buy": False},
+    ])
+
+    result = run_backtest(
+        df,
+        atr_multiplier=2.5,
+        initial_capital=100_000,
+        commission_rate=0.0,
+        slippage_rate=0.0,
+        take_profit_pct=0.50,
+        stop_loss_pct=0.05,
+        max_loss_pct=1.0,
+        lot_size=100,
+    )
+
+    trade = result["trades"][0]
+    assert trade["shares"] == 1000
+    assert trade["capital_usage"] == 100.0
+
+
+def test_position_size_skips_entry_below_minimum_lot():
+    df = FakeFrame([
+        {"date": datetime(2024, 1, 1), "Close": 100.0, "ATR": 50.0, "Buy": True},
+        {"date": datetime(2024, 1, 2), "Close": 101.0, "ATR": 50.0, "Buy": False},
+    ])
+
+    result = run_backtest(
+        df,
+        atr_multiplier=2.5,
+        initial_capital=10_000,
+        commission_rate=0.0,
+        slippage_rate=0.0,
+        take_profit_pct=0.50,
+        stop_loss_pct=0.05,
+        max_loss_pct=0.01,
+        lot_size=100,
+    )
+
+    assert result["trade_count"] == 0
+    assert result["final_capital"] == 10_000
 
 
 def test_optimizer_excludes_results_below_min_trades(monkeypatch):

@@ -6,6 +6,8 @@ DEFAULT_COMMISSION_RATE = 0.001
 DEFAULT_SLIPPAGE_RATE = 0.001
 DEFAULT_TAKE_PROFIT_PCT = 0.10
 DEFAULT_STOP_LOSS_PCT = 0.05
+DEFAULT_MAX_LOSS_PCT = 0.01
+DEFAULT_LOT_SIZE = 100
 
 
 def run_backtest(
@@ -17,6 +19,8 @@ def run_backtest(
     slippage_rate=DEFAULT_SLIPPAGE_RATE,
     take_profit_pct=DEFAULT_TAKE_PROFIT_PCT,
     stop_loss_pct=DEFAULT_STOP_LOSS_PCT,
+    max_loss_pct=DEFAULT_MAX_LOSS_PCT,
+    lot_size=DEFAULT_LOT_SIZE,
 ):
     """バックテスト実行"""
 
@@ -28,6 +32,9 @@ def run_backtest(
     shares = 0.0
     buy_commission = 0.0
     gross_cost = 0.0
+    cash_balance = 0.0
+    risk_amount = 0.0
+    capital_usage = 0.0
 
     trades = []
     asset_curve = []
@@ -48,22 +55,29 @@ def run_backtest(
         # 買い
         if (not position) and buy_signal and _is_valid_number(atr):
             buy_price = price * (1 + slippage_rate)
-            buy_commission = capital * commission_rate
-            available_capital = capital - buy_commission
-
-            if available_capital <= 0 or buy_price <= 0:
-                asset_curve.append(_asset_snapshot(date, capital, peak_equity))
-                continue
-
-            position = True
-            buy_date = date
-            shares = available_capital / buy_price
-            gross_cost = shares * buy_price
             highest_price = buy_price
             stop_price = max(
                 buy_price * (1 - stop_loss_pct),
                 buy_price - atr * atr_multiplier,
             )
+            shares, risk_amount, capital_usage = _calculate_position_size(
+                capital=capital,
+                buy_price=buy_price,
+                stop_price=stop_price,
+                commission_rate=commission_rate,
+                max_loss_pct=max_loss_pct,
+                lot_size=lot_size,
+            )
+
+            if shares < lot_size:
+                asset_curve.append(_asset_snapshot(date, capital, peak_equity))
+                continue
+
+            position = True
+            buy_date = date
+            gross_cost = shares * buy_price
+            buy_commission = gross_cost * commission_rate
+            cash_balance = capital - gross_cost - buy_commission
 
             if show_log:
                 print(f"買い : {buy_date.date()}  {buy_price:.2f}")
@@ -97,12 +111,18 @@ def run_backtest(
                     shares=shares,
                     buy_commission=buy_commission,
                     gross_cost=gross_cost,
+                    cash_balance=cash_balance,
+                    risk_amount=risk_amount,
+                    capital_usage=capital_usage,
                     commission_rate=commission_rate,
                     exit_reason=exit_reason,
                 )
                 trades.append(trade)
                 position = False
                 shares = 0.0
+                cash_balance = 0.0
+                risk_amount = 0.0
+                capital_usage = 0.0
 
                 if show_log:
                     print(
@@ -111,7 +131,7 @@ def run_backtest(
                         f"{trade['profit']:.2f}%"
                     )
 
-        equity = _calculate_equity(capital, shares, price, position, slippage_rate, commission_rate)
+        equity = _calculate_equity(capital, shares, price, position, slippage_rate, commission_rate, cash_balance)
         peak_equity = max(peak_equity, equity)
         asset_curve.append(_asset_snapshot(date, equity, peak_equity))
 
@@ -127,6 +147,9 @@ def run_backtest(
             shares=shares,
             buy_commission=buy_commission,
             gross_cost=gross_cost,
+            cash_balance=cash_balance,
+            risk_amount=risk_amount,
+            capital_usage=capital_usage,
             commission_rate=commission_rate,
             exit_reason="end_of_data",
         )
@@ -175,13 +198,16 @@ def _close_position(
     shares,
     buy_commission,
     gross_cost,
+    cash_balance,
+    risk_amount,
+    capital_usage,
     commission_rate,
     exit_reason,
 ):
     gross_proceeds = shares * sell_price
     sell_commission = gross_proceeds * commission_rate
     commission = buy_commission + sell_commission
-    next_capital = gross_proceeds - sell_commission
+    next_capital = cash_balance + gross_proceeds - sell_commission
     gross_profit_yen = gross_proceeds - gross_cost
     net_profit_yen = next_capital - previous_capital
     gross_profit = gross_profit_yen / gross_cost * 100 if gross_cost else 0.0
@@ -201,8 +227,33 @@ def _close_position(
         "commission": commission,
         "capital": next_capital,
         "hold_days": hold_days,
+        "risk_amount": risk_amount,
+        "capital_usage": capital_usage,
         "exit_reason": exit_reason,
     }
+
+
+def _calculate_position_size(capital, buy_price, stop_price, commission_rate, max_loss_pct, lot_size):
+    risk_per_share = buy_price - stop_price
+
+    if risk_per_share <= 0 or buy_price <= 0 or lot_size <= 0:
+        return 0, 0.0, 0.0
+
+    max_risk_amount = capital * max_loss_pct
+    risk_limited_shares = int(max_risk_amount // risk_per_share)
+    affordable_shares = int(capital // (buy_price * (1 + commission_rate)))
+    shares = min(risk_limited_shares, affordable_shares)
+    shares = shares // lot_size * lot_size
+
+    if shares <= 0:
+        return 0, 0.0, 0.0
+
+    gross_cost = shares * buy_price
+    buy_commission = gross_cost * commission_rate
+    risk_amount = shares * risk_per_share
+    capital_usage = (gross_cost + buy_commission) / capital * 100 if capital else 0.0
+
+    return shares, risk_amount, capital_usage
 
 
 def _get_exit_reason(price, take_profit_price, stop_price, fixed_stop):
@@ -217,14 +268,14 @@ def _get_exit_reason(price, take_profit_price, stop_price, fixed_stop):
     return None
 
 
-def _calculate_equity(capital, shares, price, position, slippage_rate, commission_rate):
+def _calculate_equity(capital, shares, price, position, slippage_rate, commission_rate, cash_balance=0.0):
     if not position:
         return capital
 
     liquidation_price = price * (1 - slippage_rate)
     gross_value = shares * liquidation_price
     sell_commission = gross_value * commission_rate
-    return gross_value - sell_commission
+    return cash_balance + gross_value - sell_commission
 
 
 def _asset_snapshot(date, capital, peak_equity):
