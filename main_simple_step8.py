@@ -8,12 +8,12 @@ from backtest import run_backtest
 from optimizer import find_best_setting, MIN_TRADES
 from report import save_report
 from mail import send_mail
-from execution import DryRunBroker, record_dry_run_orders
+from execution import BrokerFactory, record_dry_run_orders
 
 def main():
 
     summary = []
-    dry_run_broker = DryRunBroker()
+    dry_run_broker = BrokerFactory.create("dry_run")
 
     ticker_df = pd.read_csv("tickers.csv")
     tickers = ticker_df["Ticker"].tolist()

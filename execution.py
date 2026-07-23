@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,11 +25,34 @@ class Order:
         )
 
 
-class BrokerClient:
-    """証券会社ごとの接続処理を追加するための基底クラス"""
+class BrokerInterface(ABC):
+    """証券会社ごとの接続処理を追加するための抽象インターフェース"""
 
+    @abstractmethod
     def submit_order(self, order, available_cash):
         raise NotImplementedError
+
+
+class BrokerClient(BrokerInterface):
+    """既存コード互換のための別名基底クラス"""
+
+
+class BrokerFactory:
+    """設定に応じて利用するブローカーを作成するFactory"""
+
+    @staticmethod
+    def create(mode="dry_run", **kwargs):
+        normalized_mode = (mode or "dry_run").lower()
+
+        if normalized_mode in {"dry_run", "dry-run", "paper"}:
+            return DryRunBroker(**kwargs)
+
+        if normalized_mode in {"sbi", "sbi_sec", "sbi_securities", "live", "real"}:
+            raise NotImplementedError(
+                "実注文モードは未実装です。安全のため処理を停止しました。"
+            )
+
+        raise ValueError(f"unknown broker mode: {mode}")
 
 
 class DryRunBroker(BrokerClient):

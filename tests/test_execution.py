@@ -150,3 +150,37 @@ def test_record_dry_run_orders_safely_stops_when_dry_run_disabled(tmp_path):
     assert recorded == []
     assert not (tmp_path / "orders.json").exists()
     assert "real order execution is not implemented" in (tmp_path / "orders.log").read_text(encoding="utf-8")
+
+
+def test_broker_factory_returns_dry_run_broker(tmp_path):
+    from execution import BrokerFactory, DryRunBroker
+
+    broker = BrokerFactory.create(
+        "dry_run",
+        order_file=tmp_path / "orders.json",
+        log_file=tmp_path / "orders.log",
+    )
+
+    assert isinstance(broker, DryRunBroker)
+
+
+def test_broker_factory_stops_live_order_modes_for_safety():
+    from execution import BrokerFactory
+
+    try:
+        BrokerFactory.create("sbi")
+    except NotImplementedError as exc:
+        assert "実注文モードは未実装" in str(exc)
+    else:
+        raise AssertionError("BrokerFactory.create('sbi') should stop safely")
+
+
+def test_broker_factory_rejects_unknown_mode():
+    from execution import BrokerFactory
+
+    try:
+        BrokerFactory.create("unknown")
+    except ValueError as exc:
+        assert "unknown broker mode" in str(exc)
+    else:
+        raise AssertionError("BrokerFactory.create('unknown') should reject unknown modes")
