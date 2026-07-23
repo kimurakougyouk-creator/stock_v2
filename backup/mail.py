@@ -5,6 +5,9 @@ from email.mime.text import MIMEText
 def send_mail(sender, app_password, receiver, subject, body):
     """Gmailでメール送信"""
 
+    if not app_password:
+        raise ValueError("APP_PASSWORD environment variable is required to send mail")
+
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
     msg["From"] = sender
