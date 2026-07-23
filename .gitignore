@@ -217,12 +217,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Local credentials and generated backup files
-backup/
-*.save
-.env
-.env.*
-!.env.example
 
 # Generated reports and result artifacts
 results/
