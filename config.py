@@ -4,7 +4,7 @@
 
 import os
 
-EMAIL_ADDRESS = "s.ossan777777@gmail.com"
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 # ==========================
