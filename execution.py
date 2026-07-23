@@ -1,10 +1,11 @@
 import json
-import logging
 import math
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+
+from stability import create_daily_logger, safe_execute
 
 
 @dataclass(frozen=True)
@@ -58,15 +59,14 @@ class BrokerFactory:
 class DryRunBroker(BrokerClient):
     """実注文を出さず、模擬注文だけをJSONに保存するブローカー"""
 
-    def __init__(self, order_file="results/dry_run_orders.json", log_file="results/dry_run_orders.log"):
+    def __init__(self, order_file="results/dry_run_orders.json", log_file=None):
         self.order_file = Path(order_file)
-        self.log_file = Path(log_file)
+        self.log_file = Path(log_file) if log_file else None
         self.order_file.parent.mkdir(parents=True, exist_ok=True)
-        self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.logger = _create_logger(self.log_file)
 
     def submit_order(self, order, available_cash):
-        try:
+        def operation():
             validate_order(order, available_cash)
             orders = self._load_orders()
 
@@ -78,9 +78,8 @@ class DryRunBroker(BrokerClient):
             self._save_orders(orders)
             self.logger.info("dry-run order recorded: %s", order)
             return True
-        except Exception as exc:
-            self.logger.exception("dry-run order failed: %s", exc)
-            return False
+
+        return safe_execute(operation, self.logger, default=False)
 
     def _load_orders(self):
         if not self.order_file.exists():
@@ -217,13 +216,4 @@ def _date_key(value):
 
 
 def _create_logger(log_file):
-    logger = logging.getLogger(f"dry_run_orders.{log_file}")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-
-    if not logger.handlers:
-        handler = logging.FileHandler(log_file, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        logger.addHandler(handler)
-
-    return logger
+    return create_daily_logger("dry_run_orders", log_dir="results", log_file=log_file)
