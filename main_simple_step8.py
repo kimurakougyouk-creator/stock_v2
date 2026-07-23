@@ -59,8 +59,19 @@ def main():
         save_report(result["trades"], f"{ticker}_report.xlsx")
 
         settings_df = pd.DataFrame(
-        all_results,
-        columns=["ATR", "MA", "RSI", "WinRate", "TotalProfit"]
+            all_results,
+            columns=[
+                "ATR",
+                "MA",
+                "RSI",
+                "WinRate",
+                "TotalProfit",
+                "TradeCount",
+                "ProfitPerTrade",
+                "ProfitYen",
+                "AverageHoldDays",
+                "MaxDrawdown",
+            ]
         )
 
         settings_df = settings_df.sort_values("TotalProfit", ascending=False)
