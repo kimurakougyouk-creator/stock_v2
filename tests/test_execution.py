@@ -71,3 +71,82 @@ def test_create_order_ignores_nan_buy_signal():
             return {"Buy": float("nan"), "Close": 1234.5}[key]
 
     assert create_order_from_signal("7203.T", SignalRow(name="2026-01-05"), 100) is None
+
+
+def _trade(**overrides):
+    trade = {
+        "buy_date": "2026-01-05T09:00:00",
+        "sell_date": "2026-01-06T09:00:00",
+        "buy_price": 1000.0,
+        "sell_price": 1100.0,
+        "shares": 100,
+        "exit_reason": "take_profit",
+        "capital": 210_000,
+    }
+    trade.update(overrides)
+    return trade
+
+
+def test_record_dry_run_orders_creates_buy_and_sell_orders(tmp_path):
+    from execution import record_dry_run_orders
+
+    broker = DryRunBroker(
+        order_file=tmp_path / "orders.json",
+        log_file=tmp_path / "orders.log",
+    )
+
+    recorded = record_dry_run_orders(
+        "7203.T",
+        {"trades": [_trade()]},
+        broker,
+        available_cash=200_000,
+    )
+
+    assert [(order.side, order.reason) for order in recorded] == [
+        ("BUY", "buy_signal"),
+        ("SELL", "take_profit"),
+    ]
+
+    saved = json.loads((tmp_path / "orders.json").read_text(encoding="utf-8"))
+    assert [order["side"] for order in saved] == ["BUY", "SELL"]
+
+
+def test_record_dry_run_orders_prevents_same_ticker_side_date_duplicates(tmp_path):
+    from execution import record_dry_run_orders
+
+    broker = DryRunBroker(
+        order_file=tmp_path / "orders.json",
+        log_file=tmp_path / "orders.log",
+    )
+    result = {"trades": [
+        _trade(reason="first"),
+        _trade(buy_price=1001.0, sell_price=1099.0, exit_reason="trailing_stop"),
+    ]}
+
+    recorded = record_dry_run_orders("7203.T", result, broker, available_cash=300_000)
+
+    assert len(recorded) == 2
+    saved = json.loads((tmp_path / "orders.json").read_text(encoding="utf-8"))
+    assert len(saved) == 2
+    assert {order["side"] for order in saved} == {"BUY", "SELL"}
+
+
+def test_record_dry_run_orders_safely_stops_when_dry_run_disabled(tmp_path):
+    from execution import record_dry_run_orders
+
+    broker = DryRunBroker(
+        order_file=tmp_path / "orders.json",
+        log_file=tmp_path / "orders.log",
+    )
+
+    recorded = record_dry_run_orders(
+        "7203.T",
+        {"trades": [_trade()]},
+        broker,
+        available_cash=200_000,
+        dry_run=False,
+    )
+
+    assert recorded == []
+    assert not (tmp_path / "orders.json").exists()
+    assert "real order execution is not implemented" in (tmp_path / "orders.log").read_text(encoding="utf-8")

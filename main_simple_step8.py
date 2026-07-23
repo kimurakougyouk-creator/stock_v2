@@ -1,17 +1,19 @@
 import pandas as pd
 import yfinance as yf
 
-from config import PERIOD, INTERVAL, EMAIL_ADDRESS, APP_PASSWORD
+from config import PERIOD, INTERVAL, EMAIL_ADDRESS, APP_PASSWORD, INITIAL_CAPITAL
 from indicators import add_indicators
 from strategy import create_buy_signal
 from backtest import run_backtest
 from optimizer import find_best_setting, MIN_TRADES
 from report import save_report
 from mail import send_mail
+from execution import DryRunBroker, record_dry_run_orders
 
 def main():
 
     summary = []
+    dry_run_broker = DryRunBroker()
 
     ticker_df = pd.read_csv("tickers.csv")
     tickers = ticker_df["Ticker"].tolist()
@@ -64,6 +66,14 @@ def main():
         print(f"利益確定率 = {best['take_profit']}  損切り率 = {best['stop_loss']}")
 
         save_report(result["trades"], f"{ticker}_report.xlsx", result)
+        dry_run_orders = record_dry_run_orders(
+            ticker,
+            result,
+            dry_run_broker,
+            available_cash=INITIAL_CAPITAL,
+            dry_run=True,
+        )
+        print(f"dry-run模擬注文: {len(dry_run_orders)}件")
 
         settings_df = pd.DataFrame(
             all_results,

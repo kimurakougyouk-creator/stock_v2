@@ -20,10 +20,7 @@ class Order:
         return (
             self.ticker,
             self.side,
-            self.quantity,
-            round(self.price, 4),
-            self.created_at,
-            self.reason,
+            _date_key(self.created_at),
         )
 
 
@@ -71,6 +68,45 @@ class DryRunBroker(BrokerClient):
     def _save_orders(self, orders):
         with self.order_file.open("w", encoding="utf-8") as file:
             json.dump(orders, file, ensure_ascii=False, indent=2)
+
+
+def record_dry_run_orders(ticker, backtest_result, broker, available_cash, dry_run=True):
+    """バックテスト結果からdry-runの買い/売り模擬注文を記録する"""
+
+    if not dry_run:
+        broker.logger.error("dry-run mode is disabled; real order execution is not implemented")
+        return []
+
+    recorded_orders = []
+
+    for trade in backtest_result.get("trades", []):
+        buy_order = Order(
+            ticker=ticker,
+            side="BUY",
+            quantity=int(trade["shares"]),
+            price=float(trade["buy_price"]),
+            created_at=_format_datetime(trade["buy_date"]),
+            reason="buy_signal",
+        )
+
+        if broker.submit_order(buy_order, available_cash):
+            recorded_orders.append(buy_order)
+
+        sell_order = Order(
+            ticker=ticker,
+            side="SELL",
+            quantity=int(trade["shares"]),
+            price=float(trade["sell_price"]),
+            created_at=_format_datetime(trade["sell_date"]),
+            reason=trade.get("exit_reason", "sell_signal"),
+        )
+
+        if broker.submit_order(sell_order, available_cash=0):
+            recorded_orders.append(sell_order)
+
+        available_cash = max(available_cash, trade.get("capital", available_cash))
+
+    return recorded_orders
 
 
 def create_order_from_signal(ticker, signal_row, quantity, reason="buy_signal"):
@@ -148,11 +184,12 @@ def _order_key(order_dict):
     return (
         order_dict["ticker"],
         order_dict["side"],
-        order_dict["quantity"],
-        round(order_dict["price"], 4),
-        order_dict["created_at"],
-        order_dict["reason"],
+        _date_key(order_dict["created_at"]),
     )
+
+
+def _date_key(value):
+    return str(value).split("T", 1)[0].split(" ", 1)[0]
 
 
 def _create_logger(log_file):
