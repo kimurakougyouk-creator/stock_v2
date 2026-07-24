@@ -1,5 +1,12 @@
 # 運用開始チェックリスト
 
+## Chromebook起動前
+
+- [ ] Linux 開発環境（Crostini）が有効になっている。
+- [ ] `python3 -m venv .venv` で仮想環境を作成済み。
+- [ ] `source .venv/bin/activate` で仮想環境を有効化済み。
+- [ ] `python -m pip install -r requirements.txt` が成功している。
+
 ## 起動前
 
 - [ ] `BROKER_MODE=dry_run` になっている。
@@ -9,6 +16,9 @@
 - [ ] `results/` に書き込みできる。
 - [ ] Gmail通知を使う場合のみ、環境変数 `APP_PASSWORD` を設定している。
 - [ ] Gmailアプリパスワードや証券会社パスワードをコードに保存していない。
+- [ ] `python -m pytest -q` が成功している。
+- [ ] `python -m py_compile $(git ls-files '*.py')` が成功している。
+- [ ] `ruff check .` が成功している。
 
 ## 起動時
 

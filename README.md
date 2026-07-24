@@ -22,6 +22,10 @@
 
 `BrokerFactory.create("sbi")` は `SbiBroker` の土台を返しますが、認証・注文送信・注文取消・残高取得・保有銘柄取得は未実装です。アプリ起動時のセルフチェックと `auto_trading_engine.py` は dry-run以外を安全停止するため、現時点で実注文は実行されません。
 
+## Chromebookでの実行
+
+Chromebook の Linux 開発環境で実行する場合は、`CHROMEBOOK_RUNBOOK.md` の手順に従ってください。依存関係は `requirements.txt` に整理しています。
+
 ## テストと静的チェック
 
 ```bash
