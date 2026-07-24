@@ -1,17 +1,33 @@
 import pandas as pd
 import yfinance as yf
 
-from config import PERIOD, INTERVAL, EMAIL_ADDRESS, APP_PASSWORD, INITIAL_CAPITAL
+import config
+from config import (
+    APP_PASSWORD,
+    BROKER_MODE,
+    DRY_RUN,
+    DRY_RUN_ORDER_FILE,
+    EMAIL_ADDRESS,
+    INITIAL_CAPITAL,
+    INTERVAL,
+    LOG_DIR,
+    PERIOD,
+)
 from indicators import add_indicators
 from optimizer import find_best_setting, MIN_TRADES
 from report import save_report
 from mail import send_mail
 from execution import BrokerFactory, record_dry_run_orders
+from stability import create_daily_logger
+from startup import run_startup_self_check, run_with_safe_shutdown
 
 def main():
 
+    app_logger = create_daily_logger("startup", log_dir=LOG_DIR)
+    run_startup_self_check(config, app_logger)
+
     summary = []
-    dry_run_broker = BrokerFactory.create("dry_run")
+    dry_run_broker = BrokerFactory.create(BROKER_MODE, order_file=DRY_RUN_ORDER_FILE)
 
     ticker_df = pd.read_csv("tickers.csv")
     tickers = ticker_df["Ticker"].tolist()
@@ -69,7 +85,7 @@ def main():
             result,
             dry_run_broker,
             available_cash=INITIAL_CAPITAL,
-            dry_run=True,
+            dry_run=DRY_RUN,
         )
         print(f"dry-run模擬注文: {len(dry_run_orders)}件")
 
@@ -161,4 +177,5 @@ def main():
     )
 
 if __name__ == "__main__":
-    main()
+    logger = create_daily_logger("startup", log_dir=LOG_DIR)
+    run_with_safe_shutdown(main, logger)
