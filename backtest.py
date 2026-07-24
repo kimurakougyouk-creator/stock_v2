@@ -1,4 +1,10 @@
-from config import INITIAL_CAPITAL, COMMISSION_RATE, SLIPPAGE_RATE
+from config import (
+    INITIAL_CAPITAL,
+    COMMISSION_RATE,
+    SLIPPAGE_RATE,
+    STOP_LOSS_RATE,
+    TAKE_PROFIT_RATE,
+)
 
 
 def run_backtest(
@@ -8,6 +14,8 @@ def run_backtest(
     initial_capital=INITIAL_CAPITAL,
     commission_rate=COMMISSION_RATE,
     slippage_rate=SLIPPAGE_RATE,
+    stop_loss_rate=STOP_LOSS_RATE,
+    take_profit_rate=TAKE_PROFIT_RATE,
 ):
     """バックテスト実行"""
 
@@ -53,9 +61,16 @@ def run_backtest(
             atr_stop = highest_price - df["ATR"].iloc[i] * atr_multiplier
             stop_price = max(stop_price, atr_stop)
 
-            sell_signal = price <= stop_price
+            if price <= buy_price * (1 - stop_loss_rate):
+                exit_reason = "stop_loss"
+            elif price >= buy_price * (1 + take_profit_rate):
+                exit_reason = "take_profit"
+            elif price <= stop_price:
+                exit_reason = "atr_stop"
+            else:
+                exit_reason = None
 
-            if sell_signal:
+            if exit_reason:
                 sell_price = price * (1 - slippage_rate)
                 sell_date = df.index[i]
                 capital, trade = _close_position(
@@ -67,6 +82,7 @@ def run_backtest(
                     buy_commission,
                     commission_rate,
                 )
+                trade["exit_reason"] = exit_reason
                 asset_curve.append({"date": sell_date, "capital": capital})
                 trades.append(trade)
 
@@ -91,6 +107,7 @@ def run_backtest(
             buy_commission,
             commission_rate,
         )
+        trade["exit_reason"] = "final_close"
         asset_curve.append({"date": sell_date, "capital": capital})
         trades.append(trade)
 
