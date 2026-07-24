@@ -1,3 +1,5 @@
+import pandas as pd
+
 
 def run_backtest(df, atr_multiplier=2.5, show_log=False):
     """
@@ -16,6 +18,7 @@ def run_backtest(df, atr_multiplier=2.5, show_log=False):
     asset_curve = []
 
     capital = 1_000_000
+    highest_capital = capital
     max_drawdown = 0
 
     for i in range(len(df)):
