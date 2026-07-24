@@ -1,7 +1,13 @@
-import pandas as pd
+from config import STOP_LOSS_RATE, TAKE_PROFIT_RATE
 
 
-def run_backtest(df, atr_multiplier=2.5, show_log=False):
+def run_backtest(
+    df,
+    atr_multiplier=2.5,
+    show_log=False,
+    stop_loss_rate=STOP_LOSS_RATE,
+    take_profit_rate=TAKE_PROFIT_RATE,
+):
     """
     バックテスト実行
     """
@@ -18,7 +24,6 @@ def run_backtest(df, atr_multiplier=2.5, show_log=False):
     asset_curve = []
 
     capital = 1_000_000
-    highest_capital = capital
     max_drawdown = 0
 
     for i in range(len(df)):
@@ -54,12 +59,18 @@ def run_backtest(df, atr_multiplier=2.5, show_log=False):
             atr_stop = highest_price - df["ATR"].iloc[i] * atr_multiplier
             stop_price = max(stop_price, atr_stop)
 
-            # 売り条件
-            sell_signal = (
-                price <= stop_price
-            )
+            fixed_stop_price = buy_price * (1 - stop_loss_rate)
+            take_profit_price = buy_price * (1 + take_profit_rate)
 
-            if sell_signal:
+            exit_reason = None
+            if price <= fixed_stop_price:
+                exit_reason = "stop_loss"
+            elif price >= take_profit_price:
+                exit_reason = "take_profit"
+            elif price <= stop_price:
+                exit_reason = "atr_stop"
+
+            if exit_reason:
 
                 sell_price = price
                 sell_date = df.index[i]
@@ -85,7 +96,8 @@ def run_backtest(df, atr_multiplier=2.5, show_log=False):
                     "buy_price": buy_price,
                     "sell_price": sell_price,
                     "profit": profit,
-                    "hold_days": hold_days
+                    "hold_days": hold_days,
+                    "exit_reason": exit_reason
                 })
 
                 if show_log:
@@ -124,7 +136,8 @@ def run_backtest(df, atr_multiplier=2.5, show_log=False):
             "buy_price": buy_price,
             "sell_price": sell_price,
             "profit": profit,
-            "hold_days": hold_days
+            "hold_days": hold_days,
+            "exit_reason": "final_close"
         })
 
     trade_count = len(trades)

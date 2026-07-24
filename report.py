@@ -15,7 +15,8 @@ def save_report(trades, filename):
         "買値",
         "売値",
         "利益率(%)",
-        "保有日数"
+        "保有日数",
+        "売却理由"
     ])
 
     for i, trade in enumerate(trades, start=1):
@@ -26,7 +27,8 @@ def save_report(trades, filename):
             round(trade["buy_price"], 2),
             round(trade["sell_price"], 2),
             round(trade["profit"], 2),
-            trade["hold_days"]
+            trade["hold_days"],
+            trade.get("exit_reason", "")
         ])
    
     # ===== バックテスト結果サマリー =====
