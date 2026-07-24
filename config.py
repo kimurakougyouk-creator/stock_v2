@@ -3,9 +3,63 @@
 # ==========================
 
 import os
+from pathlib import Path
 
-EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
-APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+
+def _resolve_env_path(env_file: str | None = None) -> Path | None:
+    candidates = []
+    if env_file:
+        candidates.append(Path(env_file))
+
+    cwd_env = Path.cwd() / ".env"
+    repo_env = Path(__file__).resolve().parent / ".env"
+    candidates.extend([cwd_env, repo_env])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _read_env_value(env_file: Path | None, key: str) -> str:
+    if env_file is None:
+        return os.getenv(key, "")
+
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+
+        if "=" not in line:
+            continue
+
+        parsed_key, value = line.split("=", 1)
+        if parsed_key.strip() != key:
+            continue
+
+        value = value.strip()
+        if value and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value
+
+    return os.getenv(key, "")
+
+
+def _get_mail_setting(key: str) -> str:
+    env_value = os.getenv(key, "")
+    if env_value:
+        return env_value
+
+    env_path = _resolve_env_path()
+    return _read_env_value(env_path, key)
+
+
+EMAIL_ADDRESS = _get_mail_setting("EMAIL_ADDRESS")
+APP_PASSWORD = _get_mail_setting("APP_PASSWORD")
 
 # ==========================
 # 初期資金
