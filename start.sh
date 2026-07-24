@@ -35,3 +35,6 @@ set +a
 
 echo "バックテストを開始します..."
 python main_simple_step8.py
+
+echo "最新シグナル判定を開始します..."
+python -m signal_runner
