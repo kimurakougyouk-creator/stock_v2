@@ -1,9 +1,11 @@
+import os
+
 # ==========================
 # Gmail設定
 # ==========================
-
-EMAIL_ADDRESS = "s.ossan777777@gmail.com"
-APP_PASSWORD ="pcpdkhwijvbofhop"
+# 認証情報はコードに保存せず、Chromebookの環境変数から読み込みます。
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 # ==========================
 # 初期資金
