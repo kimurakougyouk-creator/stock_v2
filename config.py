@@ -1,11 +1,9 @@
-import os
-
 # ==========================
 # Gmail設定
 # ==========================
 
-EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
-APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+EMAIL_ADDRESS = "s.ossan777777@gmail.com"
+APP_PASSWORD ="pcpdkhwijvbofhop"
 
 # ==========================
 # 初期資金

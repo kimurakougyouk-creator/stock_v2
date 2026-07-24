@@ -20,7 +20,7 @@ source .venv/bin/activate
 
 echo "必要なライブラリを確認しています..."
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install pandas openpyxl yfinance
 
 if [ ! -f ".env" ] || ! python setup_wizard.py --check >/dev/null 2>&1; then
   python setup_wizard.py

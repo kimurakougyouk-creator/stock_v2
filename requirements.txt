@@ -1,5 +1,0 @@
-pandas
-openpyxl
-yfinance
-pytest
-ruff
