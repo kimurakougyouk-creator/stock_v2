@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +63,14 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
                 "MACD": signal_result["macd"],
                 "SignalLine": signal_result["signal_line"],
                 "ATR": signal_result["atr"],
+                "Score": signal_result["score"],
+                "Grade": signal_result["grade"],
+                "StopPrice": signal_result["stop_price"],
+                "RiskPerShare": signal_result["risk_per_share"],
+                "MaxLossYen": signal_result["max_loss_yen"],
+                "ReferenceShares": signal_result["reference_shares"],
+                "ReferenceAmountYen": signal_result["reference_amount_yen"],
+                "PositionSizingReason": signal_result["position_sizing_reason"],
             }
             records.append(record)
             print(f"{ticker}: {signal_result['signal']}")
@@ -81,11 +88,25 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
                 "MACD": None,
                 "SignalLine": None,
                 "ATR": None,
+                "Score": 0,
+                "Grade": "E",
+                "StopPrice": None,
+                "RiskPerShare": None,
+                "MaxLossYen": None,
+                "ReferenceShares": 0,
+                "ReferenceAmountYen": None,
+                "PositionSizingReason": "判定エラーのため、参考株数は0です。",
             }
             records.append(record)
             print(f"{ticker}: 判定中にエラーが発生しました。{exc}")
 
     output_df = pd.DataFrame(records)
+    for numeric_column in ["Score", "StopPrice", "RiskPerShare", "MaxLossYen", "ReferenceShares", "ReferenceAmountYen"]:
+        output_df[numeric_column] = pd.to_numeric(output_df[numeric_column], errors="coerce").fillna(0)
+
+    output_df = output_df.sort_values(["Score", "Ticker"], ascending=[False, True], kind="mergesort").reset_index(drop=True)
+    output_df.insert(output_df.columns.get_loc("Score") + 1, "Rank", range(1, len(output_df) + 1))
+
     output_dir = _get_result_dir()
     output_path = output_dir / "latest_signals.xlsx"
     output_df.to_excel(output_path, index=False)
@@ -96,7 +117,10 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
             subject = "売買シグナル通知"
             body_lines = ["最新のシグナル一覧です。", ""]
             for _, row in actionable.iterrows():
-                body_lines.append(f"- {row['Ticker']}: {row['Signal']} - {row['Reason']}")
+                summary = f"- {row['Ticker']}: {row['Signal']} (Score {int(row['Score'])}, Rank {int(row['Rank'])}, 参考株数 {int(row['ReferenceShares'])})"
+                if row["Signal"] == "BUY" and int(row["ReferenceShares"]) == 0:
+                    summary += f" - {row['PositionSizingReason']}"
+                body_lines.append(summary)
             send_mail(EMAIL_ADDRESS, APP_PASSWORD, EMAIL_ADDRESS, subject, "\n".join(body_lines))
             print("BUY/SELLシグナルをメールで通知しました。")
         else:
@@ -124,7 +148,10 @@ def main() -> None:
     result = run_signal_scan()
     if EMAIL_ADDRESS and APP_PASSWORD:
         if result["records"]:
-            print("シグナル分析が完了しました。")
+            if any(record["Signal"] in {"BUY", "SELL"} for record in result["records"]):
+                print("シグナル分析が完了しました。")
+            else:
+                print("HOLDのみでしたが、シグナル分析は正常終了しました。")
         else:
             print("シグナルがありませんでしたが、処理は正常終了しました。")
     else:
