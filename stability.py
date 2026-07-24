@@ -1,7 +1,7 @@
 import logging
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,7 @@ def create_daily_logger(name: str, log_dir: str = "logs", log_file: str | Path |
     """日付ごとのログファイルへ保存するloggerを作成する"""
 
     if log_file is None:
-        date_text = current_date or datetime.utcnow().strftime("%Y-%m-%d")
+        date_text = current_date or datetime.now(UTC).strftime("%Y-%m-%d")
         log_path = Path(log_dir) / f"{name}_{date_text}.log"
     else:
         log_path = Path(log_file)
