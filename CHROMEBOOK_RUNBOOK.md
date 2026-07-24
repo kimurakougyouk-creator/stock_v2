@@ -27,33 +27,28 @@ git checkout develop-auto-trading
 git pull
 ```
 
-## 3. Python仮想環境と依存関係
+## 3. ワンクリック起動
+
+2回目以降は以下だけで起動できます。初回は `.venv` 作成、依存関係インストール、メール設定ウィザード起動、`.env` 読み込み、`main_simple_step8.py` 実行まで自動で行います。
+
+```bash
+bash start.sh
+```
+
+Gmail通知を使う場合だけ、初回ウィザードに従って Gmailアドレスとアプリパスワードを入力してください。入力内容は `.env` に保存され、GitHubには保存されません。Gmail通知が不要な場合は、メール送信は安全にスキップされます。
+
+## 4. 手動で確認したい場合
+
+`start.sh` は内部で以下と同等の処理を行います。問題切り分け時だけ手動実行してください。
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python setup_wizard.py
+python main_simple_step8.py
 ```
-
-## 4. 環境変数
-
-実注文は未実装のため、必ず dry-run にします。
-
-```bash
-export BROKER_MODE=dry_run
-export DRY_RUN_ORDER_FILE=results/dry_run_orders.json
-export LOG_DIR=results
-```
-
-Gmail通知を使う場合だけ、アプリパスワードを環境変数で設定します。コードへ保存しないでください。
-
-```bash
-export EMAIL_ADDRESS="your-gmail-address@example.com"
-export APP_PASSWORD="your-gmail-app-password"
-```
-
-Gmail通知が不要な場合は `APP_PASSWORD` を設定しなくても、メール送信は安全にスキップされます。
 
 ## 5. 実行前チェック
 
@@ -71,8 +66,10 @@ cat tickers.csv
 
 ## 6. dry-run実行
 
+通常は以下だけを使います。
+
 ```bash
-python main_simple_step8.py
+bash start.sh
 ```
 
 ## 7. 実行後に確認するファイル

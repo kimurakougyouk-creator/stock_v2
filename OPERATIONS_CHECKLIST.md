@@ -3,9 +3,9 @@
 ## Chromebook起動前
 
 - [ ] Linux 開発環境（Crostini）が有効になっている。
-- [ ] `python3 -m venv .venv` で仮想環境を作成済み。
-- [ ] `source .venv/bin/activate` で仮想環境を有効化済み。
-- [ ] `python -m pip install -r requirements.txt` が成功している。
+- [ ] `bash start.sh` を実行できる。
+- [ ] 初回はメール設定ウィザードで `.env` を作成できる。
+- [ ] 2回目以降は `bash start.sh` だけで起動できる。
 
 ## 起動前
 

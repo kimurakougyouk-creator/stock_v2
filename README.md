@@ -24,7 +24,7 @@
 
 ## Chromebookでの実行
 
-Chromebook の Linux 開発環境で実行する場合は、`CHROMEBOOK_RUNBOOK.md` の手順に従ってください。依存関係は `requirements.txt` に整理しています。
+Chromebook の Linux 開発環境で実行する場合は、`CHROMEBOOK_RUNBOOK.md` の手順に従ってください。依存関係は `requirements.txt` に整理しています。2回目以降は `bash start.sh` だけで dry-run 起動できます。
 
 ## テストと静的チェック
 
