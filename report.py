@@ -18,7 +18,8 @@ def save_report(trades, filename, result=None):
         "手数料込み利益率(%)",
         "手数料(円)",
         "決済後資産(円)",
-        "保有日数"
+        "保有日数",
+        "決済理由"
     ])
 
     for i, trade in enumerate(trades, start=1):
@@ -32,7 +33,8 @@ def save_report(trades, filename, result=None):
             round(trade["profit"], 2),
             round(trade.get("commission", 0), 0),
             round(trade.get("capital", 0), 0),
-            trade["hold_days"]
+            trade["hold_days"],
+            trade.get("exit_reason", "")
         ])
 
     ws["L1"] = "バックテスト結果"
