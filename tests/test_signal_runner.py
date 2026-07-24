@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 from signal_runner import run_signal_scan
+from dashboard import build_dashboard_html
 
 
 def test_run_signal_scan_creates_excel_report(tmp_path, monkeypatch):
@@ -64,3 +65,48 @@ def test_run_signal_scan_writes_score_columns_and_sorts_by_score(tmp_path, monke
     assert {"Score", "Rank", "StopPrice", "RiskPerShare", "MaxLossYen", "ReferenceShares", "ReferenceAmountYen", "PositionSizingReason"}.issubset(output_df.columns)
     assert output_df["Score"].tolist() == sorted(output_df["Score"].tolist(), reverse=True)
     assert output_df.iloc[0]["Ticker"] == "7203.T"
+
+
+def test_build_dashboard_html_generates_safe_report(tmp_path):
+    signal_path = tmp_path / "latest_signals.xlsx"
+    signal_df = pd.DataFrame([
+        {
+            "Ticker": "7203.T",
+            "Signal": "BUY",
+            "Score": 92.0,
+            "Rank": 1,
+            "Close": 1000.0,
+            "RSI": 70.0,
+            "MACD": 1.5,
+            "ATR": 10.0,
+            "ReferenceShares": 100,
+            "ReferenceAmountYen": 100000.0,
+            "StopPrice": 970.0,
+            "PositionSizingReason": "テスト用理由 <script>alert(1)</script>",
+        },
+        {
+            "Ticker": "7204.T",
+            "Signal": "HOLD",
+            "Score": 40.0,
+            "Rank": 2,
+            "Close": 500.0,
+            "RSI": 50.0,
+            "MACD": 0.0,
+            "ATR": 5.0,
+            "ReferenceShares": 0,
+            "ReferenceAmountYen": 0.0,
+            "StopPrice": 500.0,
+            "PositionSizingReason": "",
+        },
+    ])
+    signal_df.to_excel(signal_path, index=False)
+
+    html = build_dashboard_html(tmp_path)
+
+    assert "results/dashboard.html" in html
+    assert "BUY" in html and "HOLD" in html
+    assert "92" in html and "40" in html
+    assert "1,000" in html or "1000" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "実注文ではなく参考情報" in html
+    assert "秘密情報" not in html
