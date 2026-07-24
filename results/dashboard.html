@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>stock_v2 ダッシュボード</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f7fb; color: #222; }
+    .card { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .metric { background: #f8f9fa; border-radius: 8px; padding: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border: 1px solid #d0d7de; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #eef2ff; }
+    .signal-buy { background: #e6ffed; color: #166534; font-weight: 700; }
+    .signal-sell { background: #ffeaea; color: #b91c1c; font-weight: 700; }
+    .signal-hold { background: #f3f4f6; color: #374151; }
+    .note { color: #7c2d12; font-weight: 700; }
+    @media (max-width: 700px) { table { display:block; overflow-x:auto; white-space:nowrap; } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>stock_v2 ダッシュボード</h1>
+    <p class="note">実注文ではなく参考情報です。</p>
+    <p>生成日時: 2026-07-25 08:38:30</p>
+  </div>
+  <div class="card">
+    <h2>実行サマリー</h2>
+    <div class="grid">
+      <div class="metric"><strong>対象銘柄数</strong><br>10</div>
+      <div class="metric"><strong>BUY</strong><br>1</div>
+      <div class="metric"><strong>SELL</strong><br>0</div>
+      <div class="metric"><strong>HOLD</strong><br>9</div>
+      <div class="metric"><strong>最高スコア</strong><br>100.0</div>
+      <div class="metric"><strong>平均スコア</strong><br>57.0</div>
+      <div class="metric"><strong>参考運用資金</strong><br>1,000,000</div>
+      <div class="metric"><strong>サマリー</strong><br>-</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>銘柄ランキング</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>順位</th>
+          <th>Ticker</th>
+          <th>Signal</th>
+          <th>Score</th>
+          <th>Rank</th>
+          <th>Close</th>
+          <th>RSI</th>
+          <th>MACD</th>
+          <th>ATR</th>
+          <th>ReferenceShares</th>
+          <th>ReferenceAmountYen</th>
+          <th>StopPrice</th>
+          <th>PositionSizingReason</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+<td>1</td>
+<td>8306.T</td>
+<td class='signal-buy'>BUY</td>
+<td>100</td>
+<td>A</td>
+<td>3,754</td>
+<td>72.76595744680851</td>
+<td>131.9546460466877</td>
+<td>108.0</td>
+<td>0</td>
+<td>0</td>
+<td>3,641</td>
+<td>参考株数が100株未満のため0株としました。</td>
+</tr>
+<tr>
+<td>2</td>
+<td>9432.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>100</td>
+<td>A</td>
+<td>151</td>
+<td>68.5714379135545</td>
+<td>1.058512313681064</td>
+<td>2.092857360839844</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+<tr>
+<td>3</td>
+<td>6501.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>90</td>
+<td>A</td>
+<td>4,850</td>
+<td>62.22684703433923</td>
+<td>10.91955270559083</td>
+<td>137.5714285714286</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+<tr>
+<td>4</td>
+<td>6758.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>72</td>
+<td>B</td>
+<td>3,409</td>
+<td>53.05263157894736</td>
+<td>23.31215952163075</td>
+<td>76.28571428571429</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+<tr>
+<td>5</td>
+<td>6098.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>70</td>
+<td>B</td>
+<td>12,055</td>
+<td>52.29202037351443</td>
+<td>433.7060962678825</td>
+<td>387.8571428571428</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+<tr>
+<td>6</td>
+<td>7203.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>60</td>
+<td>B</td>
+<td>2,897</td>
+<td>57.11340206185567</td>
+<td>21.52534935291669</td>
+<td>60.42857142857143</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+<tr>
+<td>7</td>
+<td>6861.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>28</td>
+<td>D</td>
+<td>71,820</td>
+<td>28.21171634121275</td>
+<td>-1292.930785947319</td>
+<td>2350.0</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+<tr>
+<td>8</td>
+<td>4063.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>20</td>
+<td>D</td>
+<td>6,702</td>
+<td>45.4383464005702</td>
+<td>-43.71144526283751</td>
+<td>302.2142857142857</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+<tr>
+<td>9</td>
+<td>8035.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>16</td>
+<td>E</td>
+<td>62,660</td>
+<td>32.9339378238342</td>
+<td>-330.8487271337945</td>
+<td>4185.0</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+<tr>
+<td>10</td>
+<td>9984.T</td>
+<td class='signal-hold'>HOLD</td>
+<td>14</td>
+<td>E</td>
+<td>5,500</td>
+<td>40.15887025595763</td>
+<td>-217.0396306074199</td>
+<td>436.4285714285714</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+</tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>エラー表示</h2>
+    <ul>
+      <li>エラー0件</li>
+    </ul>
+  </div>
+  <div class="card">
+    <p>保存先: results/dashboard.html</p>
+  </div>
+</body>
+</html>
