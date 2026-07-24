@@ -32,9 +32,26 @@ class Order:
 class BrokerInterface(ABC):
     """証券会社ごとの接続処理を追加するための抽象インターフェース"""
 
+    def authenticate(self) -> None:
+        """証券会社への認証処理を実行する。"""
+        raise NotImplementedError("認証処理は未実装です。")
+
     @abstractmethod
     def submit_order(self, order: Order, available_cash: float) -> bool:
-        raise NotImplementedError
+        """注文を送信する。"""
+        raise NotImplementedError("注文送信は未実装です。")
+
+    def cancel_order(self, order_id: str) -> bool:
+        """注文を取り消す。"""
+        raise NotImplementedError("注文取消は未実装です。")
+
+    def get_balance(self) -> dict[str, Any]:
+        """口座残高を取得する。"""
+        raise NotImplementedError("残高取得は未実装です。")
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        """保有銘柄を取得する。"""
+        raise NotImplementedError("保有銘柄取得は未実装です。")
 
 
 class BrokerClient(BrokerInterface):
@@ -51,7 +68,12 @@ class BrokerFactory:
         if normalized_mode in {"dry_run", "dry-run", "paper"}:
             return DryRunBroker(**kwargs)
 
-        if normalized_mode in {"sbi", "sbi_sec", "sbi_securities", "live", "real"}:
+        if normalized_mode in {"sbi", "sbi_sec", "sbi_securities"}:
+            from sbi_broker import SbiBroker
+
+            return SbiBroker(**kwargs)
+
+        if normalized_mode in {"live", "real"}:
             raise NotImplementedError(
                 "実注文モードは未実装です。安全のため処理を停止しました。"
             )

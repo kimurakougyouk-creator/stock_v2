@@ -168,11 +168,11 @@ def test_broker_factory_stops_live_order_modes_for_safety():
     from execution import BrokerFactory
 
     try:
-        BrokerFactory.create("sbi")
+        BrokerFactory.create("live")
     except NotImplementedError as exc:
         assert "実注文モードは未実装" in str(exc)
     else:
-        raise AssertionError("BrokerFactory.create('sbi') should stop safely")
+        raise AssertionError("BrokerFactory.create('live') should stop safely")
 
 
 def test_broker_factory_rejects_unknown_mode():
