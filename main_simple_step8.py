@@ -17,7 +17,7 @@ from indicators import add_indicators
 from optimizer import find_best_setting, MIN_TRADES
 from report import save_report
 from mail import send_mail
-from execution import BrokerFactory, record_dry_run_orders
+from auto_trading_engine import run_dry_run_trading_cycle
 from stability import create_daily_logger
 from startup import run_startup_self_check, run_with_safe_shutdown
 
@@ -27,8 +27,6 @@ def main():
     run_startup_self_check(config, app_logger)
 
     summary = []
-    dry_run_broker = BrokerFactory.create(BROKER_MODE, order_file=DRY_RUN_ORDER_FILE)
-
     ticker_df = pd.read_csv("tickers.csv")
     tickers = ticker_df["Ticker"].tolist()
 
@@ -80,10 +78,11 @@ def main():
         print(f"利益確定率 = {best['take_profit']}  損切り率 = {best['stop_loss']}")
 
         save_report(result["trades"], f"{ticker}_report.xlsx", result)
-        dry_run_orders = record_dry_run_orders(
+        dry_run_orders = run_dry_run_trading_cycle(
             ticker,
             result,
-            dry_run_broker,
+            broker_mode=BROKER_MODE,
+            order_file=DRY_RUN_ORDER_FILE,
             available_cash=INITIAL_CAPITAL,
             dry_run=DRY_RUN,
         )
