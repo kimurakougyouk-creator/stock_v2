@@ -62,10 +62,20 @@ EMAIL_ADDRESS = _get_mail_setting("EMAIL_ADDRESS")
 APP_PASSWORD = _get_mail_setting("APP_PASSWORD")
 
 # ==========================
-# 初期資金
+# 資金設定
 # ==========================
 
+# バックテスト用の初期資金
 INITIAL_CAPITAL = 1_000_000
+
+# Ver.5 スコアリング用の参考運用資金
+TRADING_CAPITAL = 1_000_000
+
+# 1取引あたりの損失上限レート
+RISK_PER_TRADE_RATE = 0.01
+
+# 日本株の売買単位（株数）
+LOT_SIZE = 100
 
 # ==========================
 # バックテスト条件
