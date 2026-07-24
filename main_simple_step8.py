@@ -3,8 +3,6 @@ import yfinance as yf
 
 from config import PERIOD, INTERVAL, EMAIL_ADDRESS, APP_PASSWORD, INITIAL_CAPITAL
 from indicators import add_indicators
-from strategy import create_buy_signal
-from backtest import run_backtest
 from optimizer import find_best_setting, MIN_TRADES
 from report import save_report
 from mail import send_mail

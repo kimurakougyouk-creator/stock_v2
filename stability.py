@@ -1,14 +1,16 @@
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 class FatalOperationalError(RuntimeError):
     """安全停止すべき致命的な運用エラー"""
 
 
-def create_daily_logger(name, log_dir="logs", log_file=None, current_date=None):
+def create_daily_logger(name: str, log_dir: str = "logs", log_file: str | Path | None = None, current_date: str | None = None) -> logging.Logger:
     """日付ごとのログファイルへ保存するloggerを作成する"""
 
     if log_file is None:
@@ -31,7 +33,13 @@ def create_daily_logger(name, log_dir="logs", log_file=None, current_date=None):
     return logger
 
 
-def retry_operation(operation, retries=3, delay_seconds=1, retry_exceptions=(ConnectionError, TimeoutError), logger=None):
+def retry_operation(
+    operation: Callable[[], Any],
+    retries: int = 3,
+    delay_seconds: float = 1,
+    retry_exceptions: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError),
+    logger: logging.Logger | None = None,
+) -> Any:
     """ネットワーク等の一時的な失敗をリトライして自動復旧する"""
 
     last_error = None
@@ -48,12 +56,20 @@ def retry_operation(operation, retries=3, delay_seconds=1, retry_exceptions=(Con
                 time.sleep(delay_seconds)
 
     if logger:
-        logger.exception("operation failed after retries", exc_info=last_error)
+        logger.error(
+            "operation failed after retries",
+            exc_info=(type(last_error), last_error, last_error.__traceback__) if last_error else None,
+        )
 
     raise last_error
 
 
-def safe_execute(operation, logger, fatal_exceptions=(FatalOperationalError,), default=None):
+def safe_execute(
+    operation: Callable[[], Any],
+    logger: logging.Logger,
+    fatal_exceptions: tuple[type[BaseException], ...] = (FatalOperationalError,),
+    default: Any = None,
+) -> Any:
     """例外をログへ保存し、致命的エラーは安全停止する"""
 
     try:
@@ -66,7 +82,7 @@ def safe_execute(operation, logger, fatal_exceptions=(FatalOperationalError,), d
         return default
 
 
-def safe_stop(message, logger):
+def safe_stop(message: str, logger: logging.Logger) -> None:
     """致命的エラーとしてログに残し、安全停止用例外を送出する"""
 
     logger.error(message)
