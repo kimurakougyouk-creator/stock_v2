@@ -28,7 +28,9 @@ fi
 
 set -a
 # shellcheck disable=SC1091
-source .env
+if [ -f .env ]; then
+  source .env
+fi
 set +a
 
 echo "バックテストを開始します..."
