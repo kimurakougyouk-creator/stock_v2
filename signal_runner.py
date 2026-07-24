@@ -69,6 +69,20 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
             print(f"{ticker}: {signal_result['signal']}")
         except Exception as exc:  # pragma: no cover - defensive path
             errors.append({"ticker": ticker, "error": str(exc)})
+            record = {
+                "Ticker": ticker,
+                "Signal": "HOLD",
+                "Reason": f"判定中にエラーが発生したため、HOLDとして扱います。{exc}",
+                "Close": None,
+                "MA5": None,
+                "MA25": None,
+                "MA75": None,
+                "RSI": None,
+                "MACD": None,
+                "SignalLine": None,
+                "ATR": None,
+            }
+            records.append(record)
             print(f"{ticker}: 判定中にエラーが発生しました。{exc}")
 
     output_df = pd.DataFrame(records)

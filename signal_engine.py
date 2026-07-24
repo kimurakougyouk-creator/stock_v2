@@ -39,14 +39,14 @@ def determine_signal(df: pd.DataFrame) -> dict[str, Any]:
         reasons.append("最新価格が短期移動平均を下回っています。")
 
     if ma_short > ma_middle:
-        reasons.append("短期EMAが中期EMAを上回っています。")
+        reasons.append("短期移動平均が中期移動平均を上回っています。")
     else:
-        reasons.append("短期EMAが中期EMAを下回っています。")
+        reasons.append("短期移動平均が中期移動平均を下回っています。")
 
     if ma_middle > ma_long:
-        reasons.append("中期EMAが長期EMAを上回っています。")
+        reasons.append("中期移動平均が長期移動平均を上回っています。")
     else:
-        reasons.append("中期EMAが長期EMAを下回っています。")
+        reasons.append("中期移動平均が長期移動平均を下回っています。")
 
     if rsi >= 60:
         reasons.append("RSIが60以上で、買い圧力が強いと判断します。")
