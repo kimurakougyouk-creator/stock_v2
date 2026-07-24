@@ -4,15 +4,8 @@ import os
 # Gmail設定
 # ==========================
 
-EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "s.ossan777777@gmail.com")
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
-
-# ==========================
-# 運用モード
-# ==========================
-
-BROKER_MODE = os.getenv("BROKER_MODE", "dry_run")
-DRY_RUN = BROKER_MODE.lower() in {"dry_run", "dry-run", "paper"}
 
 # ==========================
 # 初期資金
@@ -68,5 +61,3 @@ TICKER_FILE = "tickers.csv"
 
 RESULT_DIR = "results"
 EXCEL_FILE = "results/backtest_result.xlsx"
-DRY_RUN_ORDER_FILE = os.getenv("DRY_RUN_ORDER_FILE", "results/dry_run_orders.json")
-LOG_DIR = os.getenv("LOG_DIR", "results")

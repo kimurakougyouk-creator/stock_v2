@@ -3,7 +3,7 @@ from email.mime.text import MIMEText
 
 
 def send_mail(sender, app_password, receiver, subject, body):
-    """Gmailでメール送信。設定不足やSMTP失敗時は安全にスキップする。"""
+    """Gmailでメール送信。設定不足や通信失敗時は日本語で案内して終了する。"""
 
     if not sender or not receiver or not app_password:
         print("メール設定が不足しているため、メール送信をスキップしました。")
@@ -20,7 +20,7 @@ def send_mail(sender, app_password, receiver, subject, body):
             smtp.login(sender, app_password)
             smtp.send_message(msg)
     except (OSError, smtplib.SMTPException) as exc:
-        print(f"メール送信に失敗しました: {exc}")
+        print(f"メール送信に失敗しました。Gmail設定またはネットワークを確認してください: {exc}")
         return False
 
     print("メール送信完了")

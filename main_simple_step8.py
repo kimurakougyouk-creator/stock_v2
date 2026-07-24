@@ -1,32 +1,16 @@
 import pandas as pd
 import yfinance as yf
 
-import config
-from config import (
-    APP_PASSWORD,
-    BROKER_MODE,
-    DRY_RUN,
-    DRY_RUN_ORDER_FILE,
-    EMAIL_ADDRESS,
-    INITIAL_CAPITAL,
-    INTERVAL,
-    LOG_DIR,
-    PERIOD,
-)
+from config import PERIOD, INTERVAL, EMAIL_ADDRESS, APP_PASSWORD
 from indicators import add_indicators
-from optimizer import find_best_setting, MIN_TRADES
+from optimizer import find_best_setting
 from report import save_report
 from mail import send_mail
-from auto_trading_engine import run_dry_run_trading_cycle
-from stability import create_daily_logger
-from startup import run_startup_self_check, run_with_safe_shutdown
 
 def main():
 
-    app_logger = create_daily_logger("startup", log_dir=LOG_DIR)
-    run_startup_self_check(config, app_logger)
-
     summary = []
+
     ticker_df = pd.read_csv("tickers.csv")
     tickers = ticker_df["Ticker"].tolist()
 
@@ -62,31 +46,15 @@ def main():
 
         result = best["result"]
 
-        if result is None:
-            print(f"最低売買回数({MIN_TRADES})を満たす設定がありませんでした。")
-            continue
-
         print(f"最適ATR : {best['atr']}")
         print(f"最適MA  : {best['ma']}")
         print(f"最適RSI : {best['rsi']}")
-        print(f"最適利益確定率 : {best['take_profit']}")
-        print(f"最適損切り率 : {best['stop_loss']}")
 
         print("おすすめ設定")
         print(f"ATR = {best['atr']}")
         print(f"MA = {best['ma']}  RSI = {best['rsi']}")
-        print(f"利益確定率 = {best['take_profit']}  損切り率 = {best['stop_loss']}")
 
-        save_report(result["trades"], f"{ticker}_report.xlsx", result)
-        dry_run_orders = run_dry_run_trading_cycle(
-            ticker,
-            result,
-            broker_mode=BROKER_MODE,
-            order_file=DRY_RUN_ORDER_FILE,
-            available_cash=INITIAL_CAPITAL,
-            dry_run=DRY_RUN,
-        )
-        print(f"dry-run模擬注文: {len(dry_run_orders)}件")
+        save_report(result["trades"], f"{ticker}_report.xlsx")
 
         settings_df = pd.DataFrame(
             all_results,
@@ -94,18 +62,13 @@ def main():
                 "ATR",
                 "MA",
                 "RSI",
-                "TakeProfit",
-                "StopLoss",
                 "WinRate",
                 "TotalProfit",
                 "TradeCount",
                 "ProfitPerTrade",
                 "ProfitYen",
-                "FinalCapital",
-                "TotalCommission",
                 "AverageHoldDays",
                 "MaxDrawdown",
-                "Eligible",
             ]
         )
 
@@ -116,8 +79,7 @@ def main():
         print(
             f"売買回数: {result['trade_count']}  "
             f"勝率: {result['win_rate']:.1f}%  "
-            f"利益率: {result['total_profit']:.2f}%  "
-            f"最終資産: {result['final_capital']:.0f}円"
+            f"利益率: {result['total_profit']:.2f}%"
         )
 
         summary.append([
@@ -127,12 +89,7 @@ def main():
             result["total_profit"],
             best["atr"],
             best["ma"],
-            best["rsi"],
-            best["take_profit"],
-            best["stop_loss"],
-            result["final_capital"],
-            result["net_profit_yen"],
-            result["total_commission"]
+            best["rsi"]
         ])
 
     summary_df = pd.DataFrame(
@@ -144,12 +101,7 @@ def main():
             "TotalProfit",
             "BestATR",
             "BestMA",
-            "BestRSI",
-            "BestTakeProfit",
-            "BestStopLoss",
-            "FinalCapital",
-            "NetProfitYen",
-            "TotalCommission"
+            "BestRSI"
         ]
     )
 
@@ -176,5 +128,4 @@ def main():
     )
 
 if __name__ == "__main__":
-    logger = create_daily_logger("startup", log_dir=LOG_DIR)
-    run_with_safe_shutdown(main, logger)
+    main()
