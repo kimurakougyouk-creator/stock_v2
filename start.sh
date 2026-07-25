@@ -41,3 +41,6 @@ python -m signal_runner
 
 echo "ダッシュボードを生成します..."
 python -m dashboard
+
+echo "変更追跡を実行します..."
+python -m change_tracker
