@@ -12,18 +12,6 @@ from config import EMAIL_ADDRESS, APP_PASSWORD
 from mail import send_mail
 
 
-def main() -> None:
-    from signal_runner import run_signal_scan
-
-    signal_result = run_signal_scan()
-    current_df = pd.DataFrame(signal_result.get("records", []))
-    update_change_tracking(current_df, base_dir=Path("results"))
-
-
-if __name__ == "__main__":
-    main()
-
-
 def _safe_numeric(value: Any) -> float:
     if value is None:
         return float("nan")
@@ -308,3 +296,15 @@ def update_change_tracking(current_df: pd.DataFrame | None, base_dir: Path | Non
         "previous_path": str(previous_path),
         "history_path": str(history_path),
     }
+
+
+def main() -> None:
+    from signal_runner import run_signal_scan
+
+    signal_result = run_signal_scan()
+    current_df = pd.DataFrame(signal_result.get("records", []))
+    update_change_tracking(current_df, base_dir=Path("results"))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,3 +1,6 @@
+import runpy
+import sys
+import types
 from pathlib import Path
 
 import pandas as pd
@@ -104,3 +107,17 @@ def test_handles_missing_columns_and_nan_without_stopping(tmp_path, monkeypatch)
 
     assert result["important_change_count"] >= 0
     assert (tmp_path / "latest_changes.xlsx").exists()
+
+
+def test_module_main_uses_update_change_tracking(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    fake_signal_runner = types.ModuleType("signal_runner")
+    fake_signal_runner.run_signal_scan = lambda: {"records": [{"Ticker": "7203.T", "Signal": "BUY", "Score": 90.0, "Rank": 1}]}
+    monkeypatch.setitem(sys.modules, "signal_runner", fake_signal_runner)
+
+    import change_tracker
+
+    runpy.run_module("change_tracker", run_name="__main__")
+
+    assert (tmp_path / "results" / "previous_signals.xlsx").exists()
