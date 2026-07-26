@@ -1,4 +1,5 @@
 from ai_asset_platform.portfolio.position import Position
+from ai_asset_platform.brokers.orders import FillResult
 
 
 class Portfolio:
@@ -17,3 +18,10 @@ class Portfolio:
     @property
     def total_cost(self):
         return sum(p.cost for p in self._positions.values())
+
+    def apply_fill(self, fill: FillResult):
+        self._positions[fill.symbol] = Position(
+            symbol=fill.symbol,
+            quantity=fill.quantity,
+            average_price=fill.fill_price,
+        )

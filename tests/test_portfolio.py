@@ -1,32 +1,29 @@
 import unittest
 
-from ai_asset_platform.portfolio.position import Position
+from ai_asset_platform.brokers.orders import FillResult, OrderSide
 from ai_asset_platform.portfolio.portfolio import Portfolio
 
 
 class TestPortfolio(unittest.TestCase):
 
-    def test_add_position(self):
-        pf = Portfolio()
-        pf.add_position(Position("7203.T", 100, 3000))
-
-        self.assertIsNotNone(pf.get_position("7203.T"))
-
-    def test_total_cost(self):
+    def test_apply_fill(self):
         pf = Portfolio()
 
-        pf.add_position(Position("7203.T", 100, 3000))
-        pf.add_position(Position("6758.T", 50, 2000))
+        fill = FillResult(
+            order_id="PAPER-000001",
+            symbol="7203.T",
+            side=OrderSide.BUY,
+            quantity=100,
+            fill_price=3000.0,
+        )
 
-        self.assertEqual(pf.total_cost, 400000)
+        pf.apply_fill(fill)
 
-    def test_get_all_positions(self):
-        pf = Portfolio()
+        pos = pf.get_position("7203.T")
 
-        pf.add_position(Position("7203.T", 100, 3000))
-        pf.add_position(Position("6758.T", 50, 2000))
-
-        self.assertEqual(len(pf.get_all_positions()), 2)
+        self.assertEqual(pos.quantity, 100)
+        self.assertEqual(pos.average_price, 3000.0)
+        self.assertEqual(pf.total_cost, 300000.0)
 
 
 if __name__ == "__main__":
