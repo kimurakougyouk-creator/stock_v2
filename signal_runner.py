@@ -9,6 +9,7 @@ import yfinance as yf
 from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PERIOD
 from indicators import add_indicators
 from mail import send_mail
+from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
 from signal_engine import determine_signal
 
@@ -39,6 +40,7 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
         ticker_df = pd.read_csv("tickers.csv")
         tickers = ticker_df["Ticker"].tolist()
 
+    all_settings = load_optimized_settings()
     records: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
@@ -50,8 +52,19 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
             continue
 
         try:
-            prepared = add_indicators(df.copy())
-            signal_result = determine_signal(prepared)
+            settings = get_ticker_settings(ticker, all_settings)
+            prepared = add_indicators(
+                df.copy(),
+                ma_short=settings["ma_short"],
+                ma_middle=settings["ma_middle"],
+                ma_long=settings["ma_long"],
+            )
+            signal_result = determine_signal(
+                prepared,
+                rsi_low=settings["rsi_low"],
+                rsi_high=settings["rsi_high"],
+                atr_multiplier=settings["atr_multiplier"],
+            )
             record = {
                 "Ticker": ticker,
                 "Signal": signal_result["signal"],

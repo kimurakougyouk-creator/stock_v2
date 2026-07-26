@@ -36,14 +36,18 @@ def _grade_from_score(score: float) -> str:
     return "E"
 
 
-def _calculate_position_sizing(price: float | None, atr: float | None) -> tuple[int, float, float, float, str]:
+def _calculate_position_sizing(
+    price: float | None,
+    atr: float | None,
+    atr_multiplier: float = 2.0,
+) -> tuple[int, float, float, float, str]:
     if price is None or price <= 0:
         return 0, 0.0, 0.0, 0.0, "価格が0以下のため、参考株数は0です。"
 
     if atr is None or atr <= 0:
         return 0, 0.0, 0.0, 0.0, "ATRが0または未計測のため、参考株数は0です。"
 
-    stop_price = max(price * 0.97, price - (atr * 2))
+    stop_price = max(price * 0.97, price - (atr * atr_multiplier))
     risk_per_share = price - stop_price
 
     if risk_per_share <= 0:
@@ -61,8 +65,15 @@ def _calculate_position_sizing(price: float | None, atr: float | None) -> tuple[
     return reference_shares, stop_price, risk_per_share, max_loss_yen, f"損失許容と資金基準の小さい方を採用し、{reference_shares}株としました。"
 
 
-def determine_signal(df: pd.DataFrame) -> dict[str, Any]:
-    """最新日のデータに基づいて BUY / SELL / HOLD を判定し、スコアと参考株数を返す。"""
+def determine_signal(
+    df: pd.DataFrame,
+    rsi_low: float = 60,
+    rsi_high: float = 70,
+    atr_multiplier: float = 2.0,
+) -> dict[str, Any]:
+    """銘柄別設定を使ってBUY・SELL・HOLDを判定する。"""
+    rsi_sell = 100 - rsi_low
+    rsi_strong_sell = 100 - rsi_high
     default_result = {
         "signal": "HOLD",
         "reason": "株価データが取得できませんでした。",
@@ -121,14 +132,14 @@ def determine_signal(df: pd.DataFrame) -> dict[str, Any]:
 
     if rsi is None:
         reasons.append("RSIが取得できないため、評価を保留します。")
-    elif rsi >= 70:
-        reasons.append("RSIが70以上で、買い圧力が強いと判断します。")
-    elif rsi >= 60:
-        reasons.append("RSIが60以上で、買い圧力がやや強いです。")
-    elif rsi <= 30:
-        reasons.append("RSIが30以下で、売り圧力が強いと判断します。")
-    elif rsi <= 40:
-        reasons.append("RSIが40以下で、売り圧力がやや強いです。")
+    elif rsi >= rsi_high:
+        reasons.append(f"RSIが{rsi_high:g}以上で、買い圧力が強いと判断します。")
+    elif rsi >= rsi_low:
+        reasons.append(f"RSIが{rsi_low:g}以上で、買い圧力がやや強いです。")
+    elif rsi <= rsi_strong_sell:
+        reasons.append(f"RSIが{rsi_strong_sell:g}以下で、売り圧力が強いと判断します。")
+    elif rsi <= rsi_sell:
+        reasons.append(f"RSIが{rsi_sell:g}以下で、売り圧力がやや強いです。")
     else:
         reasons.append("RSIは中立圏にあり、強い方向性は見えません。")
 
@@ -188,15 +199,15 @@ def determine_signal(df: pd.DataFrame) -> dict[str, Any]:
             score -= 6
 
     if rsi is not None:
-        if rsi >= 70:
+        if rsi >= rsi_high:
             score += 16
-        elif rsi >= 60:
+        elif rsi >= rsi_low:
             score += 10
         elif rsi >= 50:
             score += 4
-        elif rsi <= 30:
+        elif rsi <= rsi_strong_sell:
             score -= 16
-        elif rsi <= 40:
+        elif rsi <= rsi_sell:
             score -= 10
 
     if macd is not None and signal_line is not None:
@@ -222,9 +233,9 @@ def determine_signal(df: pd.DataFrame) -> dict[str, Any]:
 
     signal = "HOLD"
     if price is not None and ma_short is not None and ma_middle is not None and ma_long is not None and rsi is not None and macd is not None and signal_line is not None:
-        if price > ma_short and ma_short > ma_middle and ma_middle > ma_long and rsi >= 60 and macd > signal_line:
+        if price > ma_short and ma_short > ma_middle and ma_middle > ma_long and rsi >= rsi_low and macd > signal_line:
             signal = "BUY"
-        elif price < ma_short and ma_short < ma_middle and ma_middle < ma_long and rsi <= 40 and macd < signal_line:
+        elif price < ma_short and ma_short < ma_middle and ma_middle < ma_long and rsi <= rsi_sell and macd < signal_line:
             signal = "SELL"
 
     reference_shares = 0
@@ -235,7 +246,7 @@ def determine_signal(df: pd.DataFrame) -> dict[str, Any]:
     position_sizing_reason = "BUY判定ではないため、参考株数は0です。"
 
     if signal == "BUY":
-        reference_shares, stop_price, risk_per_share, max_loss_yen, position_sizing_reason = _calculate_position_sizing(price, atr)
+        reference_shares, stop_price, risk_per_share, max_loss_yen, position_sizing_reason = _calculate_position_sizing(price, atr, atr_multiplier)
         reference_amount_yen = reference_shares * price if price is not None else None
     else:
         position_sizing_reason = "BUY判定ではないため、参考株数は0です。"
