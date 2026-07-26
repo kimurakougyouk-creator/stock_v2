@@ -71,7 +71,12 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
                 positions = get_open_positions()
                 held_shares = int(positions.get(ticker, 0))
 
-                if signal_result["signal"] == "SELL" and held_shares <= 0:
+                if signal_result["signal"] == "BUY" and held_shares > 0:
+                    print(
+                        f"{ticker}: BUYシグナルですが、"
+                        f"すでに{held_shares}株保有しているため注文を見送りました。"
+                    )
+                elif signal_result["signal"] == "SELL" and held_shares <= 0:
                     print(
                         f"{ticker}: SELLシグナルですが、"
                         "保有していないため注文を見送りました。"
