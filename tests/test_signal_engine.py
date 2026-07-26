@@ -132,3 +132,29 @@ def test_determine_signal_returns_hold_when_indicators_are_missing():
     assert result["signal"] == "HOLD"
     assert result["reference_shares"] == 0
     assert 0 <= result["score"] <= 100
+
+
+def test_determine_signal_calculates_position_sizing_for_buy_signal():
+    df = pd.DataFrame([
+        {
+            "Close": 1000.0,
+            "MA5": 950.0,
+            "MA25": 900.0,
+            "MA75": 850.0,
+            "RSI": 65.0,
+            "MACD": 10.0,
+            "Signal": 5.0,
+            "ATR": 20.0,
+            "Volume": 2_000.0,
+            "VOL20": 1_000.0,
+        }
+    ])
+
+    result = determine_signal(df)
+
+    assert result["signal"] == "BUY"
+    assert result["stop_price"] == 970.0
+    assert result["risk_per_share"] == 30.0
+    assert result["max_loss_yen"] == 10_000.0
+    assert result["reference_shares"] == 300
+    assert result["reference_amount_yen"] == 300_000.0
