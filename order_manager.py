@@ -141,5 +141,14 @@ def save_portfolio_report(current_prices: dict[str, float], filename: str = "por
 
     report = generate_portfolio_report(current_prices)
 
-    with open(filename, "w", encoding="utf-8") as f:
+    with open(filename, "a+", encoding="utf-8") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+
+        if file_size > 0:
+            f.seek(file_size - 1)
+            if f.read(1) != "\n":
+                f.write("\n")
+
         f.write(report)
+        f.write("\n" + "=" * 40 + "\n")
