@@ -119,3 +119,16 @@ def test_determine_signal_returns_safe_default_for_empty_dataframe():
     assert result["grade"] == "E"
     assert result["reference_shares"] == 0
     assert "データ" in result["reason"]
+
+def test_determine_signal_returns_hold_when_indicators_are_missing():
+    df = pd.DataFrame([
+        {
+            "Close": 100.0,
+        }
+    ])
+
+    result = determine_signal(df)
+
+    assert result["signal"] == "HOLD"
+    assert result["reference_shares"] == 0
+    assert 0 <= result["score"] <= 100
