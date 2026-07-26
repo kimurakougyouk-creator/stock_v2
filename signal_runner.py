@@ -9,6 +9,7 @@ import yfinance as yf
 from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PERIOD
 from indicators import add_indicators
 from mail import send_mail
+from report_formatter import format_signal_report
 from signal_engine import determine_signal
 
 
@@ -110,6 +111,7 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
     output_dir = _get_result_dir()
     output_path = output_dir / "latest_signals.xlsx"
     output_df.to_excel(output_path, index=False)
+    format_signal_report(output_path)
 
     if not output_df.empty:
         actionable = output_df[output_df["Signal"].isin(["BUY", "SELL"])]
