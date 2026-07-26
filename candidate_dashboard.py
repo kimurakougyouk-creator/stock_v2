@@ -138,15 +138,6 @@ def build_candidate_dashboard_html(base_dir: Path | None = None) -> str:
     tr.rank-third td {{
       background: linear-gradient(90deg,#fff3e0,#d7a86e);
     }}
-    tr.rank-first td {{
-      background: linear-gradient(90deg, #fff8dc, #ffe082);
-    }}
-    tr.rank-second td {{
-      background: linear-gradient(90deg, #f5f5f5, #d9d9d9);
-    }}
-    tr.rank-third td {{
-      background: linear-gradient(90deg, #fff3e0, #d7a86e);
-    }}
     .note {{ color: #7c2d12; font-weight: 700; }}
     @media (max-width: 700px) {{ table {{ display: block; overflow-x: auto; white-space: nowrap; }} }}
   </style>
