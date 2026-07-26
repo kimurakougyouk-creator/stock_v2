@@ -69,7 +69,7 @@ def build_candidate_dashboard_html(base_dir: Path | None = None) -> str:
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if candidates.empty:
-        rows_html = "<tr><td colspan='7'>現在、BUY・SELL候補はありません。</td></tr>"
+        rows_html = f"<tr><td colspan='{len(DISPLAY_COLUMNS)}'>現在、BUY・SELL候補はありません。</td></tr>"
     else:
         rows = []
         for _, row in candidates.iterrows():
@@ -107,7 +107,21 @@ def build_candidate_dashboard_html(base_dir: Path | None = None) -> str:
     <p>生成日時: {generated_at}</p>
     <table>
       <thead>
-        <tr><th>順位</th><th>Ticker</th><th>Signal</th><th>Score</th><th>Price</th><th>ATR</th><th>StopPrice</th></tr>
+        <tr>
+          <th>順位</th>
+          <th>銘柄コード</th>
+          <th>売買判断</th>
+          <th>スコア</th>
+          <th>評価</th>
+          <th>現在価格</th>
+          <th>ATR</th>
+          <th>損切価格</th>
+          <th>参考株数</th>
+          <th>参考金額</th>
+          <th>最大損失額</th>
+          <th>株数の計算理由</th>
+          <th>売買判断の理由</th>
+        </tr>
       </thead>
       <tbody>{rows_html}</tbody>
     </table>
