@@ -9,6 +9,7 @@ import yfinance as yf
 from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PERIOD
 from indicators import add_indicators
 from mail import send_mail
+from order_manager import create_paper_order
 from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
 from signal_engine import determine_signal
@@ -65,6 +66,26 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
                 rsi_high=settings["rsi_high"],
                 atr_multiplier=settings["atr_multiplier"],
             )
+            if signal_result["signal"] in {"BUY", "SELL"}:
+                shares = int(signal_result["reference_shares"] or 0)
+
+                if shares > 0:
+                    paper_order = create_paper_order(
+                        ticker=ticker,
+                        signal=signal_result["signal"],
+                        shares=shares,
+                        reference_price=float(signal_result["price"]),
+                    )
+                    print(
+                        f"{ticker}: 模擬注文を記録しました "
+                        f"({paper_order['side']} {paper_order['shares']}株)"
+                    )
+                else:
+                    print(
+                        f"{ticker}: {signal_result['signal']}シグナルですが、"
+                        "資金管理により注文を見送りました。"
+                    )
+
             record = {
                 "Ticker": ticker,
                 "Signal": signal_result["signal"],
