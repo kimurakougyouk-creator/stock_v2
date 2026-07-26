@@ -9,7 +9,7 @@ import yfinance as yf
 from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PERIOD
 from indicators import add_indicators
 from mail import send_mail
-from order_manager import create_paper_order
+from order_manager import create_paper_order, get_open_positions
 from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
 from signal_engine import determine_signal
@@ -68,12 +68,24 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
             )
             if signal_result["signal"] in {"BUY", "SELL"}:
                 shares = int(signal_result["reference_shares"] or 0)
+                positions = get_open_positions()
+                held_shares = int(positions.get(ticker, 0))
 
-                if shares > 0:
+                if signal_result["signal"] == "SELL" and held_shares <= 0:
+                    print(
+                        f"{ticker}: SELLシグナルですが、"
+                        "保有していないため注文を見送りました。"
+                    )
+                elif shares > 0:
+                    order_shares = (
+                        min(shares, held_shares)
+                        if signal_result["signal"] == "SELL"
+                        else shares
+                    )
                     paper_order = create_paper_order(
                         ticker=ticker,
                         signal=signal_result["signal"],
-                        shares=shares,
+                        shares=order_shares,
                         reference_price=float(signal_result["price"]),
                     )
                     print(
