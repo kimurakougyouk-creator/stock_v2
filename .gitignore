@@ -226,3 +226,4 @@ backup/
 # Generated reports
 results/latest_signals.xlsx
 results/optimization_result.xlsx
+indicators_v24_backup.py
