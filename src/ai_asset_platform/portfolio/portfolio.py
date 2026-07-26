@@ -5,6 +5,7 @@ from ai_asset_platform.portfolio.position import Position
 class Portfolio:
     def __init__(self) -> None:
         self._positions: dict[str, Position] = {}
+        self._realized_pnl = 0.0
 
     def add_position(self, position: Position) -> None:
         self._positions[position.symbol] = position
@@ -19,6 +20,10 @@ class Portfolio:
     def total_cost(self) -> float:
         return sum(position.cost for position in self._positions.values())
 
+    @property
+    def realized_pnl(self) -> float:
+        return self._realized_pnl
+
     def apply_fill(self, fill: FillResult) -> None:
         current = self.get_position(fill.symbol)
 
@@ -28,6 +33,11 @@ class Portfolio:
 
             if fill.quantity > current.quantity:
                 raise ValueError("保有数量を超えて売却できません")
+
+            profit = (
+                fill.fill_price - current.average_price
+            ) * fill.quantity
+            self._realized_pnl += profit
 
             remaining = current.quantity - fill.quantity
 
