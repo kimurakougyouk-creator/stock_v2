@@ -13,9 +13,15 @@ DISPLAY_COLUMNS = [
     "Ticker",
     "Signal",
     "Score",
+    "Grade",
     "Close",
     "ATR",
     "StopPrice",
+    "ReferenceShares",
+    "ReferenceAmountYen",
+    "MaxLossYen",
+    "PositionSizingReason",
+    "Reason",
 ]
 
 
