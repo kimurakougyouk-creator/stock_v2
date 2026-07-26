@@ -74,12 +74,25 @@ def build_candidate_dashboard_html(base_dir: Path | None = None) -> str:
         rows = []
         for _, row in candidates.iterrows():
             signal = str(row.get("Signal", "-")).upper()
-            css_class = "buy" if signal == "BUY" else "sell"
+            signal_class = "buy" if signal == "BUY" else "sell"
+
+            try:
+                score = float(row.get("Score", 0))
+            except (TypeError, ValueError):
+                score = 0
+
+            if score >= 80:
+                score_class = "score-high"
+            elif score >= 60:
+                score_class = "score-medium"
+            else:
+                score_class = "score-low"
+
             cells = "".join(
                 f"<td>{html.escape(_format_value(row.get(column)))}</td>"
                 for column in DISPLAY_COLUMNS
             )
-            rows.append(f"<tr class='{css_class}'>{cells}</tr>")
+            rows.append(f"<tr class='{signal_class} {score_class}'>{cells}</tr>")
         rows_html = "\n".join(rows)
 
     return f"""<!DOCTYPE html>
@@ -96,6 +109,10 @@ def build_candidate_dashboard_html(base_dir: Path | None = None) -> str:
     th {{ background: #eef2ff; }}
     tr.buy td {{ background: #e6ffed; }}
     tr.sell td {{ background: #ffeaea; }}
+    tr.score-high td {{ font-weight: 700; border-top: 3px solid #f59e0b; border-bottom: 3px solid #f59e0b; }}
+    tr.score-medium td {{ font-weight: 600; }}
+    tr.score-low td {{ opacity: .82; }}
+    tr:hover td {{ filter: brightness(.97); }}
     .note {{ color: #7c2d12; font-weight: 700; }}
     @media (max-width: 700px) {{ table {{ display: block; overflow-x: auto; white-space: nowrap; }} }}
   </style>
