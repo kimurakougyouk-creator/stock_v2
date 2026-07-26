@@ -78,3 +78,26 @@ def get_open_positions() -> dict[str, int]:
             positions[ticker] = positions.get(ticker, 0) - shares
 
     return {ticker: shares for ticker, shares in positions.items() if shares != 0}
+
+
+def calculate_unrealized_pnl(current_prices: dict[str, float]) -> dict[str, float]:
+    """現在価格から保有銘柄の含み損益を計算します。"""
+
+    pnl = {}
+
+    for order in load_paper_orders():
+        if order["side"] != "BUY":
+            continue
+
+        ticker = order["ticker"]
+
+        if ticker not in current_prices:
+            continue
+
+        buy_price = float(order["reference_price"])
+        current_price = float(current_prices[ticker])
+        shares = int(order["shares"])
+
+        pnl[ticker] = (current_price - buy_price) * shares
+
+    return pnl
