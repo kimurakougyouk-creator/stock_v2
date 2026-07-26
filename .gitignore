@@ -222,3 +222,7 @@ backup/
 *.save
 .env
 .env.*
+
+# Generated reports
+results/latest_signals.xlsx
+results/optimization_result.xlsx
