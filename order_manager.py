@@ -134,3 +134,12 @@ def generate_portfolio_report(current_prices: dict[str, float]) -> str:
             lines.append(f"  {ticker}: {profit:,.0f}円")
 
     return "\n".join(lines)
+
+
+def save_portfolio_report(current_prices: dict[str, float], filename: str = "portfolio_report.txt") -> None:
+    """資産レポートをテキストファイルへ保存します。"""
+
+    report = generate_portfolio_report(current_prices)
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(report)
