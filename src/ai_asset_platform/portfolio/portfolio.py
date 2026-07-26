@@ -24,6 +24,32 @@ class Portfolio:
     def realized_pnl(self) -> float:
         return self._realized_pnl
 
+
+    def calculate_unrealized_pnl(
+        self,
+        market_prices: dict[str, float],
+    ) -> float:
+        total = 0.0
+
+        for symbol, position in self._positions.items():
+            if symbol not in market_prices:
+                raise ValueError(
+                    f"{symbol} の現在価格が指定されていません"
+                )
+
+            market_price = market_prices[symbol]
+
+            if market_price <= 0:
+                raise ValueError(
+                    "現在価格は0より大きくしてください"
+                )
+
+            total += (
+                market_price - position.average_price
+            ) * position.quantity
+
+        return total
+
     def apply_fill(self, fill: FillResult) -> None:
         current = self.get_position(fill.symbol)
 

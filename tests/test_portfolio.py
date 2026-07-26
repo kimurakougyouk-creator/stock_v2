@@ -85,3 +85,70 @@ class TestPortfolio(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestPortfolioUnrealizedPnl(unittest.TestCase):
+    def test_calculates_unrealized_profit(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+
+        result = portfolio.calculate_unrealized_pnl(
+            {"7203.T": 3200.0}
+        )
+
+        self.assertEqual(result, 20000.0)
+
+    def test_calculates_combined_unrealized_pnl(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+        portfolio.apply_fill(
+            FillResult(
+                "2",
+                "6758.T",
+                OrderSide.BUY,
+                50,
+                2000.0,
+            )
+        )
+
+        result = portfolio.calculate_unrealized_pnl(
+            {
+                "7203.T": 3200.0,
+                "6758.T": 1900.0,
+            }
+        )
+
+        self.assertEqual(result, 15000.0)
+
+    def test_missing_market_price_is_rejected(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+
+        with self.assertRaises(ValueError):
+            portfolio.calculate_unrealized_pnl({})
