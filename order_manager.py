@@ -126,6 +126,7 @@ def generate_portfolio_report(current_prices: dict[str, float]) -> str:
     pnl = calculate_unrealized_pnl(current_prices)
 
     lines = []
+    lines.append(f"日時: {datetime.now():%Y-%m-%d %H:%M:%S}")
     lines.append(f"資産評価額: {value:,.0f}円")
 
     if pnl:
