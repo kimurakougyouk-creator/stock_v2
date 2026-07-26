@@ -153,3 +153,24 @@ def save_portfolio_report(current_prices: dict[str, float], filename: str = "por
 
         f.write(report)
         f.write("\n" + "=" * 40 + "\n")
+
+def generate_order_list():
+    """保存されているペーパー注文を見やすい一覧にする。"""
+    orders = load_paper_orders()
+
+    lines = ["===== 注文一覧 ====="]
+
+    if not orders:
+        lines.append("注文はありません")
+        return "\n".join(lines)
+
+    for i, order in enumerate(orders, 1):
+        lines.append(
+            f"{i}. {order['ticker']} "
+            f"{order['side']} "
+            f"{order['shares']}株 "
+            f"@ {order['reference_price']:,.0f}円 "
+            f"({order['status']})"
+        )
+
+    return "\n".join(lines)
