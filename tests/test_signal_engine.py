@@ -109,3 +109,13 @@ def test_determine_signal_keeps_score_between_zero_and_hundred():
 
     assert 0 <= result["score"] <= 100
     assert result["grade"] == "C"
+
+
+def test_determine_signal_returns_safe_default_for_empty_dataframe():
+    result = determine_signal(pd.DataFrame())
+
+    assert result["signal"] == "HOLD"
+    assert result["score"] == 0
+    assert result["grade"] == "E"
+    assert result["reference_shares"] == 0
+    assert "データ" in result["reason"]
