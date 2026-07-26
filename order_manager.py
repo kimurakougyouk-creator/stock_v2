@@ -61,3 +61,20 @@ def load_paper_orders() -> list[dict]:
                 orders.append(json.loads(line))
 
     return orders
+
+
+def get_open_positions() -> dict[str, int]:
+    """現在の保有株数を銘柄ごとに集計します。"""
+
+    positions = {}
+
+    for order in load_paper_orders():
+        ticker = order["ticker"]
+        shares = int(order["shares"])
+
+        if order["side"] == "BUY":
+            positions[ticker] = positions.get(ticker, 0) + shares
+        elif order["side"] == "SELL":
+            positions[ticker] = positions.get(ticker, 0) - shares
+
+    return {ticker: shares for ticker, shares in positions.items() if shares != 0}
