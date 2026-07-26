@@ -69,3 +69,37 @@ class TestOrderRequest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOrderResult(unittest.TestCase):
+    def test_accepted_order_result(self):
+        from ai_asset_platform.brokers.orders import OrderResult, OrderStatus
+
+        result = OrderResult(
+            order_id="PAPER-0001",
+            status=OrderStatus.ACCEPTED,
+            message="模擬注文を受け付けました",
+        )
+
+        self.assertEqual(result.order_id, "PAPER-0001")
+        self.assertTrue(result.is_accepted)
+
+    def test_rejected_order_result(self):
+        from ai_asset_platform.brokers.orders import OrderResult, OrderStatus
+
+        result = OrderResult(
+            order_id="PAPER-0002",
+            status=OrderStatus.REJECTED,
+            message="注文を拒否しました",
+        )
+
+        self.assertFalse(result.is_accepted)
+
+    def test_empty_order_id_is_rejected(self):
+        from ai_asset_platform.brokers.orders import OrderResult, OrderStatus
+
+        with self.assertRaises(ValueError):
+            OrderResult(
+                order_id=" ",
+                status=OrderStatus.REJECTED,
+            )

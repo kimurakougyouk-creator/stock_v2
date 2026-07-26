@@ -37,3 +37,23 @@ class OrderRequest:
 
         if self.order_type is OrderType.MARKET and self.limit_price is not None:
             raise ValueError("成行注文に指値価格は指定できません")
+
+
+class OrderStatus(str, Enum):
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+
+
+@dataclass(frozen=True)
+class OrderResult:
+    order_id: str
+    status: OrderStatus
+    message: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.order_id.strip():
+            raise ValueError("注文IDは必須です")
+
+    @property
+    def is_accepted(self) -> bool:
+        return self.status is OrderStatus.ACCEPTED
