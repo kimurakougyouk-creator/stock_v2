@@ -4,6 +4,7 @@ SBI証券の模擬接続アダプター
 
 from ai_asset_platform.brokers.base import BrokerAdapter
 from ai_asset_platform.brokers.orders import (
+    FillResult,
     OrderRecord,
     OrderRequest,
     OrderResult,
@@ -55,3 +56,17 @@ class SbiPaperAdapter(BrokerAdapter):
 
     def get_order_history(self) -> list[OrderRecord]:
         return self._order_history.copy()
+
+
+    def fill_order(self, order: OrderRequest, price: float) -> FillResult:
+        result = self.place_order(order)
+        if not result.is_accepted:
+            raise RuntimeError("注文が受け付けられていません")
+
+        return FillResult(
+            order_id=result.order_id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            fill_price=price,
+        )

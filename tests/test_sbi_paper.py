@@ -42,3 +42,33 @@ class TestSbiPaperAdapter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_fill_order(self):
+        from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
+
+        self.broker.connect()
+
+        fill = self.broker.fill_order(
+            OrderRequest("7203.T", OrderSide.BUY, 100),
+            3050.0,
+        )
+
+        self.assertEqual(fill.symbol, "7203.T")
+        self.assertEqual(fill.fill_price, 3050.0)
+        self.assertEqual(fill.amount, 305000.0)
+
+
+    def test_fill_order(self):
+        from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
+
+        self.broker.connect()
+
+        fill = self.broker.fill_order(
+            OrderRequest("7203.T", OrderSide.BUY, 100),
+            3050.0,
+        )
+
+        self.assertEqual(fill.symbol, "7203.T")
+        self.assertEqual(fill.fill_price, 3050.0)
+        self.assertEqual(fill.amount, 305000.0)
