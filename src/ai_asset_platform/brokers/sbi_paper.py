@@ -4,6 +4,7 @@ SBI証券の模擬接続アダプター
 
 from ai_asset_platform.brokers.base import BrokerAdapter
 from ai_asset_platform.brokers.orders import (
+    OrderRecord,
     OrderRequest,
     OrderResult,
     OrderStatus,
@@ -14,7 +15,7 @@ class SbiPaperAdapter(BrokerAdapter):
     def __init__(self) -> None:
         self._connected = False
         self._next_order_id = 1
-        self._order_history: list[OrderResult] = []
+        self._order_history: list[OrderRecord] = []
 
     @property
     def name(self) -> str:
@@ -37,7 +38,7 @@ class SbiPaperAdapter(BrokerAdapter):
                 status=OrderStatus.REJECTED,
                 message="未接続です",
             )
-            self._order_history.append(result)
+            self._order_history.append(OrderRecord(order, result))
             return result
 
         order_id = f"PAPER-{self._next_order_id:06d}"
@@ -49,8 +50,8 @@ class SbiPaperAdapter(BrokerAdapter):
             message="模擬注文を受け付けました",
         )
 
-        self._order_history.append(result)
+        self._order_history.append(OrderRecord(order, result))
         return result
 
-    def get_order_history(self) -> list[OrderResult]:
+    def get_order_history(self) -> list[OrderRecord]:
         return self._order_history.copy()

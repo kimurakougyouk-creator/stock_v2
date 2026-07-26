@@ -57,3 +57,9 @@ class OrderResult:
     @property
     def is_accepted(self) -> bool:
         return self.status is OrderStatus.ACCEPTED
+
+
+@dataclass(frozen=True)
+class OrderRecord:
+    request: OrderRequest
+    result: OrderResult
