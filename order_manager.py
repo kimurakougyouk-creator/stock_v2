@@ -117,3 +117,20 @@ def calculate_portfolio_value(current_prices: dict[str, float]) -> float:
         total += current_prices[ticker] * shares
 
     return total
+
+
+def generate_portfolio_report(current_prices: dict[str, float]) -> str:
+    """資産状況レポートを作成します。"""
+
+    value = calculate_portfolio_value(current_prices)
+    pnl = calculate_unrealized_pnl(current_prices)
+
+    lines = []
+    lines.append(f"資産評価額: {value:,.0f}円")
+
+    if pnl:
+        lines.append("含み損益:")
+        for ticker, profit in pnl.items():
+            lines.append(f"  {ticker}: {profit:,.0f}円")
+
+    return "\n".join(lines)
