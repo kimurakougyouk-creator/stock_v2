@@ -101,3 +101,19 @@ def calculate_unrealized_pnl(current_prices: dict[str, float]) -> dict[str, floa
         pnl[ticker] = (current_price - buy_price) * shares
 
     return pnl
+
+
+def calculate_portfolio_value(current_prices: dict[str, float]) -> float:
+    """現在の保有資産評価額を計算します。"""
+
+    total = 0.0
+
+    positions = get_open_positions()
+
+    for ticker, shares in positions.items():
+        if ticker not in current_prices:
+            continue
+
+        total += current_prices[ticker] * shares
+
+    return total
