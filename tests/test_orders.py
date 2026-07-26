@@ -103,3 +103,42 @@ class TestOrderResult(unittest.TestCase):
                 order_id=" ",
                 status=OrderStatus.REJECTED,
             )
+
+
+class TestFillResult(unittest.TestCase):
+    def test_valid_fill_result(self):
+        from ai_asset_platform.brokers.orders import FillResult
+
+        fill = FillResult(
+            order_id="PAPER-000001",
+            symbol="7203.T",
+            side=OrderSide.BUY,
+            quantity=100,
+            fill_price=3000.0,
+        )
+
+        self.assertEqual(fill.amount, 300000.0)
+
+    def test_invalid_fill_price_is_rejected(self):
+        from ai_asset_platform.brokers.orders import FillResult
+
+        with self.assertRaises(ValueError):
+            FillResult(
+                order_id="PAPER-000001",
+                symbol="7203.T",
+                side=OrderSide.BUY,
+                quantity=100,
+                fill_price=0,
+            )
+
+    def test_invalid_fill_quantity_is_rejected(self):
+        from ai_asset_platform.brokers.orders import FillResult
+
+        with self.assertRaises(ValueError):
+            FillResult(
+                order_id="PAPER-000001",
+                symbol="7203.T",
+                side=OrderSide.BUY,
+                quantity=0,
+                fill_price=3000.0,
+            )

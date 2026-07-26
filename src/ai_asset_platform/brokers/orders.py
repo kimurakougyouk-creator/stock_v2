@@ -63,3 +63,29 @@ class OrderResult:
 class OrderRecord:
     request: OrderRequest
     result: OrderResult
+
+
+@dataclass(frozen=True)
+class FillResult:
+    order_id: str
+    symbol: str
+    side: OrderSide
+    quantity: int
+    fill_price: float
+
+    def __post_init__(self) -> None:
+        if not self.order_id.strip():
+            raise ValueError("注文IDは必須です")
+
+        if not self.symbol.strip():
+            raise ValueError("銘柄コードは必須です")
+
+        if self.quantity <= 0:
+            raise ValueError("約定数量は1以上にしてください")
+
+        if self.fill_price <= 0:
+            raise ValueError("約定価格は0より大きくしてください")
+
+    @property
+    def amount(self) -> float:
+        return self.quantity * self.fill_price
