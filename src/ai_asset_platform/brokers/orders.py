@@ -1,0 +1,39 @@
+"""
+注文データの共通形式
+"""
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class OrderSide(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class OrderType(str, Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+
+@dataclass(frozen=True)
+class OrderRequest:
+    symbol: str
+    side: OrderSide
+    quantity: int
+    order_type: OrderType = OrderType.MARKET
+    limit_price: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.symbol.strip():
+            raise ValueError("銘柄コードは必須です")
+
+        if self.quantity <= 0:
+            raise ValueError("注文数量は1以上にしてください")
+
+        if self.order_type is OrderType.LIMIT:
+            if self.limit_price is None or self.limit_price <= 0:
+                raise ValueError("指値注文には正しい価格が必要です")
+
+        if self.order_type is OrderType.MARKET and self.limit_price is not None:
+            raise ValueError("成行注文に指値価格は指定できません")
