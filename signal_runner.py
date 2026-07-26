@@ -115,12 +115,38 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
         actionable = output_df[output_df["Signal"].isin(["BUY", "SELL"])]
         if not actionable.empty:
             subject = "売買シグナル通知"
-            body_lines = ["最新のシグナル一覧です。", ""]
+            body_lines = ["最新の売買シグナル一覧です。", ""]
             for _, row in actionable.iterrows():
-                summary = f"- {row['Ticker']}: {row['Signal']} (Score {int(row['Score'])}, Rank {int(row['Rank'])}, 参考株数 {int(row['ReferenceShares'])})"
-                if row["Signal"] == "BUY" and int(row["ReferenceShares"]) == 0:
-                    summary += f" - {row['PositionSizingReason']}"
-                body_lines.append(summary)
+                body_lines.append(f"【{row['Ticker']}】{row['Signal']}")
+                body_lines.append(f"スコア: {int(row['Score'])}点")
+                body_lines.append(f"評価: {row['Grade']}")
+                body_lines.append(f"順位: {int(row['Rank'])}位")
+                body_lines.append(f"現在価格: {float(row['Close']):,.1f}円")
+                body_lines.append(f"参考株数: {int(row['ReferenceShares'])}株")
+                body_lines.append(
+                    f"参考購入金額: {float(row['ReferenceAmountYen']):,.0f}円"
+                )
+
+                if row["Signal"] == "BUY":
+                    body_lines.append(
+                        f"損切り参考価格: {float(row['StopPrice']):,.1f}円"
+                    )
+                    body_lines.append(
+                        f"最大許容損失額: {float(row['MaxLossYen']):,.0f}円"
+                    )
+                    body_lines.append(
+                        f"株数の計算理由: {row['PositionSizingReason']}"
+                    )
+
+                body_lines.append("")
+                body_lines.append("判定理由:")
+                reasons = str(row["Reason"]).split("｜")
+                for reason in reasons:
+                    if reason:
+                        body_lines.append(f"・{reason}")
+                body_lines.append("")
+                body_lines.append("--------------------")
+                body_lines.append("")
             send_mail(EMAIL_ADDRESS, APP_PASSWORD, EMAIL_ADDRESS, subject, "\n".join(body_lines))
             print("BUY/SELLシグナルをメールで通知しました。")
         else:
