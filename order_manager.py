@@ -44,3 +44,20 @@ def create_paper_order(
         file.write(json.dumps(order, ensure_ascii=False) + "\n")
 
     return order
+
+
+def load_paper_orders() -> list[dict]:
+    """保存済みの模擬注文を読み込みます。"""
+
+    if not ORDER_LOG_PATH.exists():
+        return []
+
+    orders = []
+
+    with ORDER_LOG_PATH.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                orders.append(json.loads(line))
+
+    return orders
