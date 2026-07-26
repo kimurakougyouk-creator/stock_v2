@@ -88,11 +88,27 @@ def build_candidate_dashboard_html(base_dir: Path | None = None) -> str:
             else:
                 score_class = "score-low"
 
+            try:
+                rank = int(row.get("Rank", 0))
+            except (TypeError, ValueError):
+                rank = 0
+
+            if rank == 1:
+                rank_class = "rank-first"
+            elif rank == 2:
+                rank_class = "rank-second"
+            elif rank == 3:
+                rank_class = "rank-third"
+            else:
+                rank_class = ""
+
             cells = "".join(
                 f"<td>{html.escape(_format_value(row.get(column)))}</td>"
                 for column in DISPLAY_COLUMNS
             )
-            rows.append(f"<tr class='{signal_class} {score_class}'>{cells}</tr>")
+            rows.append(
+                f"<tr class='{signal_class} {score_class} {rank_class}'>{cells}</tr>"
+            )
         rows_html = "\n".join(rows)
 
     return f"""<!DOCTYPE html>
@@ -113,6 +129,24 @@ def build_candidate_dashboard_html(base_dir: Path | None = None) -> str:
     tr.score-medium td {{ font-weight: 600; }}
     tr.score-low td {{ opacity: .82; }}
     tr:hover td {{ filter: brightness(.97); }}
+    tr.rank-first td {{
+      background: linear-gradient(90deg,#fff8dc,#ffe082);
+    }}
+    tr.rank-second td {{
+      background: linear-gradient(90deg,#f5f5f5,#d9d9d9);
+    }}
+    tr.rank-third td {{
+      background: linear-gradient(90deg,#fff3e0,#d7a86e);
+    }}
+    tr.rank-first td {{
+      background: linear-gradient(90deg, #fff8dc, #ffe082);
+    }}
+    tr.rank-second td {{
+      background: linear-gradient(90deg, #f5f5f5, #d9d9d9);
+    }}
+    tr.rank-third td {{
+      background: linear-gradient(90deg, #fff3e0, #d7a86e);
+    }}
     .note {{ color: #7c2d12; font-weight: 700; }}
     @media (max-width: 700px) {{ table {{ display: block; overflow-x: auto; white-space: nowrap; }} }}
   </style>
