@@ -4,3 +4,4 @@ openpyxl
 pandas
 pytest
 yfinance
+openai
