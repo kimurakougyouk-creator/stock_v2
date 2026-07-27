@@ -233,14 +233,25 @@ def run_signal_scan(
     format_signal_report(output_path)
 
     if not output_df.empty:
-        actionable = output_df[output_df["Signal"].isin(["BUY", "SELL"])]
+        actionable = output_df[
+            output_df["FinalSignal"].isin(["BUY", "SELL"])
+        ]
         if not actionable.empty and not allow_email:
-            print("BUY/SELLシグナルはありますが、メール通知は無効です。")
+            print("AI最終BUY/SELL判定はありますが、メール通知は無効です。")
         elif not actionable.empty:
-            subject = "売買シグナル通知"
-            body_lines = ["最新の売買シグナル一覧です。", ""]
+            subject = "AI最終売買判定通知"
+            body_lines = ["AI統合後の最新売買判定一覧です。", ""]
+
             for _, row in actionable.iterrows():
-                body_lines.append(f"【{row['Ticker']}】{row['Signal']}")
+                body_lines.append(
+                    f"【{row['Ticker']}】最終判定: {row['FinalSignal']}"
+                )
+                body_lines.append(f"テクニカル判定: {row['Signal']}")
+                body_lines.append(f"AI判定: {row['AISignal']}")
+                body_lines.append(
+                    f"AI信頼度: {float(row['AIConfidence']):.1f}%"
+                )
+                body_lines.append(f"AI提供元: {row['AIProvider']}")
                 body_lines.append(f"スコア: {int(row['Score'])}点")
                 body_lines.append(f"評価: {row['Grade']}")
                 body_lines.append(f"順位: {int(row['Rank'])}位")
@@ -250,7 +261,7 @@ def run_signal_scan(
                     f"参考購入金額: {float(row['ReferenceAmountYen']):,.0f}円"
                 )
 
-                if row["Signal"] == "BUY":
+                if row["FinalSignal"] == "BUY":
                     body_lines.append(
                         f"損切り参考価格: {float(row['StopPrice']):,.1f}円"
                     )
@@ -262,18 +273,33 @@ def run_signal_scan(
                     )
 
                 body_lines.append("")
-                body_lines.append("判定理由:")
-                reasons = str(row["Reason"]).split("｜")
-                for reason in reasons:
+                body_lines.append("テクニカル判定理由:")
+                for reason in str(row["Reason"]).split("｜"):
                     if reason:
                         body_lines.append(f"・{reason}")
+
+                body_lines.append("")
+                body_lines.append("AI判定理由:")
+                body_lines.append(f"・{row['AIReason']}")
+
+                body_lines.append("")
+                body_lines.append("最終判定理由:")
+                body_lines.append(f"・{row['FinalReason']}")
+
                 body_lines.append("")
                 body_lines.append("--------------------")
                 body_lines.append("")
-            send_mail(EMAIL_ADDRESS, APP_PASSWORD, EMAIL_ADDRESS, subject, "\n".join(body_lines))
-            print("BUY/SELLシグナルをメールで通知しました。")
+
+            send_mail(
+                EMAIL_ADDRESS,
+                APP_PASSWORD,
+                EMAIL_ADDRESS,
+                subject,
+                "\n".join(body_lines),
+            )
+            print("AI最終BUY/SELL判定をメールで通知しました。")
         else:
-            print("BUY/SELLシグナルはありませんでした。")
+            print("AI最終BUY/SELL判定はありませんでした.")
     else:
         print("シグナルがありませんでした。")
 
