@@ -747,3 +747,179 @@ def test_available_cash_blocks_unaffordable_buy(monkeypatch):
 
     assert created_orders == []
 
+def test_max_positions_blocks_new_buy(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {
+            "6758.T": 100,
+            "8306.T": 100,
+            "9984.T": 100,
+            "6861.T": 100,
+            "8035.T": 100,
+        },
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            emergency_stop=False,
+            max_order_shares=100,
+            max_positions=5,
+            daily_loss_limit_yen=10_000.0,
+            max_consecutive_losses=3,
+            enable_paper_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert created_orders == []
+
+
+def test_buy_is_allowed_below_max_positions(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {
+            "6758.T": 100,
+            "8306.T": 100,
+            "9984.T": 100,
+            "6861.T": 100,
+        },
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs) or {
+            "side": kwargs["signal"],
+            "shares": kwargs["shares"],
+        },
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            emergency_stop=False,
+            max_order_shares=100,
+            max_positions=5,
+            daily_loss_limit_yen=10_000.0,
+            max_consecutive_losses=3,
+            enable_paper_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert len(created_orders) == 1
+    assert created_orders[0]["signal"] == "BUY"
+    assert created_orders[0]["shares"] == 100
+
+
+def test_max_positions_does_not_block_sell(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "SELL")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="SELL",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {
+            "7203.T": 100,
+            "6758.T": 100,
+            "8306.T": 100,
+            "9984.T": 100,
+            "6861.T": 100,
+        },
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs) or {
+            "side": kwargs["signal"],
+            "shares": kwargs["shares"],
+        },
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            emergency_stop=False,
+            max_order_shares=100,
+            max_positions=5,
+            daily_loss_limit_yen=10_000.0,
+            max_consecutive_losses=3,
+            enable_paper_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert len(created_orders) == 1
+    assert created_orders[0]["signal"] == "SELL"
+    assert created_orders[0]["shares"] == 100
+

@@ -150,6 +150,15 @@ def run_signal_scan(
                         and consecutive_losses >= max_consecutive_losses
                     )
 
+                    max_positions = int(
+                        getattr(SETTINGS, "max_positions", 0)
+                    )
+                    current_position_count = len(positions)
+                    max_positions_reached = (
+                        max_positions > 0
+                        and current_position_count >= max_positions
+                    )
+
                     if (
                         final_decision.signal == "BUY"
                         and daily_loss_limit_reached
@@ -175,6 +184,18 @@ def run_signal_scan(
                         print(
                             f"{ticker}: 最終BUY判定ですが、"
                             f"すでに{held_shares}株保有しているため注文を見送りました。"
+                        )
+                    elif (
+                        final_decision.signal == "BUY"
+                        and held_shares <= 0
+                        and max_positions_reached
+                    ):
+                        print(
+                            f"{ticker}: 現在の保有銘柄数が"
+                            f"{current_position_count}銘柄となり、"
+                            f"最大保有銘柄数"
+                            f"{max_positions}銘柄に達したため、"
+                            "新規BUY注文を見送りました。"
                         )
                     elif final_decision.signal == "SELL" and held_shares <= 0:
                         print(

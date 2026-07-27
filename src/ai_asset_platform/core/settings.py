@@ -14,6 +14,7 @@ class PlatformSettings:
     enable_ai: bool = True
     emergency_stop: bool = False
     max_order_shares: int = 100
+    max_positions: int = 5
     daily_loss_limit_yen: float = 10_000.0
     max_consecutive_losses: int = 3
     enable_paper_trading: bool = True
@@ -47,6 +48,7 @@ if __name__ == "__main__":
     print("AI      :", SETTINGS.enable_ai)
     print("Stop    :", SETTINGS.emergency_stop)
     print("Max Qty :", SETTINGS.max_order_shares)
+    print("Max Pos :", SETTINGS.max_positions)
     print("Day Loss:", SETTINGS.daily_loss_limit_yen)
     print("Max Lose:", SETTINGS.max_consecutive_losses)
     print("Paper   :", SETTINGS.enable_paper_trading)
