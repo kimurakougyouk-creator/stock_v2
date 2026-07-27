@@ -216,8 +216,29 @@ def run_signal_scan(
                                 TRADING_CAPITAL
                             )
 
+                            max_portfolio_allocation = float(
+                                getattr(
+                                    SETTINGS,
+                                    "max_portfolio_allocation",
+                                    1.0,
+                                )
+                            )
+                            max_portfolio_allocation = max(
+                                0.0,
+                                min(1.0, max_portfolio_allocation),
+                            )
+
+                            minimum_cash_reserve = (
+                                float(TRADING_CAPITAL)
+                                * (1.0 - max_portfolio_allocation)
+                            )
+                            portfolio_buying_power = max(
+                                0.0,
+                                available_cash - minimum_cash_reserve,
+                            )
+
                             affordable_shares = int(
-                                available_cash // reference_price
+                                portfolio_buying_power // reference_price
                             )
                             affordable_shares = (
                                 affordable_shares // LOT_SIZE
@@ -266,7 +287,8 @@ def run_signal_scan(
                             and order_shares <= 0
                         ):
                             print(
-                                f"{ticker}: 利用可能資金または"
+                                f"{ticker}: 利用可能資金、"
+                                "ポートフォリオ全体の投資比率上限、または"
                                 "1銘柄あたりの資金配分上限では"
                                 f"{LOT_SIZE}株以上購入できないため、"
                                 "新規BUY注文を見送りました。"
