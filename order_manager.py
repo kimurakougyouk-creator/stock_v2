@@ -120,6 +120,37 @@ def get_open_positions() -> dict[str, int]:
     return {ticker: shares for ticker, shares in positions.items() if shares != 0}
 
 
+
+def calculate_daily_buy_order_count() -> int:
+    """本日記録されたBUY注文数を返す。"""
+
+    orders = load_paper_orders()
+    if not orders:
+        return 0
+
+    today = datetime.now().date()
+    count = 0
+
+    for order in orders:
+        if str(order.get("side", "")).upper() != "BUY":
+            continue
+
+        created_at = order.get("created_at")
+        if not created_at:
+            continue
+
+        try:
+            order_date = datetime.fromisoformat(
+                str(created_at)
+            ).date()
+        except ValueError:
+            continue
+
+        if order_date == today:
+            count += 1
+
+    return count
+
 def calculate_daily_realized_pnl(
     target_date: date | None = None,
 ) -> float:

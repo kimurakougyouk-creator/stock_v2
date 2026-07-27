@@ -26,6 +26,7 @@ from mail import send_mail
 from order_manager import (
     calculate_available_cash,
     calculate_consecutive_losses,
+    calculate_daily_buy_order_count,
     calculate_daily_realized_pnl,
     create_paper_order,
     get_open_positions,
@@ -159,6 +160,19 @@ def run_signal_scan(
                         and current_position_count >= max_positions
                     )
 
+                    max_daily_buy_orders = int(
+                        getattr(SETTINGS, "max_daily_buy_orders", 0)
+                    )
+                    daily_buy_order_count = (
+                        calculate_daily_buy_order_count()
+                        if max_daily_buy_orders > 0
+                        else 0
+                    )
+                    daily_buy_limit_reached = (
+                        max_daily_buy_orders > 0
+                        and daily_buy_order_count >= max_daily_buy_orders
+                    )
+
                     if (
                         final_decision.signal == "BUY"
                         and daily_loss_limit_reached
@@ -178,6 +192,17 @@ def run_signal_scan(
                             f"{ticker}: 現在{consecutive_losses}連敗しており、"
                             f"最大連敗回数"
                             f"{max_consecutive_losses}回に達したため、"
+                            "新規BUY注文を見送りました。"
+                        )
+                    elif (
+                        final_decision.signal == "BUY"
+                        and daily_buy_limit_reached
+                    ):
+                        print(
+                            f"{ticker}: 本日の新規BUY注文が"
+                            f"{daily_buy_order_count}回となり、"
+                            f"1日の上限"
+                            f"{max_daily_buy_orders}回に達したため、"
                             "新規BUY注文を見送りました。"
                         )
                     elif final_decision.signal == "BUY" and held_shares > 0:
