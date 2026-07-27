@@ -88,6 +88,10 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
             for key in [
                 "Ticker",
                 "Signal",
+                "FinalSignal",
+                "AIConfidence",
+                "AIReason",
+                "FinalReason",
                 "Score",
                 "Rank",
                 "Close",
@@ -179,6 +183,15 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
         for row in rows:
             signal_value = str(row.get("Signal", "HOLD") or "HOLD")
             signal_class = "signal-buy" if signal_value.upper() == "BUY" else "signal-sell" if signal_value.upper() == "SELL" else "signal-hold"
+
+            final_signal_value = str(row.get("FinalSignal", signal_value) or "HOLD")
+            final_signal_class = (
+                "signal-buy"
+                if final_signal_value.upper() == "BUY"
+                else "signal-sell"
+                if final_signal_value.upper() == "SELL"
+                else "signal-hold"
+            )
             grade = "A"
             score_value = row.get("Score")
             try:
@@ -203,6 +216,8 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
                     f"<td>{html.escape(str(row.get('Rank', '-')))}</td>",
                     f"<td>{html.escape(str(row.get('Ticker', '-')))}</td>",
                     f"<td class='{signal_class}'>{html.escape(signal_value)}</td>",
+                    f"<td class='{final_signal_class}'>{html.escape(final_signal_value)}</td>",
+                    f"<td>{html.escape(str(row.get('AIConfidence', '-')))}</td>",
                     f"<td>{html.escape(str(score_value))}</td>",
                     f"<td>{html.escape(grade)}</td>",
                     f"<td>{html.escape(str(row.get('Close', '-')))}</td>",
@@ -213,12 +228,14 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
                     f"<td>{html.escape(str(row.get('ReferenceAmountYen', '-')))}</td>",
                     f"<td>{html.escape(str(row.get('StopPrice', '-')))}</td>",
                     f"<td>{escaped_reason}</td>",
+                    f"<td>{html.escape(str(row.get('AIReason', '-')))}</td>",
+                    f"<td>{html.escape(str(row.get('FinalReason', '-')))}</td>",
                     "</tr>",
                 ])
             )
 
     error_items = "<li>エラー0件</li>" if not errors else "".join(f"<li>{html.escape(str(error))}</li>" for error in errors)
-    rows_html = "\n".join(html_rows) if html_rows else "<tr><td colspan='13'>データがありません</td></tr>"
+    rows_html = "\n".join(html_rows) if html_rows else "<tr><td colspan='17'>データがありません</td></tr>"
     summary_line = html.escape(summary_text) if summary_text else "-"
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -269,7 +286,9 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
         <tr>
           <th>順位</th>
           <th>Ticker</th>
-          <th>Signal</th>
+          <th>テクニカル判定</th>
+          <th>AI最終判定</th>
+          <th>AI信頼度</th>
           <th>Score</th>
           <th>Rank</th>
           <th>Close</th>
@@ -280,6 +299,8 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
           <th>ReferenceAmountYen</th>
           <th>StopPrice</th>
           <th>PositionSizingReason</th>
+          <th>AI判定理由</th>
+          <th>最終判定理由</th>
         </tr>
       </thead>
       <tbody>
