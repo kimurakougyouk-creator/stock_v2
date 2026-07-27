@@ -223,9 +223,36 @@ def run_signal_scan(
                                 affordable_shares // LOT_SIZE
                             ) * LOT_SIZE
 
+                            max_position_allocation = float(
+                                getattr(
+                                    SETTINGS,
+                                    "max_position_allocation",
+                                    1.0,
+                                )
+                            )
+                            if max_position_allocation <= 0:
+                                allocation_limit_yen = 0.0
+                            elif max_position_allocation >= 1:
+                                allocation_limit_yen = float(
+                                    TRADING_CAPITAL
+                                )
+                            else:
+                                allocation_limit_yen = (
+                                    float(TRADING_CAPITAL)
+                                    * max_position_allocation
+                                )
+
+                            allocation_limit_shares = int(
+                                allocation_limit_yen // reference_price
+                            )
+                            allocation_limit_shares = (
+                                allocation_limit_shares // LOT_SIZE
+                            ) * LOT_SIZE
+
                             order_shares = min(
                                 order_shares,
                                 affordable_shares,
+                                allocation_limit_shares,
                             )
 
                         if final_decision.signal == "SELL":
@@ -239,7 +266,8 @@ def run_signal_scan(
                             and order_shares <= 0
                         ):
                             print(
-                                f"{ticker}: 利用可能資金では"
+                                f"{ticker}: 利用可能資金または"
+                                "1銘柄あたりの資金配分上限では"
                                 f"{LOT_SIZE}株以上購入できないため、"
                                 "新規BUY注文を見送りました。"
                             )
