@@ -2,8 +2,8 @@ from datetime import datetime
 import sys
 import types
 
-sys.modules.setdefault("indicators", types.SimpleNamespace(add_indicators=lambda df, *args: df))
-sys.modules.setdefault("strategy", types.SimpleNamespace(create_buy_signal=lambda df, *args: df))
+sys.modules.setdefault("indicators", types.SimpleNamespace(add_indicators=lambda df, *args, **kwargs: df))
+sys.modules.setdefault("strategy", types.SimpleNamespace(create_buy_signal=lambda df, *args, **kwargs: df))
 
 from backtest import run_backtest
 from optimizer import calculate_score, find_best_setting
@@ -65,8 +65,8 @@ def test_optimizer_excludes_results_below_min_trades(monkeypatch):
     monkeypatch.setattr(optimizer, "MA_LIST", [(5, 25, 75), (5, 20, 60)])
     monkeypatch.setattr(optimizer, "RSI_LIST", [(50, 60)])
     monkeypatch.setattr(optimizer, "MIN_TRADES", 5)
-    monkeypatch.setattr(optimizer, "add_indicators", lambda df, *args: df)
-    monkeypatch.setattr(optimizer, "create_buy_signal", lambda df, *args: df)
+    monkeypatch.setattr(optimizer, "add_indicators", lambda df, *args, **kwargs: df)
+    monkeypatch.setattr(optimizer, "create_buy_signal", lambda df, *args, **kwargs: df)
     monkeypatch.setattr(optimizer, "run_backtest", lambda *args, **kwargs: next(results))
 
     best = find_best_setting(FakeFrame([{"date": datetime(2024, 1, 1)}]))

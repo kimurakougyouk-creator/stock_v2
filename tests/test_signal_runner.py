@@ -110,3 +110,72 @@ def test_build_dashboard_html_generates_safe_report(tmp_path):
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "実注文ではなく参考情報" in html
     assert "秘密情報" not in html
+
+
+def test_run_signal_scan_writes_ai_judgement_columns(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "tickers.csv").write_text(
+        "Ticker\n7203.T\n",
+        encoding="utf-8",
+    )
+
+    class FakeYFinance:
+        def __call__(self, ticker, period, interval, auto_adjust):
+            return pd.DataFrame([
+                {
+                    "Close": 110.0,
+                    "High": 112.0,
+                    "Low": 108.0,
+                    "Volume": 1000.0,
+                }
+            ])
+
+    class FakeAIProvider:
+        name = "openai"
+
+        def evaluate(self, market_data):
+            assert market_data["ticker"] == "7203.T"
+            assert market_data["technical_signal"] in {
+                "BUY",
+                "SELL",
+                "HOLD",
+            }
+
+            return {
+                "signal": "BUY",
+                "score": 88,
+                "confidence": 91,
+                "reason": "AIテスト判定です。",
+            }
+
+    monkeypatch.setattr(
+        "signal_runner.yf.download",
+        FakeYFinance(),
+    )
+    monkeypatch.setattr(
+        "signal_runner.send_mail",
+        lambda *args, **kwargs: None,
+    )
+
+    result = run_signal_scan(
+        ["7203.T"],
+        ai_provider=FakeAIProvider(),
+    )
+
+    output_df = pd.read_excel(result["output_path"])
+
+    expected_columns = {
+        "AISignal",
+        "AIScore",
+        "AIConfidence",
+        "AIReason",
+        "AIProvider",
+        "AIAvailable",
+    }
+
+    assert expected_columns.issubset(output_df.columns)
+    assert output_df.iloc[0]["AISignal"] == "BUY"
+    assert output_df.iloc[0]["AIScore"] == 88
+    assert output_df.iloc[0]["AIConfidence"] == 91
+    assert output_df.iloc[0]["AIProvider"] == "openai"
+    assert bool(output_df.iloc[0]["AIAvailable"]) is True

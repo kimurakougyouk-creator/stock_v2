@@ -6,6 +6,11 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
+from ai_asset_platform.ai import (
+    create_provider,
+    judge_with_ai,
+    load_ai_settings,
+)
 from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PAPER_TRADING, PERIOD
 from indicators import add_indicators
 from mail import send_mail
@@ -36,7 +41,11 @@ def _safe_download(ticker: str) -> tuple[pd.DataFrame | None, str | None]:
     return df, None
 
 
-def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
+def run_signal_scan(
+    tickers: list[str] | None = None,
+    *,
+    ai_provider: Any | None = None,
+) -> dict[str, Any]:
     if tickers is None:
         ticker_df = pd.read_csv("tickers.csv")
         tickers = ticker_df["Ticker"].tolist()
@@ -66,6 +75,26 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
                 rsi_high=settings["rsi_high"],
                 atr_multiplier=settings["atr_multiplier"],
             )
+
+            ai_result = judge_with_ai(
+                {
+                    "ticker": ticker,
+                    "technical_signal": signal_result["signal"],
+                    "score": signal_result["score"],
+                    "price": signal_result["price"],
+                    "ma_short": signal_result["ma_short"],
+                    "ma_middle": signal_result["ma_middle"],
+                    "ma_long": signal_result["ma_long"],
+                    "rsi": signal_result["rsi"],
+                    "macd": signal_result["macd"],
+                    "signal_line": signal_result["signal_line"],
+                    "atr": signal_result["atr"],
+                    "grade": signal_result["grade"],
+                    "stop_price": signal_result["stop_price"],
+                },
+                provider=ai_provider,
+            )
+
             if signal_result["signal"] in {"BUY", "SELL"}:
                 shares = int(signal_result["reference_shares"] or 0)
                 positions = get_open_positions()
@@ -124,6 +153,12 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
                 "ReferenceShares": signal_result["reference_shares"],
                 "ReferenceAmountYen": signal_result["reference_amount_yen"],
                 "PositionSizingReason": signal_result["position_sizing_reason"],
+                "AISignal": ai_result.signal,
+                "AIScore": ai_result.score,
+                "AIConfidence": ai_result.confidence,
+                "AIReason": ai_result.reason,
+                "AIProvider": ai_result.provider,
+                "AIAvailable": ai_result.available,
             }
             records.append(record)
             print(f"{ticker}: {signal_result['signal']}")
@@ -149,12 +184,27 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
                 "ReferenceShares": 0,
                 "ReferenceAmountYen": None,
                 "PositionSizingReason": "判定エラーのため、参考株数は0です。",
+                "AISignal": "HOLD",
+                "AIScore": 50.0,
+                "AIConfidence": 0.0,
+                "AIReason": "テクニカル判定中にエラーが発生したため、AI評価を行いませんでした。",
+                "AIProvider": "none",
+                "AIAvailable": False,
             }
             records.append(record)
             print(f"{ticker}: 判定中にエラーが発生しました。{exc}")
 
     output_df = pd.DataFrame(records)
-    for numeric_column in ["Score", "StopPrice", "RiskPerShare", "MaxLossYen", "ReferenceShares", "ReferenceAmountYen"]:
+    for numeric_column in [
+        "Score",
+        "StopPrice",
+        "RiskPerShare",
+        "MaxLossYen",
+        "ReferenceShares",
+        "ReferenceAmountYen",
+        "AIScore",
+        "AIConfidence",
+    ]:
         output_df[numeric_column] = pd.to_numeric(output_df[numeric_column], errors="coerce").fillna(0)
 
     output_df = output_df.sort_values(["Score", "Ticker"], ascending=[False, True], kind="mergesort").reset_index(drop=True)
@@ -224,8 +274,38 @@ def run_signal_scan(tickers: list[str] | None = None) -> dict[str, Any]:
     }
 
 
+def _create_configured_ai_provider() -> Any | None:
+    """環境設定からAIプロバイダーを安全に作成する。"""
+
+    try:
+        settings = load_ai_settings()
+
+        if not settings.is_available:
+            print("AI設定が未設定のため、AI評価はスキップします。")
+            return None
+
+        provider = create_provider(
+            settings.provider,
+            model=settings.get_model(),
+            api_key=settings.get_api_key(),
+        )
+
+        print(
+            f"AI評価を有効化しました: "
+            f"{settings.provider} / {settings.get_model()}"
+        )
+        return provider
+    except Exception as exc:
+        print(
+            "AI設定の読み込みに失敗したため、"
+            f"AI評価をスキップします。{exc}"
+        )
+        return None
+
+
 def main() -> None:
-    result = run_signal_scan()
+    ai_provider = _create_configured_ai_provider()
+    result = run_signal_scan(ai_provider=ai_provider)
     if EMAIL_ADDRESS and APP_PASSWORD:
         if result["records"]:
             if any(record["Signal"] in {"BUY", "SELL"} for record in result["records"]):
