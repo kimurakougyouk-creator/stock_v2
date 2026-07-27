@@ -12,7 +12,8 @@ from ai_asset_platform.ai import (
     load_ai_settings,
 )
 from ai_asset_platform.decision import determine_final_decision
-from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PAPER_TRADING, PERIOD
+from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PERIOD
+from ai_asset_platform.core.settings import SETTINGS
 from indicators import add_indicators
 from mail import send_mail
 from order_manager import create_paper_order, get_open_positions
@@ -46,7 +47,7 @@ def run_signal_scan(
     tickers: list[str] | None = None,
     *,
     ai_provider: Any | None = None,
-    allow_orders: bool = True,
+    allow_orders: bool = False,
     allow_email: bool = True,
 ) -> dict[str, Any]:
     if tickers is None:
@@ -124,7 +125,7 @@ def run_signal_scan(
                         if final_decision.signal == "SELL"
                         else shares
                     )
-                    if PAPER_TRADING:
+                    if SETTINGS.enable_paper_trading:
                         paper_order = create_paper_order(
                             ticker=ticker,
                             signal=final_decision.signal,

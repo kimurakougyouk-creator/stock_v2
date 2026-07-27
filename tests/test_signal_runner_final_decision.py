@@ -147,3 +147,43 @@ def test_final_buy_creates_order(monkeypatch):
     assert len(created_orders) == 1
     assert created_orders[0]["signal"] == "BUY"
     assert created_orders[0]["shares"] == 100
+
+
+def test_paper_trading_disabled_does_not_create_order(monkeypatch):
+    from types import SimpleNamespace
+
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(signal_runner, "get_open_positions", lambda: {})
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(enable_paper_trading=False),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert created_orders == []

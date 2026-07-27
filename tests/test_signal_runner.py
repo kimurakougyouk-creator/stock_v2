@@ -179,3 +179,11 @@ def test_run_signal_scan_writes_ai_judgement_columns(tmp_path, monkeypatch):
     assert output_df.iloc[0]["AIConfidence"] == 91
     assert output_df.iloc[0]["AIProvider"] == "openai"
     assert bool(output_df.iloc[0]["AIAvailable"]) is True
+
+def test_run_signal_scan_default_disables_orders():
+    import inspect
+    from signal_runner import run_signal_scan
+
+    signature = inspect.signature(run_signal_scan)
+
+    assert signature.parameters["allow_orders"].default is False
