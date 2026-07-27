@@ -11,6 +11,7 @@ from ai_asset_platform.ai import (
     judge_with_ai,
     load_ai_settings,
 )
+from ai_asset_platform.decision import determine_final_decision
 from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PAPER_TRADING, PERIOD
 from indicators import add_indicators
 from mail import send_mail
@@ -97,41 +98,46 @@ def run_signal_scan(
                 provider=ai_provider,
             )
 
-            if allow_orders and signal_result["signal"] in {"BUY", "SELL"}:
+            final_decision = determine_final_decision(
+                signal_result["signal"],
+                ai_result,
+            )
+
+            if allow_orders and final_decision.signal in {"BUY", "SELL"}:
                 shares = int(signal_result["reference_shares"] or 0)
                 positions = get_open_positions()
                 held_shares = int(positions.get(ticker, 0))
 
-                if signal_result["signal"] == "BUY" and held_shares > 0:
+                if final_decision.signal == "BUY" and held_shares > 0:
                     print(
-                        f"{ticker}: BUYシグナルですが、"
+                        f"{ticker}: 最終BUY判定ですが、"
                         f"すでに{held_shares}株保有しているため注文を見送りました。"
                     )
-                elif signal_result["signal"] == "SELL" and held_shares <= 0:
+                elif final_decision.signal == "SELL" and held_shares <= 0:
                     print(
-                        f"{ticker}: SELLシグナルですが、"
+                        f"{ticker}: 最終SELL判定ですが、"
                         "保有していないため注文を見送りました。"
                     )
                 elif shares > 0:
                     order_shares = (
                         min(shares, held_shares)
-                        if signal_result["signal"] == "SELL"
+                        if final_decision.signal == "SELL"
                         else shares
                     )
                     if PAPER_TRADING:
                         paper_order = create_paper_order(
                             ticker=ticker,
-                            signal=signal_result["signal"],
+                            signal=final_decision.signal,
                             shares=order_shares,
                             reference_price=float(signal_result["price"]),
                         )
                         print(
-                            f"{ticker}: 模擬注文を記録しました "
+                            f"{ticker}: AI最終判定による模擬注文を記録しました "
                             f"({paper_order['side']} {paper_order['shares']}株)"
                         )
                 else:
                     print(
-                        f"{ticker}: {signal_result['signal']}シグナルですが、"
+                        f"{ticker}: 最終{final_decision.signal}判定ですが、"
                         "資金管理により注文を見送りました。"
                     )
 
@@ -161,9 +167,16 @@ def run_signal_scan(
                 "AIReason": ai_result.reason,
                 "AIProvider": ai_result.provider,
                 "AIAvailable": ai_result.available,
+                "FinalSignal": final_decision.signal,
+                "FinalReason": final_decision.reason,
             }
             records.append(record)
-            print(f"{ticker}: {signal_result['signal']}")
+            print(
+                f"{ticker}: "
+                f"テクニカル={signal_result['signal']} / "
+                f"AI={ai_result.signal} / "
+                f"最終={final_decision.signal}"
+            )
         except Exception as exc:  # pragma: no cover - defensive path
             errors.append({"ticker": ticker, "error": str(exc)})
             record = {
@@ -192,6 +205,8 @@ def run_signal_scan(
                 "AIReason": "テクニカル判定中にエラーが発生したため、AI評価を行いませんでした。",
                 "AIProvider": "none",
                 "AIAvailable": False,
+                "FinalSignal": "HOLD",
+                "FinalReason": "判定エラーのため、安全側でHOLDとします。",
             }
             records.append(record)
             print(f"{ticker}: 判定中にエラーが発生しました。{exc}")
