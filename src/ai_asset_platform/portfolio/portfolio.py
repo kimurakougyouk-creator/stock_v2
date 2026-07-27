@@ -6,6 +6,7 @@ class Portfolio:
     def __init__(self) -> None:
         self._positions: dict[str, Position] = {}
         self._realized_pnl = 0.0
+        self._realized_trade_pnls: list[float] = []
 
     def add_position(self, position: Position) -> None:
         self._positions[position.symbol] = position
@@ -23,6 +24,11 @@ class Portfolio:
     @property
     def realized_pnl(self) -> float:
         return self._realized_pnl
+
+    @property
+    def realized_trade_pnls(self) -> list[float]:
+        """売却約定ごとの実現損益をコピーして返す。"""
+        return self._realized_trade_pnls.copy()
 
     @staticmethod
     def _validate_cash(cash: float) -> None:
@@ -120,9 +126,12 @@ class Portfolio:
         if fill.quantity > current.quantity:
             raise ValueError("保有数量を超えて売却できません")
 
-        self._realized_pnl += (
+        trade_pnl = (
             fill.fill_price - current.average_price
         ) * fill.quantity
+
+        self._realized_pnl += trade_pnl
+        self._realized_trade_pnls.append(trade_pnl)
 
         remaining_quantity = current.quantity - fill.quantity
 
