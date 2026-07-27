@@ -138,3 +138,101 @@ def test_ai_judge_accepts_openai_provider_result():
     assert result.confidence == 90.0
     assert result.provider == "openai"
     assert result.available is True
+
+class FakeResponse:
+    def __init__(self, output_text):
+        self.output_text = output_text
+
+
+class FakeResponses:
+    def __init__(self, output_text):
+        self.output_text = output_text
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return FakeResponse(self.output_text)
+
+
+class FakeOpenAIClient:
+    def __init__(self, output_text):
+        self.responses = FakeResponses(output_text)
+
+
+def test_openai_provider_connects_to_openai_client():
+    fake_client = FakeOpenAIClient(
+        '{"signal":"BUY","score":88,'
+        '"confidence":91,"reason":"上昇傾向です。"}'
+    )
+
+    provider = OpenAIProvider(
+        model="test-model",
+        api_key="test-api-key",
+        client=fake_client,
+    )
+
+    result = provider.evaluate(
+        {
+            "ticker": "7203.T",
+            "technical_signal": "BUY",
+        }
+    )
+
+    assert result["signal"] == "BUY"
+    assert result["score"] == 88
+
+    call = fake_client.responses.calls[0]
+
+    assert call["model"] == "test-model"
+    assert "7203.T" in call["input"]
+    assert "JSON形式" in call["instructions"]
+
+
+def test_openai_provider_prefers_request_function():
+    captured = {}
+
+    def fake_request(model, system_prompt, payload):
+        captured["called"] = True
+        return {
+            "signal": "HOLD",
+            "score": 50,
+            "confidence": 70,
+            "reason": "様子見です。",
+        }
+
+    provider = OpenAIProvider(
+        api_key="test-api-key",
+        request_function=fake_request,
+    )
+
+    result = provider.evaluate({"ticker": "7203.T"})
+
+    assert result["signal"] == "HOLD"
+    assert captured["called"] is True
+    assert provider.openai_client is None
+
+
+def test_ai_judge_uses_connected_openai_client():
+    fake_client = FakeOpenAIClient(
+        '{"signal":"SELL","score":25,'
+        '"confidence":89,"reason":"下落リスクです。"}'
+    )
+
+    provider = create_provider(
+        "openai",
+        model="test-model",
+        api_key="test-api-key",
+        client=fake_client,
+    )
+
+    result = judge_with_ai(
+        {"ticker": "7203.T"},
+        provider=provider,
+    )
+
+    assert result.signal == "SELL"
+    assert result.score == 25.0
+    assert result.confidence == 89.0
+    assert result.provider == "openai"
+    assert result.available is True
+
