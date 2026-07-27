@@ -126,12 +126,20 @@ def run_signal_scan(
                             "保有していないため注文を見送りました。"
                         )
                     elif shares > 0:
-                        order_shares = (
-                            min(shares, held_shares)
-                            if final_decision.signal == "SELL"
-                            else shares
+                        max_order_shares = int(
+                            getattr(SETTINGS, "max_order_shares", shares)
                         )
-                        if SETTINGS.enable_paper_trading:
+                        order_shares = min(shares, max_order_shares)
+
+                        if final_decision.signal == "SELL":
+                            order_shares = min(order_shares, held_shares)
+
+                        if order_shares <= 0:
+                            print(
+                                f"{ticker}: 注文数量上限により、"
+                                "注文を見送りました。"
+                            )
+                        elif SETTINGS.enable_paper_trading:
                             paper_order = create_paper_order(
                                 ticker=ticker,
                                 signal=final_decision.signal,
