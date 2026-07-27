@@ -23,7 +23,7 @@
   <div class="card">
     <h1>stock_v2 ダッシュボード</h1>
     <p class="note">実注文ではなく参考情報です。</p>
-    <p>生成日時: 2026-07-26 12:12:06</p>
+    <p>生成日時: 2026-07-27 17:15:21</p>
   </div>
   <div class="card">
     <h2>実行サマリー</h2>
@@ -33,9 +33,26 @@
       <div class="metric"><strong>SELL</strong><br>0</div>
       <div class="metric"><strong>HOLD</strong><br>9</div>
       <div class="metric"><strong>最高スコア</strong><br>100.0</div>
-      <div class="metric"><strong>平均スコア</strong><br>57.0</div>
+      <div class="metric"><strong>平均スコア</strong><br>59.0</div>
       <div class="metric"><strong>参考運用資金</strong><br>1,000,000</div>
       <div class="metric"><strong>サマリー</strong><br>-</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Paper Trading運用成績</h2>
+    <div class="grid">
+      <div class="metric"><strong>総取引数</strong><br>0</div>
+      <div class="metric"><strong>勝ち取引</strong><br>0</div>
+      <div class="metric"><strong>負け取引</strong><br>0</div>
+      <div class="metric"><strong>引き分け</strong><br>0</div>
+      <div class="metric"><strong>勝率</strong><br>0.0%</div>
+      <div class="metric"><strong>純損益</strong><br>0円</div>
+      <div class="metric"><strong>総利益</strong><br>0円</div>
+      <div class="metric"><strong>総損失</strong><br>0円</div>
+      <div class="metric"><strong>平均利益</strong><br>0円</div>
+      <div class="metric"><strong>平均損失</strong><br>0円</div>
+      <div class="metric"><strong>最大利益</strong><br>0円</div>
+      <div class="metric"><strong>最大損失</strong><br>0円</div>
     </div>
   </div>
   <div class="card">
@@ -45,7 +62,9 @@
         <tr>
           <th>順位</th>
           <th>Ticker</th>
-          <th>Signal</th>
+          <th>テクニカル判定</th>
+          <th>AI最終判定</th>
+          <th>AI信頼度</th>
           <th>Score</th>
           <th>Rank</th>
           <th>Close</th>
@@ -56,158 +75,200 @@
           <th>ReferenceAmountYen</th>
           <th>StopPrice</th>
           <th>PositionSizingReason</th>
+          <th>AI判定理由</th>
+          <th>最終判定理由</th>
         </tr>
       </thead>
       <tbody>
         <tr>
 <td>1</td>
-<td>8306.T</td>
-<td class='signal-buy'>BUY</td>
+<td>6758.T</td>
+<td class='signal-hold'>HOLD</td>
+<td class='signal-hold'>-</td>
+<td>80</td>
 <td>100</td>
 <td>A</td>
-<td>3,754</td>
-<td>72.76595744680851</td>
-<td>131.9546460466904</td>
-<td>108.0</td>
+<td>3,564</td>
+<td>62.07482993197279</td>
+<td>33.53658697089168</td>
+<td>82.71428571428571</td>
 <td>0</td>
 <td>0</td>
-<td>3,641</td>
-<td>参考株数が100株未満のため0株としました。</td>
+<td>0</td>
+<td>BUY判定ではないため、参考株数は0です。</td>
+<td>価格はすべての移動平均線（短期、中期、長期）を上回っており、MACDもシグナルラインを上回って上昇トレンドを示唆。RSIは62と過熱感はなく買い余地あり。ATRはやや高めでボラティリティがあるものの、総合的に強気材料多くBUY推奨。</td>
+<td>-</td>
 </tr>
 <tr>
 <td>2</td>
-<td>9432.T</td>
-<td class='signal-hold'>HOLD</td>
+<td>8306.T</td>
+<td class='signal-buy'>BUY</td>
+<td class='signal-hold'>-</td>
+<td>85</td>
 <td>100</td>
 <td>A</td>
-<td>151</td>
-<td>68.5714379135545</td>
-<td>1.058512313680836</td>
-<td>2.092857360839844</td>
+<td>3,799</td>
+<td>72.79489904357067</td>
+<td>138.9188623111413</td>
+<td>106.7857142857143</td>
 <td>0</td>
 <td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
+<td>3,685</td>
+<td>参考株数が100株未満のため0株としました。</td>
+<td>価格が全ての移動平均線を上回り、MACDがシグナルラインを上回る強気のテクニカル指標を示している。RSIは72.79でやや過熱気味だが、全体的なトレンドは強い。ATRはボラティリティの指標として適度であり、ストップ価格も適切に設定されている。</td>
+<td>-</td>
 </tr>
 <tr>
 <td>3</td>
-<td>6501.T</td>
+<td>9432.T</td>
 <td class='signal-hold'>HOLD</td>
-<td>90</td>
+<td class='signal-hold'>-</td>
+<td>75</td>
+<td>100</td>
 <td>A</td>
-<td>4,850</td>
-<td>62.22684703433923</td>
-<td>10.91955270559083</td>
-<td>137.5714285714286</td>
+<td>154</td>
+<td>72.50001192094032</td>
+<td>1.31520858917122</td>
+<td>2.214286804199219</td>
 <td>0</td>
 <td>0</td>
 <td>0</td>
 <td>BUY判定ではないため、参考株数は0です。</td>
+<td>価格は短期移動平均線を上回っておりRSIが72.5と高水準なためやや買い圧力が強いが、MACDはわずかながら上昇を示し技術的シグナルはHOLDであり過熱感が懸念されるため、確実な買いサインとは言い難い。判定には慎重さが必要。</td>
+<td>-</td>
 </tr>
 <tr>
 <td>4</td>
-<td>6758.T</td>
+<td>6098.T</td>
 <td class='signal-hold'>HOLD</td>
-<td>72</td>
-<td>B</td>
-<td>3,409</td>
-<td>53.05263157894736</td>
-<td>23.3121595216362</td>
-<td>76.28571428571429</td>
+<td class='signal-hold'>-</td>
+<td>80</td>
+<td>94</td>
+<td>A</td>
+<td>12,580</td>
+<td>59.94194484760523</td>
+<td>421.9446802665134</td>
+<td>414.2857142857143</td>
 <td>0</td>
 <td>0</td>
 <td>0</td>
 <td>BUY判定ではないため、参考株数は0です。</td>
+<td>Price is above all moving averages (ma_short, ma_middle, ma_long), indicating a bullish trend. MACD is positive and close to the signal line, suggesting potential upward momentum. RSI is moderate (~60), not indicating overbought. Grade A and high overall score (94) support a positive outlook. ATR is relatively high indicating volatility, but overall technical signals align with a buy recommendation despite the technical_signal HOLD note.</td>
+<td>-</td>
 </tr>
 <tr>
 <td>5</td>
-<td>6098.T</td>
+<td>7203.T</td>
 <td class='signal-hold'>HOLD</td>
-<td>70</td>
-<td>B</td>
-<td>12,055</td>
-<td>52.29202037351443</td>
-<td>433.7060962678588</td>
-<td>387.8571428571428</td>
+<td class='signal-hold'>-</td>
+<td>80</td>
+<td>90</td>
+<td>A</td>
+<td>2,961</td>
+<td>54.18502202643172</td>
+<td>25.52067941498126</td>
+<td>59.07142857142857</td>
 <td>0</td>
 <td>0</td>
 <td>0</td>
 <td>BUY判定ではないため、参考株数は0です。</td>
+<td>Price is very close to the long-term moving average with a moderately positive MACD and an RSI near neutral. The overall technical signal is HOLD, and while the grade is A and the score is high, the lack of a stop price and moderate momentum indicators suggest caution.</td>
+<td>-</td>
 </tr>
 <tr>
 <td>6</td>
-<td>7203.T</td>
+<td>6501.T</td>
 <td class='signal-hold'>HOLD</td>
-<td>60</td>
-<td>B</td>
-<td>2,897</td>
-<td>57.11340206185567</td>
-<td>21.52534935291669</td>
-<td>60.42857142857143</td>
+<td class='signal-hold'>-</td>
+<td>80</td>
+<td>86</td>
+<td>A</td>
+<td>5,026</td>
+<td>61.66842661034848</td>
+<td>29.0929183419621</td>
+<td>137.1428571428571</td>
 <td>0</td>
 <td>0</td>
 <td>0</td>
 <td>BUY判定ではないため、参考株数は0です。</td>
+<td>現在価格(5026)は全ての移動平均線(短期:4745.4、中期:4843.2、長期:4858.9)を上回っており強気相場を示唆。MACD(29.09)もシグナルライン(-2.83)を上回っており買いの勢いがある。RSIは61.67で買われ過ぎではなく適度な強気傾向。ATRはボラティリティを示すが売買判断には中立。全体のscoreも86と高評価。technical_signalはHOLDだが他の指標が強気を示すためBUYを推奨。</td>
+<td>-</td>
 </tr>
 <tr>
 <td>7</td>
-<td>6861.T</td>
+<td>8035.T</td>
 <td class='signal-hold'>HOLD</td>
-<td>28</td>
-<td>D</td>
-<td>71,820</td>
-<td>28.21171634121275</td>
-<td>-1292.930785947319</td>
-<td>2350.0</td>
+<td class='signal-hold'>-</td>
+<td>75</td>
+<td>10</td>
+<td>E</td>
+<td>62,660</td>
+<td>33.90000000000001</td>
+<td>-733.3945107931213</td>
+<td>4029.285714285714</td>
 <td>0</td>
 <td>0</td>
 <td>0</td>
 <td>BUY判定ではないため、参考株数は0です。</td>
+<td>価格が短期・中期・長期移動平均線を下回り、MACDが負の値でシグナルラインより下に位置。RSIが33.9と買われすぎ領域に近くなく、ATRのボラティリティも高い。これらは弱気のテクニカルサインを示しており、またグレードがEと低いため売りシグナルと判断する。</td>
+<td>-</td>
 </tr>
 <tr>
 <td>8</td>
-<td>4063.T</td>
+<td>6861.T</td>
 <td class='signal-hold'>HOLD</td>
-<td>20</td>
-<td>D</td>
-<td>6,702</td>
-<td>45.4383464005702</td>
-<td>-43.71144526283751</td>
-<td>302.2142857142857</td>
+<td class='signal-hold'>-</td>
+<td>70</td>
+<td>6</td>
+<td>E</td>
+<td>73,710</td>
+<td>32.64223722275796</td>
+<td>-1216.430409134628</td>
+<td>2330.0</td>
 <td>0</td>
 <td>0</td>
 <td>0</td>
 <td>BUY判定ではないため、参考株数は0です。</td>
+<td>現在の価格は短期移動平均線（72372）以上ですが、中長期移動平均線（約76000）を下回っており、MACDはマイナスで売り圧力を示しています。RSIは約32とやや売られ過ぎに近いが明確な反転シグナルではありません。総合的に明確な買いまたは売りのシグナルが確認できないため、慎重に様子見するのが適切と判断します。</td>
+<td>-</td>
 </tr>
 <tr>
 <td>9</td>
-<td>8035.T</td>
+<td>4063.T</td>
 <td class='signal-hold'>HOLD</td>
-<td>16</td>
+<td class='signal-hold'>-</td>
+<td>70</td>
+<td>4</td>
 <td>E</td>
-<td>62,660</td>
-<td>32.9339378238342</td>
-<td>-330.8487271338236</td>
-<td>4185.0</td>
+<td>6,162</td>
+<td>28.31429560401524</td>
+<td>-116.8415933560063</td>
+<td>309.3571428571428</td>
 <td>0</td>
 <td>0</td>
 <td>0</td>
 <td>BUY判定ではないため、参考株数は0です。</td>
+<td>価格が移動平均線（短期、中期、長期）を大きく下回り、MACDがMACDシグナルラインを下回っており、RSIも28.3と売られ過ぎ水準。ただし、総合スコアは4.0と低く、TAシグナルもHOLDであり反発の明確な兆候は見られない。情報不足もあり、リスクを避けてHOLDを推奨。</td>
+<td>-</td>
 </tr>
 <tr>
 <td>10</td>
 <td>9984.T</td>
 <td class='signal-hold'>HOLD</td>
-<td>14</td>
+<td class='signal-hold'>-</td>
+<td>70</td>
+<td>0</td>
 <td>E</td>
-<td>5,500</td>
-<td>40.15887025595763</td>
-<td>-217.0396306074163</td>
-<td>436.4285714285714</td>
+<td>5,313</td>
+<td>40.19434628975264</td>
+<td>-248.147138155533</td>
+<td>447.0714285714286</td>
 <td>0</td>
 <td>0</td>
 <td>0</td>
 <td>BUY判定ではないため、参考株数は0です。</td>
+<td>現在の価格5313は全ての移動平均線（短期5637、中期5936、長期6413）を下回っており、トレンドは弱気と判断されます。MACDが-248とシグナルライン-191より低く、下落圧力を示しています。RSIは40付近で弱気に近いがまだ売られすぎではないため、追加の下落余地があります。ATR値は変動がやや大きいことを示していますが、全体的に調整局面と見なせ売り優勢の状況です。テクニカルシグナルは中立(HOLD)ですが、総合的な指標からリスク回避のためSELLを推奨します。</td>
+<td>-</td>
 </tr>
       </tbody>
     </table>

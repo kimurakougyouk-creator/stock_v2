@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from config import TRADING_CAPITAL
+from ai_asset_platform.reports import calculate_performance
 
 
 def _format_currency(value: Any) -> str:
@@ -58,12 +60,42 @@ def _safe_read_summary_excel(base_dir: Path) -> dict[str, Any]:
     return values
 
 
+def _safe_read_trade_pnls(base_dir: Path) -> list[float]:
+    """Paper Tradingの実現損益履歴を安全に読み込む。"""
+    path = base_dir / "paper_trade_pnls.json"
+
+    if not path.exists():
+        return []
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+
+    if isinstance(data, dict):
+        data = data.get("realized_trade_pnls", [])
+
+    if not isinstance(data, list):
+        return []
+
+    pnls: list[float] = []
+    for value in data:
+        try:
+            pnls.append(float(value))
+        except (TypeError, ValueError):
+            continue
+
+    return pnls
+
+
 def build_dashboard_html(base_dir: Path | None = None) -> str:
     base_dir = Path(base_dir or Path("results"))
     base_dir.mkdir(exist_ok=True, parents=True)
 
     signal_df = _safe_read_signal_excel(base_dir)
     summary_info = _safe_read_summary_excel(base_dir)
+    trade_pnls = _safe_read_trade_pnls(base_dir)
+    performance = calculate_performance(trade_pnls)
 
     if signal_df.empty:
         rows = []
@@ -277,6 +309,23 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
       <div class=\"metric\"><strong>平均スコア</strong><br>{average_score:.1f}</div>
       <div class=\"metric\"><strong>参考運用資金</strong><br>{_format_currency(TRADING_CAPITAL)}</div>
       <div class=\"metric\"><strong>サマリー</strong><br>{summary_line}</div>
+    </div>
+  </div>
+  <div class=\"card\">
+    <h2>Paper Trading運用成績</h2>
+    <div class=\"grid\">
+      <div class=\"metric\"><strong>総取引数</strong><br>{performance.total_trades}</div>
+      <div class=\"metric\"><strong>勝ち取引</strong><br>{performance.winning_trades}</div>
+      <div class=\"metric\"><strong>負け取引</strong><br>{performance.losing_trades}</div>
+      <div class=\"metric\"><strong>引き分け</strong><br>{performance.break_even_trades}</div>
+      <div class=\"metric\"><strong>勝率</strong><br>{performance.win_rate:.1f}%</div>
+      <div class=\"metric\"><strong>純損益</strong><br>{_format_currency(performance.net_profit)}円</div>
+      <div class=\"metric\"><strong>総利益</strong><br>{_format_currency(performance.gross_profit)}円</div>
+      <div class=\"metric\"><strong>総損失</strong><br>{_format_currency(performance.gross_loss)}円</div>
+      <div class=\"metric\"><strong>平均利益</strong><br>{_format_currency(performance.average_profit)}円</div>
+      <div class=\"metric\"><strong>平均損失</strong><br>{_format_currency(performance.average_loss)}円</div>
+      <div class=\"metric\"><strong>最大利益</strong><br>{_format_currency(performance.largest_profit)}円</div>
+      <div class=\"metric\"><strong>最大損失</strong><br>{_format_currency(performance.largest_loss)}円</div>
     </div>
   </div>
   <div class=\"card\">
