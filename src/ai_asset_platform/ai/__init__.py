@@ -5,6 +5,8 @@ from .ai_judge import (
     judge_with_ai,
 )
 from .providers import (
+    ClaudeProvider,
+    ClaudeRequestFunction,
     GeminiProvider,
     GeminiRequestFunction,
     OpenAIProvider,
@@ -19,6 +21,8 @@ from .providers import (
 __all__ = [
     "AIJudgeResult",
     "AIProvider",
+    "ClaudeProvider",
+    "ClaudeRequestFunction",
     "GeminiProvider",
     "GeminiRequestFunction",
     "OpenAIProvider",

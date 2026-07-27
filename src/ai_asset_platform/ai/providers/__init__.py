@@ -1,3 +1,4 @@
+from .claude_provider import ClaudeProvider, ClaudeRequestFunction
 from .gemini_provider import GeminiProvider, GeminiRequestFunction
 from .openai_provider import OpenAIProvider, OpenAIRequestFunction
 from .registry import (
@@ -14,7 +15,12 @@ if not default_registry.is_registered("openai"):
 if not default_registry.is_registered("gemini"):
     default_registry.register("gemini", GeminiProvider)
 
+if not default_registry.is_registered("claude"):
+    default_registry.register("claude", ClaudeProvider)
+
 __all__ = [
+    "ClaudeProvider",
+    "ClaudeRequestFunction",
     "GeminiProvider",
     "GeminiRequestFunction",
     "OpenAIProvider",
