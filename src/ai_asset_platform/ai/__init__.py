@@ -5,6 +5,8 @@ from .ai_judge import (
     judge_with_ai,
 )
 from .providers import (
+    OpenAIProvider,
+    OpenAIRequestFunction,
     ProviderRegistry,
     create_provider,
     default_registry,
@@ -15,6 +17,8 @@ from .providers import (
 __all__ = [
     "AIJudgeResult",
     "AIProvider",
+    "OpenAIProvider",
+    "OpenAIRequestFunction",
     "ProviderRegistry",
     "create_provider",
     "create_safe_fallback",
