@@ -139,6 +139,65 @@ def calculate_daily_realized_pnl(
     return daily_realized_pnl
 
 
+def calculate_consecutive_losses() -> int:
+    """直近の確定取引が何回連続で損失になったかを返します。
+
+    SELLごとの確定損益を移動平均取得価格で計算します。
+    利益または損益ゼロの取引があると連敗はリセットされます。
+    """
+
+    positions: dict[str, int] = {}
+    average_costs: dict[str, float] = {}
+    realized_trade_pnls: list[float] = []
+
+    for order in load_paper_orders():
+        try:
+            ticker = str(order["ticker"])
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0:
+            continue
+
+        held_shares = positions.get(ticker, 0)
+        average_cost = average_costs.get(ticker, 0.0)
+
+        if side == "BUY":
+            total_cost = (held_shares * average_cost) + (shares * price)
+            new_shares = held_shares + shares
+
+            positions[ticker] = new_shares
+            average_costs[ticker] = (
+                total_cost / new_shares
+                if new_shares > 0
+                else 0.0
+            )
+
+        elif side == "SELL" and held_shares > 0:
+            sold_shares = min(shares, held_shares)
+            trade_pnl = (price - average_cost) * sold_shares
+            realized_trade_pnls.append(trade_pnl)
+
+            remaining_shares = held_shares - sold_shares
+            positions[ticker] = remaining_shares
+
+            if remaining_shares <= 0:
+                average_costs[ticker] = 0.0
+
+    consecutive_losses = 0
+
+    for trade_pnl in reversed(realized_trade_pnls):
+        if trade_pnl < 0:
+            consecutive_losses += 1
+        else:
+            break
+
+    return consecutive_losses
+
+
 def calculate_unrealized_pnl(current_prices: dict[str, float]) -> dict[str, float]:
     """現在価格から保有銘柄の含み損益を計算します。"""
 

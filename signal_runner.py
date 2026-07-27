@@ -17,6 +17,7 @@ from ai_asset_platform.core.settings import SETTINGS
 from indicators import add_indicators
 from mail import send_mail
 from order_manager import (
+    calculate_consecutive_losses,
     calculate_daily_realized_pnl,
     create_paper_order,
     get_open_positions,
@@ -128,6 +129,19 @@ def run_signal_scan(
                         and daily_realized_pnl <= -daily_loss_limit_yen
                     )
 
+                    max_consecutive_losses = int(
+                        getattr(SETTINGS, "max_consecutive_losses", 0)
+                    )
+                    consecutive_losses = (
+                        calculate_consecutive_losses()
+                        if max_consecutive_losses > 0
+                        else 0
+                    )
+                    consecutive_loss_limit_reached = (
+                        max_consecutive_losses > 0
+                        and consecutive_losses >= max_consecutive_losses
+                    )
+
                     if (
                         final_decision.signal == "BUY"
                         and daily_loss_limit_reached
@@ -137,6 +151,16 @@ def run_signal_scan(
                             f"{daily_realized_pnl:,.0f}円となり、"
                             f"1日の損失上限"
                             f"{daily_loss_limit_yen:,.0f}円に達したため、"
+                            "新規BUY注文を見送りました。"
+                        )
+                    elif (
+                        final_decision.signal == "BUY"
+                        and consecutive_loss_limit_reached
+                    ):
+                        print(
+                            f"{ticker}: 現在{consecutive_losses}連敗しており、"
+                            f"最大連敗回数"
+                            f"{max_consecutive_losses}回に達したため、"
                             "新規BUY注文を見送りました。"
                         )
                     elif final_decision.signal == "BUY" and held_shares > 0:
