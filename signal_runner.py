@@ -136,6 +136,16 @@ def run_signal_scan(
                             f"{ticker}: AI最終判定による模擬注文を記録しました "
                             f"({paper_order['side']} {paper_order['shares']}株)"
                         )
+                    elif SETTINGS.live_trading_unlocked:
+                        print(
+                            f"{ticker}: 本番取引の安全ロックは解除されていますが、"
+                            "本番注文機能は未実装のため注文しません。"
+                        )
+                    else:
+                        print(
+                            f"{ticker}: 取引モードの安全ロックにより、"
+                            "注文を見送りました。"
+                        )
                 else:
                     print(
                         f"{ticker}: 最終{final_decision.signal}判定ですが、"

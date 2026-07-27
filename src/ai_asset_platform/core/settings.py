@@ -13,12 +13,22 @@ class PlatformSettings:
     run_mode: str = "DEVELOPMENT"
     enable_ai: bool = True
     enable_paper_trading: bool = True
+    enable_live_trading: bool = False
     supported_markets: tuple[str, ...] = field(
         default_factory=lambda: ("JP_STOCK",)
     )
     supported_brokers: tuple[str, ...] = field(
         default_factory=lambda: ("SBI",)
     )
+
+    @property
+    def live_trading_unlocked(self) -> bool:
+        """本番取引の二重安全ロックが解除されているかを返す。"""
+
+        return (
+            self.run_mode == "LIVE"
+            and self.enable_live_trading is True
+        )
 
 
 SETTINGS = PlatformSettings()
