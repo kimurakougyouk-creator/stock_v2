@@ -45,6 +45,8 @@ def run_signal_scan(
     tickers: list[str] | None = None,
     *,
     ai_provider: Any | None = None,
+    allow_orders: bool = True,
+    allow_email: bool = True,
 ) -> dict[str, Any]:
     if tickers is None:
         ticker_df = pd.read_csv("tickers.csv")
@@ -95,7 +97,7 @@ def run_signal_scan(
                 provider=ai_provider,
             )
 
-            if signal_result["signal"] in {"BUY", "SELL"}:
+            if allow_orders and signal_result["signal"] in {"BUY", "SELL"}:
                 shares = int(signal_result["reference_shares"] or 0)
                 positions = get_open_positions()
                 held_shares = int(positions.get(ticker, 0))
@@ -217,7 +219,9 @@ def run_signal_scan(
 
     if not output_df.empty:
         actionable = output_df[output_df["Signal"].isin(["BUY", "SELL"])]
-        if not actionable.empty:
+        if not actionable.empty and not allow_email:
+            print("BUY/SELLシグナルはありますが、メール通知は無効です。")
+        elif not actionable.empty:
             subject = "売買シグナル通知"
             body_lines = ["最新の売買シグナル一覧です。", ""]
             for _, row in actionable.iterrows():
