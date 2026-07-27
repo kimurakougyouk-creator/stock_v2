@@ -81,6 +81,11 @@ def _prepare_common_mocks(monkeypatch, technical_signal: str) -> None:
         "calculate_consecutive_losses",
         lambda: 0,
     )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_available_cash",
+        lambda initial_capital: float(initial_capital),
+    )
 
 
 def test_final_hold_does_not_create_order(monkeypatch):
@@ -634,4 +639,111 @@ def test_consecutive_loss_limit_does_not_block_sell(monkeypatch):
 
     assert len(created_orders) == 1
     assert created_orders[0]["signal"] == "SELL"
+
+def test_available_cash_limits_buy_shares(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(signal_runner, "get_open_positions", lambda: {})
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_available_cash",
+        lambda initial_capital: 250_000.0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs) or {
+            "side": kwargs["signal"],
+            "shares": kwargs["shares"],
+        },
+    )
+    monkeypatch.setattr(signal_runner, "LOT_SIZE", 100)
+    monkeypatch.setattr(signal_runner, "TRADING_CAPITAL", 1_000_000)
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            emergency_stop=False,
+            max_order_shares=500,
+            daily_loss_limit_yen=10_000.0,
+            max_consecutive_losses=3,
+            enable_paper_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert len(created_orders) == 1
+    assert created_orders[0]["shares"] == 100
+
+
+def test_available_cash_blocks_unaffordable_buy(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(signal_runner, "get_open_positions", lambda: {})
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_available_cash",
+        lambda initial_capital: 100_000.0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs),
+    )
+    monkeypatch.setattr(signal_runner, "LOT_SIZE", 100)
+    monkeypatch.setattr(signal_runner, "TRADING_CAPITAL", 1_000_000)
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            emergency_stop=False,
+            max_order_shares=500,
+            daily_loss_limit_yen=10_000.0,
+            max_consecutive_losses=3,
+            enable_paper_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert created_orders == []
 

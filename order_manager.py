@@ -63,6 +63,46 @@ def load_paper_orders() -> list[dict]:
     return orders
 
 
+def calculate_available_cash(initial_capital: float) -> float:
+    """注文履歴を使って現在利用できる現金残高を計算します。
+
+    BUY金額を差し引き、SELL金額を加算します。
+    手数料や税金は現段階では計算に含めません。
+    """
+
+    try:
+        available_cash = float(initial_capital)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "initial_capitalは0以上の数値を指定してください。"
+        ) from exc
+
+    if available_cash < 0:
+        raise ValueError(
+            "initial_capitalは0以上の数値を指定してください。"
+        )
+
+    for order in load_paper_orders():
+        try:
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0 or price < 0:
+            continue
+
+        order_amount = shares * price
+
+        if side == "BUY":
+            available_cash -= order_amount
+        elif side == "SELL":
+            available_cash += order_amount
+
+    return max(0.0, available_cash)
+
+
 def get_open_positions() -> dict[str, int]:
     """現在の保有株数を銘柄ごとに集計します。"""
 

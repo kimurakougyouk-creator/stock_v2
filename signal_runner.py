@@ -12,11 +12,19 @@ from ai_asset_platform.ai import (
     load_ai_settings,
 )
 from ai_asset_platform.decision import determine_final_decision
-from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PERIOD
+from config import (
+    APP_PASSWORD,
+    EMAIL_ADDRESS,
+    INTERVAL,
+    LOT_SIZE,
+    PERIOD,
+    TRADING_CAPITAL,
+)
 from ai_asset_platform.core.settings import SETTINGS
 from indicators import add_indicators
 from mail import send_mail
 from order_manager import (
+    calculate_available_cash,
     calculate_consecutive_losses,
     calculate_daily_realized_pnl,
     create_paper_order,
@@ -179,10 +187,42 @@ def run_signal_scan(
                         )
                         order_shares = min(shares, max_order_shares)
 
-                        if final_decision.signal == "SELL":
-                            order_shares = min(order_shares, held_shares)
+                        if final_decision.signal == "BUY":
+                            reference_price = float(
+                                signal_result["price"]
+                            )
+                            available_cash = calculate_available_cash(
+                                TRADING_CAPITAL
+                            )
 
-                        if order_shares <= 0:
+                            affordable_shares = int(
+                                available_cash // reference_price
+                            )
+                            affordable_shares = (
+                                affordable_shares // LOT_SIZE
+                            ) * LOT_SIZE
+
+                            order_shares = min(
+                                order_shares,
+                                affordable_shares,
+                            )
+
+                        if final_decision.signal == "SELL":
+                            order_shares = min(
+                                order_shares,
+                                held_shares,
+                            )
+
+                        if (
+                            final_decision.signal == "BUY"
+                            and order_shares <= 0
+                        ):
+                            print(
+                                f"{ticker}: 利用可能資金では"
+                                f"{LOT_SIZE}株以上購入できないため、"
+                                "新規BUY注文を見送りました。"
+                            )
+                        elif order_shares <= 0:
                             print(
                                 f"{ticker}: 注文数量上限により、"
                                 "注文を見送りました。"
