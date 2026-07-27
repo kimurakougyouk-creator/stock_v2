@@ -16,7 +16,11 @@ from config import EMAIL_ADDRESS, APP_PASSWORD, INTERVAL, PERIOD
 from ai_asset_platform.core.settings import SETTINGS
 from indicators import add_indicators
 from mail import send_mail
-from order_manager import create_paper_order, get_open_positions
+from order_manager import (
+    calculate_daily_realized_pnl,
+    create_paper_order,
+    get_open_positions,
+)
 from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
 from signal_engine import determine_signal
@@ -115,7 +119,27 @@ def run_signal_scan(
                     positions = get_open_positions()
                     held_shares = int(positions.get(ticker, 0))
 
-                    if final_decision.signal == "BUY" and held_shares > 0:
+                    daily_realized_pnl = calculate_daily_realized_pnl()
+                    daily_loss_limit_yen = float(
+                        getattr(SETTINGS, "daily_loss_limit_yen", 0.0)
+                    )
+                    daily_loss_limit_reached = (
+                        daily_loss_limit_yen > 0
+                        and daily_realized_pnl <= -daily_loss_limit_yen
+                    )
+
+                    if (
+                        final_decision.signal == "BUY"
+                        and daily_loss_limit_reached
+                    ):
+                        print(
+                            f"{ticker}: 本日の確定損益が"
+                            f"{daily_realized_pnl:,.0f}円となり、"
+                            f"1日の損失上限"
+                            f"{daily_loss_limit_yen:,.0f}円に達したため、"
+                            "新規BUY注文を見送りました。"
+                        )
+                    elif final_decision.signal == "BUY" and held_shares > 0:
                         print(
                             f"{ticker}: 最終BUY判定ですが、"
                             f"すでに{held_shares}株保有しているため注文を見送りました。"

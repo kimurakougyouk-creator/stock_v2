@@ -3,7 +3,7 @@
 初期状態では実際の注文を送信せず、注文内容だけを安全に記録します。
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 import json
 
@@ -78,6 +78,65 @@ def get_open_positions() -> dict[str, int]:
             positions[ticker] = positions.get(ticker, 0) - shares
 
     return {ticker: shares for ticker, shares in positions.items() if shares != 0}
+
+
+def calculate_daily_realized_pnl(
+    target_date: date | None = None,
+) -> float:
+    """指定日の売却で確定した損益を注文履歴から計算します。
+
+    買付価格は銘柄ごとの移動平均取得価格を使用します。
+    target_dateを省略した場合は今日の損益を返します。
+    """
+
+    if target_date is None:
+        target_date = date.today()
+
+    positions: dict[str, int] = {}
+    average_costs: dict[str, float] = {}
+    daily_realized_pnl = 0.0
+
+    for order in load_paper_orders():
+        try:
+            created_at = datetime.fromisoformat(str(order["created_at"]))
+            ticker = str(order["ticker"])
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0:
+            continue
+
+        held_shares = positions.get(ticker, 0)
+        average_cost = average_costs.get(ticker, 0.0)
+
+        if side == "BUY":
+            total_cost = (held_shares * average_cost) + (shares * price)
+            new_shares = held_shares + shares
+
+            positions[ticker] = new_shares
+            average_costs[ticker] = (
+                total_cost / new_shares
+                if new_shares > 0
+                else 0.0
+            )
+
+        elif side == "SELL" and held_shares > 0:
+            sold_shares = min(shares, held_shares)
+            trade_pnl = (price - average_cost) * sold_shares
+
+            if created_at.date() == target_date:
+                daily_realized_pnl += trade_pnl
+
+            remaining_shares = held_shares - sold_shares
+            positions[ticker] = remaining_shares
+
+            if remaining_shares <= 0:
+                average_costs[ticker] = 0.0
+
+    return daily_realized_pnl
 
 
 def calculate_unrealized_pnl(current_prices: dict[str, float]) -> dict[str, float]:

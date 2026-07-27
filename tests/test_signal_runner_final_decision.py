@@ -408,3 +408,108 @@ def test_buy_quantity_is_limited_by_max_order_shares(monkeypatch):
     assert created_orders[0]["signal"] == "BUY"
     assert created_orders[0]["shares"] == 100
 
+def test_daily_loss_limit_blocks_new_buy(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(signal_runner, "get_open_positions", lambda: {})
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_daily_realized_pnl",
+        lambda: -10_000.0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            emergency_stop=False,
+            max_order_shares=100,
+            daily_loss_limit_yen=10_000.0,
+            enable_paper_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert created_orders == []
+
+
+def test_daily_loss_limit_does_not_block_sell(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "SELL")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="SELL",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {"7203.T": 100},
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_daily_realized_pnl",
+        lambda: -10_000.0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs) or {
+            "side": kwargs["signal"],
+            "shares": kwargs["shares"],
+        },
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            emergency_stop=False,
+            max_order_shares=100,
+            daily_loss_limit_yen=10_000.0,
+            enable_paper_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert len(created_orders) == 1
+    assert created_orders[0]["signal"] == "SELL"
+

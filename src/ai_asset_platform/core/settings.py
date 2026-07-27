@@ -14,6 +14,7 @@ class PlatformSettings:
     enable_ai: bool = True
     emergency_stop: bool = False
     max_order_shares: int = 100
+    daily_loss_limit_yen: float = 10_000.0
     enable_paper_trading: bool = True
     enable_live_trading: bool = False
     supported_markets: tuple[str, ...] = field(
@@ -45,6 +46,7 @@ if __name__ == "__main__":
     print("AI      :", SETTINGS.enable_ai)
     print("Stop    :", SETTINGS.emergency_stop)
     print("Max Qty :", SETTINGS.max_order_shares)
+    print("Day Loss:", SETTINGS.daily_loss_limit_yen)
     print("Paper   :", SETTINGS.enable_paper_trading)
     print("Markets :", ", ".join(SETTINGS.supported_markets))
     print("Brokers :", ", ".join(SETTINGS.supported_brokers))
