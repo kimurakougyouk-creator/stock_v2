@@ -4,6 +4,11 @@ from .ai_judge import (
     create_safe_fallback,
     judge_with_ai,
 )
+from .settings import (
+    AISettings,
+    SUPPORTED_AI_PROVIDERS,
+    load_ai_settings,
+)
 from .providers import (
     ClaudeProvider,
     ClaudeRequestFunction,
@@ -19,6 +24,9 @@ from .providers import (
 )
 
 __all__ = [
+    "load_ai_settings",
+    "SUPPORTED_AI_PROVIDERS",
+    "AISettings",
     "AIJudgeResult",
     "AIProvider",
     "ClaudeProvider",
