@@ -105,52 +105,58 @@ def run_signal_scan(
             )
 
             if allow_orders and final_decision.signal in {"BUY", "SELL"}:
-                shares = int(signal_result["reference_shares"] or 0)
-                positions = get_open_positions()
-                held_shares = int(positions.get(ticker, 0))
+                if SETTINGS.emergency_stop:
+                    print(
+                        f"{ticker}: 緊急停止が有効なため、"
+                        "注文を見送りました。"
+                    )
+                else:
+                    shares = int(signal_result["reference_shares"] or 0)
+                    positions = get_open_positions()
+                    held_shares = int(positions.get(ticker, 0))
 
-                if final_decision.signal == "BUY" and held_shares > 0:
-                    print(
-                        f"{ticker}: 最終BUY判定ですが、"
-                        f"すでに{held_shares}株保有しているため注文を見送りました。"
-                    )
-                elif final_decision.signal == "SELL" and held_shares <= 0:
-                    print(
-                        f"{ticker}: 最終SELL判定ですが、"
-                        "保有していないため注文を見送りました。"
-                    )
-                elif shares > 0:
-                    order_shares = (
-                        min(shares, held_shares)
-                        if final_decision.signal == "SELL"
-                        else shares
-                    )
-                    if SETTINGS.enable_paper_trading:
-                        paper_order = create_paper_order(
-                            ticker=ticker,
-                            signal=final_decision.signal,
-                            shares=order_shares,
-                            reference_price=float(signal_result["price"]),
-                        )
+                    if final_decision.signal == "BUY" and held_shares > 0:
                         print(
-                            f"{ticker}: AI最終判定による模擬注文を記録しました "
-                            f"({paper_order['side']} {paper_order['shares']}株)"
+                            f"{ticker}: 最終BUY判定ですが、"
+                            f"すでに{held_shares}株保有しているため注文を見送りました。"
                         )
-                    elif SETTINGS.live_trading_unlocked:
+                    elif final_decision.signal == "SELL" and held_shares <= 0:
                         print(
-                            f"{ticker}: 本番取引の安全ロックは解除されていますが、"
-                            "本番注文機能は未実装のため注文しません。"
+                            f"{ticker}: 最終SELL判定ですが、"
+                            "保有していないため注文を見送りました。"
                         )
+                    elif shares > 0:
+                        order_shares = (
+                            min(shares, held_shares)
+                            if final_decision.signal == "SELL"
+                            else shares
+                        )
+                        if SETTINGS.enable_paper_trading:
+                            paper_order = create_paper_order(
+                                ticker=ticker,
+                                signal=final_decision.signal,
+                                shares=order_shares,
+                                reference_price=float(signal_result["price"]),
+                            )
+                            print(
+                                f"{ticker}: AI最終判定による模擬注文を記録しました "
+                                f"({paper_order['side']} {paper_order['shares']}株)"
+                            )
+                        elif SETTINGS.live_trading_unlocked:
+                            print(
+                                f"{ticker}: 本番取引の安全ロックは解除されていますが、"
+                                "本番注文機能は未実装のため注文しません。"
+                            )
+                        else:
+                            print(
+                                f"{ticker}: 取引モードの安全ロックにより、"
+                                "注文を見送りました。"
+                            )
                     else:
                         print(
-                            f"{ticker}: 取引モードの安全ロックにより、"
-                            "注文を見送りました。"
+                            f"{ticker}: 最終{final_decision.signal}判定ですが、"
+                            "資金管理により注文を見送りました。"
                         )
-                else:
-                    print(
-                        f"{ticker}: 最終{final_decision.signal}判定ですが、"
-                        "資金管理により注文を見送りました。"
-                    )
 
             record = {
                 "Ticker": ticker,

@@ -10,6 +10,7 @@ class TestPlatformSettings(unittest.TestCase):
         self.assertEqual(SETTINGS.system_version, "3.1-dev")
         self.assertEqual(SETTINGS.run_mode, "DEVELOPMENT")
         self.assertTrue(SETTINGS.enable_ai)
+        self.assertFalse(SETTINGS.emergency_stop)
         self.assertTrue(SETTINGS.enable_paper_trading)
         self.assertFalse(SETTINGS.enable_live_trading)
         self.assertIn("JP_STOCK", SETTINGS.supported_markets)
@@ -56,3 +57,12 @@ class TestLiveTradingSafetyLock(unittest.TestCase):
         )
 
         self.assertTrue(settings.live_trading_unlocked)
+
+    def test_emergency_stop_keeps_live_trading_locked(self):
+        settings = PlatformSettings(
+            run_mode="LIVE",
+            enable_live_trading=True,
+            emergency_stop=True,
+        )
+
+        self.assertFalse(settings.live_trading_unlocked)

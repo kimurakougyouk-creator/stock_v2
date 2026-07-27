@@ -178,6 +178,7 @@ def test_paper_trading_disabled_does_not_create_order(monkeypatch):
         signal_runner,
         "SETTINGS",
         SimpleNamespace(
+            emergency_stop=False,
             enable_paper_trading=False,
             live_trading_unlocked=False,
         ),
@@ -302,4 +303,49 @@ def test_sell_quantity_is_limited_to_held_shares(monkeypatch):
     assert len(created_orders) == 1
     assert created_orders[0]["signal"] == "SELL"
     assert created_orders[0]["shares"] == 40
+
+def test_emergency_stop_blocks_paper_order(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            emergency_stop=True,
+            enable_paper_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert created_orders == []
 

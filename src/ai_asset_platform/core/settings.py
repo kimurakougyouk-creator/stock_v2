@@ -12,6 +12,7 @@ class PlatformSettings:
     system_version: str = "3.1-dev"
     run_mode: str = "DEVELOPMENT"
     enable_ai: bool = True
+    emergency_stop: bool = False
     enable_paper_trading: bool = True
     enable_live_trading: bool = False
     supported_markets: tuple[str, ...] = field(
@@ -28,6 +29,7 @@ class PlatformSettings:
         return (
             self.run_mode == "LIVE"
             and self.enable_live_trading is True
+            and self.emergency_stop is False
         )
 
 
@@ -40,6 +42,7 @@ if __name__ == "__main__":
     print("Version :", SETTINGS.system_version)
     print("Mode    :", SETTINGS.run_mode)
     print("AI      :", SETTINGS.enable_ai)
+    print("Stop    :", SETTINGS.emergency_stop)
     print("Paper   :", SETTINGS.enable_paper_trading)
     print("Markets :", ", ".join(SETTINGS.supported_markets))
     print("Brokers :", ", ".join(SETTINGS.supported_brokers))
