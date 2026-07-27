@@ -177,7 +177,10 @@ def test_paper_trading_disabled_does_not_create_order(monkeypatch):
     monkeypatch.setattr(
         signal_runner,
         "SETTINGS",
-        SimpleNamespace(enable_paper_trading=False),
+        SimpleNamespace(
+            enable_paper_trading=False,
+            live_trading_unlocked=False,
+        ),
     )
 
     signal_runner.run_signal_scan(
@@ -187,3 +190,116 @@ def test_paper_trading_disabled_does_not_create_order(monkeypatch):
     )
 
     assert created_orders == []
+
+
+def test_buy_is_blocked_when_position_already_exists(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {"7203.T": 100},
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert created_orders == []
+
+
+def test_sell_is_blocked_when_position_does_not_exist(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "SELL")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="SELL",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(signal_runner, "get_open_positions", lambda: {})
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs),
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert created_orders == []
+
+
+def test_sell_quantity_is_limited_to_held_shares(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "SELL")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="SELL",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {"7203.T": 40},
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs) or {
+            "side": kwargs["signal"],
+            "shares": kwargs["shares"],
+        },
+    )
+
+    signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert len(created_orders) == 1
+    assert created_orders[0]["signal"] == "SELL"
+    assert created_orders[0]["shares"] == 40
+

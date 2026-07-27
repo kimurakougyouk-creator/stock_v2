@@ -1,23 +1,60 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
-echo "=== AI自動売買システム 開発チェック ==="
-echo "現在のブランチ: $(git branch --show-current)"
+set -u
 
-echo
-echo "[1/3] Python構文チェック"
-find . -maxdepth 1 -type f -name "*.py" -print0 |
-    xargs -0 -r python -m py_compile
-echo "OK: Python構文エラーなし"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="$PROJECT_DIR/.venv/bin/python"
+
+cd "$PROJECT_DIR" || exit 1
 
 echo
-echo "[2/3] Git差分チェック"
-git diff --check
-echo "OK: 不正な空白や差分エラーなし"
+echo "========================================"
+echo " AI Asset Platform 自動確認"
+echo "========================================"
+
+if [ ! -x "$PYTHON" ]; then
+    echo "エラー: 仮想環境のPythonが見つかりません。"
+    echo "確認場所: $PYTHON"
+    exit 1
+fi
 
 echo
-echo "[3/3] Git状態"
+echo "=== ① 現在のブランチ ==="
+git branch --show-current
+
+echo
+echo "=== ② 変更ファイル ==="
+if git status --short | grep -q .; then
+    git status --short
+else
+    echo "変更ファイルはありません。"
+fi
+
+echo
+echo "=== ③ 全テスト ==="
+if "$PYTHON" -m pytest -q; then
+    echo
+    echo "✅ 全テストに合格しました。"
+else
+    echo
+    echo "❌ テストに失敗しました。"
+    echo "Gitへの保存は行わず、修正が必要です。"
+    exit 1
+fi
+
+echo
+echo "=== ④ 変更内容の要約 ==="
+if git diff --stat | grep -q .; then
+    git diff --stat
+else
+    echo "未コミットの差分はありません。"
+fi
+
+echo
+echo "=== ⑤ Git状態 ==="
 git status --short
 
 echo
-echo "=== すべてのチェックが完了しました ==="
+echo "========================================"
+echo "✅ 自動確認が正常に完了しました。"
+echo "========================================"
