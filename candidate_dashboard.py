@@ -12,6 +12,8 @@ DISPLAY_COLUMNS = [
     "Rank",
     "Ticker",
     "Signal",
+    "FinalSignal",
+    "AIConfidence",
     "Score",
     "Grade",
     "Close",
@@ -21,6 +23,8 @@ DISPLAY_COLUMNS = [
     "ReferenceAmountYen",
     "MaxLossYen",
     "PositionSizingReason",
+    "AIReason",
+    "FinalReason",
     "Reason",
 ]
 
@@ -47,7 +51,10 @@ def load_candidates(base_dir: Path | None = None) -> pd.DataFrame:
     if df.empty or "Signal" not in df.columns:
         return pd.DataFrame(columns=DISPLAY_COLUMNS)
 
-    candidates = df[df["Signal"].astype(str).str.upper().isin(["BUY", "SELL"])].copy()
+    filter_column = "FinalSignal" if "FinalSignal" in df.columns else "Signal"
+    candidates = df[
+        df[filter_column].astype(str).str.upper().isin(["BUY", "SELL"])
+    ].copy()
     if candidates.empty:
         return pd.DataFrame(columns=DISPLAY_COLUMNS)
 
@@ -152,7 +159,7 @@ def build_candidate_dashboard_html(base_dir: Path | None = None) -> str:
         <tr>
           <th>順位</th>
           <th>銘柄コード</th>
-          <th>売買判断</th>
+          <th>テクニカル</th><th>AI最終</th><th>AI信頼度</th>
           <th>スコア</th>
           <th>評価</th>
           <th>現在価格</th>
