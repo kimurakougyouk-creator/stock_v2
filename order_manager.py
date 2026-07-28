@@ -253,6 +253,47 @@ def calculate_daily_sell_order_count() -> int:
     return count
 
 
+def calculate_daily_trading_amount() -> float:
+    """本日記録されたBUY・SELL注文の売買代金合計を返す。"""
+
+    orders = load_paper_orders()
+    if not orders:
+        return 0.0
+
+    today = datetime.now().date()
+    total_amount = 0.0
+
+    for order in orders:
+        side = str(order.get("side", "")).upper()
+        if side not in {"BUY", "SELL"}:
+            continue
+
+        created_at = order.get("created_at")
+        if not created_at:
+            continue
+
+        try:
+            order_date = datetime.fromisoformat(
+                str(created_at)
+            ).date()
+            shares = int(order.get("shares", 0))
+            reference_price = float(
+                order.get("reference_price", 0.0)
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if order_date != today:
+            continue
+
+        if shares <= 0 or reference_price <= 0:
+            continue
+
+        total_amount += shares * reference_price
+
+    return total_amount
+
+
 def calculate_repurchase_cooldown_remaining_minutes(
     ticker: str,
     cooldown_minutes: int,

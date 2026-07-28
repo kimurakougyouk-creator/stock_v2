@@ -29,6 +29,7 @@ from order_manager import (
     calculate_daily_buy_order_count,
     calculate_daily_realized_pnl,
     calculate_daily_sell_order_count,
+    calculate_daily_trading_amount,
     calculate_repurchase_cooldown_remaining_minutes,
     create_paper_order,
     get_open_positions,
@@ -378,27 +379,65 @@ def run_signal_scan(
                                 f"{ticker}: 注文数量上限により、"
                                 "注文を見送りました。"
                             )
-                        elif SETTINGS.enable_paper_trading:
-                            paper_order = create_paper_order(
-                                ticker=ticker,
-                                signal=final_decision.signal,
-                                shares=order_shares,
-                                reference_price=float(signal_result["price"]),
-                            )
-                            print(
-                                f"{ticker}: AI最終判定による模擬注文を記録しました "
-                                f"({paper_order['side']} {paper_order['shares']}株)"
-                            )
-                        elif SETTINGS.live_trading_unlocked:
-                            print(
-                                f"{ticker}: 本番取引の安全ロックは解除されていますが、"
-                                "本番注文機能は未実装のため注文しません。"
-                            )
                         else:
-                            print(
-                                f"{ticker}: 取引モードの安全ロックにより、"
-                                "注文を見送りました。"
+                            max_daily_trading_amount_yen = float(
+                                getattr(
+                                    SETTINGS,
+                                    "max_daily_trading_amount_yen",
+                                    0.0,
+                                )
                             )
+                            daily_trading_amount = (
+                                calculate_daily_trading_amount()
+                                if max_daily_trading_amount_yen > 0
+                                else 0.0
+                            )
+                            planned_order_amount = (
+                                float(signal_result["price"])
+                                * order_shares
+                            )
+                            projected_daily_trading_amount = (
+                                daily_trading_amount
+                                + planned_order_amount
+                            )
+
+                            if (
+                                max_daily_trading_amount_yen > 0
+                                and projected_daily_trading_amount
+                                > max_daily_trading_amount_yen
+                            ):
+                                print(
+                                    f"{ticker}: 本日の売買代金"
+                                    f"{daily_trading_amount:,.0f}円に、"
+                                    f"今回の注文予定額"
+                                    f"{planned_order_amount:,.0f}円を加えると、"
+                                    f"1日の総取引金額上限"
+                                    f"{max_daily_trading_amount_yen:,.0f}円を"
+                                    "超えるため、注文を見送りました。"
+                                )
+                            elif SETTINGS.enable_paper_trading:
+                                paper_order = create_paper_order(
+                                    ticker=ticker,
+                                    signal=final_decision.signal,
+                                    shares=order_shares,
+                                    reference_price=float(signal_result["price"]),
+                                )
+                                print(
+                                    f"{ticker}: AI最終判定による模擬注文を記録しました "
+                                    f"({paper_order['side']} "
+                                    f"{paper_order['shares']}株)"
+                                )
+                            elif SETTINGS.live_trading_unlocked:
+                                print(
+                                    f"{ticker}: 本番取引の安全ロックは"
+                                    "解除されていますが、"
+                                    "本番注文機能は未実装のため注文しません。"
+                                )
+                            else:
+                                print(
+                                    f"{ticker}: 取引モードの安全ロックにより、"
+                                    "注文を見送りました。"
+                                )
                     else:
                         print(
                             f"{ticker}: 最終{final_decision.signal}判定ですが、"
@@ -494,7 +533,9 @@ def run_signal_scan(
     output_dir = _get_result_dir()
     output_path = output_dir / "latest_signals.xlsx"
     output_df.to_excel(output_path, index=False)
-    format_signal_report(output_path)
+
+    if output_path.exists():
+        format_signal_report(output_path)
 
     if not output_df.empty:
         actionable = output_df[

@@ -19,6 +19,7 @@ class PlatformSettings:
     max_portfolio_allocation: float = 0.80
     max_daily_buy_orders: int = 3
     max_daily_sell_orders: int = 3
+    max_daily_trading_amount_yen: float = 1_000_000.0
     repurchase_cooldown_minutes: int = 60
     daily_loss_limit_yen: float = 10_000.0
     max_consecutive_losses: int = 3
@@ -58,6 +59,7 @@ if __name__ == "__main__":
     print("Portfolio:", SETTINGS.max_portfolio_allocation)
     print("Daily BUY:", SETTINGS.max_daily_buy_orders)
     print("Daily SELL:", SETTINGS.max_daily_sell_orders)
+    print("Day Amount:", SETTINGS.max_daily_trading_amount_yen)
     print("Cooldown :", SETTINGS.repurchase_cooldown_minutes)
     print("Day Loss:", SETTINGS.daily_loss_limit_yen)
     print("Max Lose:", SETTINGS.max_consecutive_losses)
