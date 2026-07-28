@@ -36,11 +36,15 @@ from order_manager import (
     calculate_repurchase_cooldown_remaining_minutes,
     create_paper_order,
     get_open_positions,
+    load_paper_orders,
     update_trailing_high_price,
 )
 from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
-from risk_manager import calculate_position_size
+from risk_manager import (
+    calculate_open_position_risk,
+    calculate_position_size,
+)
 from signal_engine import determine_signal
 
 
@@ -495,11 +499,58 @@ def run_signal_scan(
                                 )
                             )
 
+                            max_portfolio_risk_rate = float(
+                                getattr(
+                                    SETTINGS,
+                                    "max_portfolio_risk_rate",
+                                    1.0,
+                                )
+                            )
+                            max_portfolio_risk_rate = max(
+                                0.0,
+                                min(1.0, max_portfolio_risk_rate),
+                            )
+
+                            current_portfolio_risk_yen = (
+                                calculate_open_position_risk(
+                                    load_paper_orders(),
+                                    stop_loss_rate=STOP_LOSS_RATE,
+                                )
+                            )
+                            max_portfolio_risk_yen = (
+                                float(TRADING_CAPITAL)
+                                * max_portfolio_risk_rate
+                            )
+                            remaining_portfolio_risk_yen = max(
+                                0.0,
+                                max_portfolio_risk_yen
+                                - current_portfolio_risk_yen,
+                            )
+
+                            loss_per_share_yen = (
+                                reference_price
+                                * float(STOP_LOSS_RATE)
+                            )
+
+                            portfolio_risk_limit_shares = (
+                                int(
+                                    remaining_portfolio_risk_yen
+                                    // loss_per_share_yen
+                                )
+                                if loss_per_share_yen > 0
+                                else 0
+                            )
+                            portfolio_risk_limit_shares = (
+                                portfolio_risk_limit_shares
+                                // LOT_SIZE
+                            ) * LOT_SIZE
+
                             order_shares = min(
                                 order_shares,
                                 affordable_shares,
                                 allocation_limit_shares,
                                 risk_limit_shares,
+                                portfolio_risk_limit_shares,
                             )
 
                         if order_signal == "SELL":
@@ -515,8 +566,9 @@ def run_signal_scan(
                             print(
                                 f"{ticker}: 利用可能資金、"
                                 "ポートフォリオ全体の投資比率上限、"
-                                "1銘柄あたりの資金配分上限、または"
-                                "1取引あたりの損失許容額では"
+                                "1銘柄あたりの資金配分上限、"
+                                "1取引あたりの損失許容額、または"
+                                "全保有ポジションの合計リスク上限では"
                                 f"{LOT_SIZE}株以上購入できないため、"
                                 "新規BUY注文を見送りました。"
                             )

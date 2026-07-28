@@ -17,6 +17,7 @@ class PlatformSettings:
     max_positions: int = 5
     max_position_allocation: float = 0.20
     max_portfolio_allocation: float = 0.80
+    max_portfolio_risk_rate: float = 0.03
     max_daily_buy_orders: int = 3
     max_daily_sell_orders: int = 3
     max_daily_trading_amount_yen: float = 1_000_000.0
@@ -59,6 +60,7 @@ if __name__ == "__main__":
     print("Max Pos :", SETTINGS.max_positions)
     print("Max Alloc:", SETTINGS.max_position_allocation)
     print("Portfolio:", SETTINGS.max_portfolio_allocation)
+    print("Risk Rate:", SETTINGS.max_portfolio_risk_rate)
     print("Daily BUY:", SETTINGS.max_daily_buy_orders)
     print("Daily SELL:", SETTINGS.max_daily_sell_orders)
     print("Day Amount:", SETTINGS.max_daily_trading_amount_yen)
