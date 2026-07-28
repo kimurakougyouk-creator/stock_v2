@@ -30,6 +30,7 @@ from order_manager import (
     calculate_daily_realized_pnl,
     calculate_daily_sell_order_count,
     calculate_daily_trading_amount,
+    calculate_position_holding_days,
     calculate_repurchase_cooldown_remaining_minutes,
     create_paper_order,
     get_open_positions,
@@ -121,16 +122,49 @@ def run_signal_scan(
                 ai_result,
             )
 
-            if allow_orders and final_decision.signal in {"BUY", "SELL"}:
+            order_signal = final_decision.signal
+            positions: dict[str, int] = {}
+            held_shares = 0
+            holding_days: int | None = None
+            time_stop_triggered = False
+
+            if allow_orders:
+                positions = get_open_positions()
+                held_shares = int(positions.get(ticker, 0))
+
+                max_holding_days = int(
+                    getattr(SETTINGS, "max_holding_days", 0)
+                )
+
+                if held_shares > 0 and max_holding_days > 0:
+                    holding_days = calculate_position_holding_days(
+                        ticker
+                    )
+                    time_stop_triggered = (
+                        holding_days is not None
+                        and holding_days >= max_holding_days
+                    )
+
+                if time_stop_triggered:
+                    order_signal = "SELL"
+                    print(
+                        f"{ticker}: 保有期間が{holding_days}日となり、"
+                        f"最大保有期間{max_holding_days}日に"
+                        "達したため、Time StopのSELL判定を発動します。"
+                    )
+
+            if allow_orders and order_signal in {"BUY", "SELL"}:
                 if SETTINGS.emergency_stop:
                     print(
                         f"{ticker}: 緊急停止が有効なため、"
                         "注文を見送りました。"
                     )
                 else:
-                    shares = int(signal_result["reference_shares"] or 0)
-                    positions = get_open_positions()
-                    held_shares = int(positions.get(ticker, 0))
+                    shares = (
+                        held_shares
+                        if time_stop_triggered
+                        else int(signal_result["reference_shares"] or 0)
+                    )
 
                     daily_realized_pnl = calculate_daily_realized_pnl()
                     daily_loss_limit_yen = float(
@@ -202,14 +236,14 @@ def run_signal_scan(
                             repurchase_cooldown_minutes,
                         )
                         if (
-                            final_decision.signal == "BUY"
+                            order_signal == "BUY"
                             and repurchase_cooldown_minutes > 0
                         )
                         else 0
                     )
 
                     if (
-                        final_decision.signal == "BUY"
+                        order_signal == "BUY"
                         and daily_loss_limit_reached
                     ):
                         print(
@@ -220,7 +254,7 @@ def run_signal_scan(
                             "新規BUY注文を見送りました。"
                         )
                     elif (
-                        final_decision.signal == "BUY"
+                        order_signal == "BUY"
                         and consecutive_loss_limit_reached
                     ):
                         print(
@@ -230,7 +264,7 @@ def run_signal_scan(
                             "新規BUY注文を見送りました。"
                         )
                     elif (
-                        final_decision.signal == "BUY"
+                        order_signal == "BUY"
                         and daily_buy_limit_reached
                     ):
                         print(
@@ -241,7 +275,7 @@ def run_signal_scan(
                             "新規BUY注文を見送りました。"
                         )
                     elif (
-                        final_decision.signal == "BUY"
+                        order_signal == "BUY"
                         and repurchase_cooldown_remaining > 0
                     ):
                         print(
@@ -250,13 +284,13 @@ def run_signal_scan(
                             f"あと約{repurchase_cooldown_remaining}分間、"
                             "新規BUY注文を見送ります。"
                         )
-                    elif final_decision.signal == "BUY" and held_shares > 0:
+                    elif order_signal == "BUY" and held_shares > 0:
                         print(
                             f"{ticker}: 最終BUY判定ですが、"
                             f"すでに{held_shares}株保有しているため注文を見送りました。"
                         )
                     elif (
-                        final_decision.signal == "BUY"
+                        order_signal == "BUY"
                         and held_shares <= 0
                         and max_positions_reached
                     ):
@@ -268,7 +302,7 @@ def run_signal_scan(
                             "新規BUY注文を見送りました。"
                         )
                     elif (
-                        final_decision.signal == "SELL"
+                        order_signal == "SELL"
                         and daily_sell_limit_reached
                     ):
                         print(
@@ -278,7 +312,7 @@ def run_signal_scan(
                             f"{max_daily_sell_orders}回に達したため、"
                             "SELL注文を見送りました。"
                         )
-                    elif final_decision.signal == "SELL" and held_shares <= 0:
+                    elif order_signal == "SELL" and held_shares <= 0:
                         print(
                             f"{ticker}: 最終SELL判定ですが、"
                             "保有していないため注文を見送りました。"
@@ -287,9 +321,13 @@ def run_signal_scan(
                         max_order_shares = int(
                             getattr(SETTINGS, "max_order_shares", shares)
                         )
-                        order_shares = min(shares, max_order_shares)
+                        order_shares = (
+                            shares
+                            if time_stop_triggered
+                            else min(shares, max_order_shares)
+                        )
 
-                        if final_decision.signal == "BUY":
+                        if order_signal == "BUY":
                             reference_price = float(
                                 signal_result["price"]
                             )
@@ -357,14 +395,14 @@ def run_signal_scan(
                                 allocation_limit_shares,
                             )
 
-                        if final_decision.signal == "SELL":
+                        if order_signal == "SELL":
                             order_shares = min(
                                 order_shares,
                                 held_shares,
                             )
 
                         if (
-                            final_decision.signal == "BUY"
+                            order_signal == "BUY"
                             and order_shares <= 0
                         ):
                             print(
@@ -418,12 +456,18 @@ def run_signal_scan(
                             elif SETTINGS.enable_paper_trading:
                                 paper_order = create_paper_order(
                                     ticker=ticker,
-                                    signal=final_decision.signal,
+                                    signal=order_signal,
                                     shares=order_shares,
                                     reference_price=float(signal_result["price"]),
                                 )
+                                order_reason = (
+                                    "Time Stop"
+                                    if time_stop_triggered
+                                    else "AI最終判定"
+                                )
                                 print(
-                                    f"{ticker}: AI最終判定による模擬注文を記録しました "
+                                    f"{ticker}: {order_reason}による"
+                                    "模擬注文を記録しました "
                                     f"({paper_order['side']} "
                                     f"{paper_order['shares']}株)"
                                 )
@@ -440,7 +484,7 @@ def run_signal_scan(
                                 )
                     else:
                         print(
-                            f"{ticker}: 最終{final_decision.signal}判定ですが、"
+                            f"{ticker}: 最終{order_signal}判定ですが、"
                             "資金管理により注文を見送りました。"
                         )
 

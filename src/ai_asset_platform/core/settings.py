@@ -23,6 +23,7 @@ class PlatformSettings:
     repurchase_cooldown_minutes: int = 60
     daily_loss_limit_yen: float = 10_000.0
     max_consecutive_losses: int = 3
+    max_holding_days: int = 30
     enable_paper_trading: bool = True
     enable_live_trading: bool = False
     supported_markets: tuple[str, ...] = field(
@@ -63,6 +64,7 @@ if __name__ == "__main__":
     print("Cooldown :", SETTINGS.repurchase_cooldown_minutes)
     print("Day Loss:", SETTINGS.daily_loss_limit_yen)
     print("Max Lose:", SETTINGS.max_consecutive_losses)
+    print("Hold Days:", SETTINGS.max_holding_days)
     print("Paper   :", SETTINGS.enable_paper_trading)
     print("Markets :", ", ".join(SETTINGS.supported_markets))
     print("Brokers :", ", ".join(SETTINGS.supported_brokers))

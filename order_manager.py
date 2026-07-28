@@ -191,6 +191,74 @@ def get_open_positions() -> dict[str, int]:
 
 
 
+def calculate_position_holding_days(
+    ticker: str,
+    *,
+    current_time: datetime | None = None,
+) -> int | None:
+    """現在保有中の最も古い残存株の保有日数を返します。
+
+    BUY注文を取得日の古い順に保有ロットとして管理し、
+    SELL注文は古いロットから順番に差し引きます。
+
+    現在保有していない場合はNoneを返します。
+    不正な注文履歴は安全のため無視します。
+    """
+
+    ticker = str(ticker)
+    current_time = current_time or datetime.now()
+    open_lots: list[list[object]] = []
+
+    for order in load_paper_orders():
+        if str(order.get("ticker", "")) != ticker:
+            continue
+
+        try:
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            created_at = datetime.fromisoformat(
+                str(order["created_at"])
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0:
+            continue
+
+        if side == "BUY":
+            open_lots.append([shares, created_at])
+
+        elif side == "SELL":
+            remaining_to_sell = shares
+
+            while remaining_to_sell > 0 and open_lots:
+                lot_shares = int(open_lots[0][0])
+
+                if remaining_to_sell >= lot_shares:
+                    remaining_to_sell -= lot_shares
+                    open_lots.pop(0)
+                else:
+                    open_lots[0][0] = lot_shares - remaining_to_sell
+                    remaining_to_sell = 0
+
+    if not open_lots:
+        return None
+
+    oldest_buy_time = open_lots[0][1]
+
+    if not isinstance(oldest_buy_time, datetime):
+        return None
+
+    elapsed_seconds = (
+        current_time - oldest_buy_time
+    ).total_seconds()
+
+    if elapsed_seconds <= 0:
+        return 0
+
+    return int(elapsed_seconds // 86_400)
+
+
 def calculate_daily_buy_order_count() -> int:
     """本日記録されたBUY注文数を返す。"""
 
