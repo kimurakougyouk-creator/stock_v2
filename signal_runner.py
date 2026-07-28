@@ -28,6 +28,7 @@ from order_manager import (
     calculate_consecutive_losses,
     calculate_daily_buy_order_count,
     calculate_daily_realized_pnl,
+    calculate_daily_sell_order_count,
     calculate_repurchase_cooldown_remaining_minutes,
     create_paper_order,
     get_open_positions,
@@ -174,6 +175,19 @@ def run_signal_scan(
                         and daily_buy_order_count >= max_daily_buy_orders
                     )
 
+                    max_daily_sell_orders = int(
+                        getattr(SETTINGS, "max_daily_sell_orders", 0)
+                    )
+                    daily_sell_order_count = (
+                        calculate_daily_sell_order_count()
+                        if max_daily_sell_orders > 0
+                        else 0
+                    )
+                    daily_sell_limit_reached = (
+                        max_daily_sell_orders > 0
+                        and daily_sell_order_count >= max_daily_sell_orders
+                    )
+
                     repurchase_cooldown_minutes = int(
                         getattr(
                             SETTINGS,
@@ -251,6 +265,17 @@ def run_signal_scan(
                             f"最大保有銘柄数"
                             f"{max_positions}銘柄に達したため、"
                             "新規BUY注文を見送りました。"
+                        )
+                    elif (
+                        final_decision.signal == "SELL"
+                        and daily_sell_limit_reached
+                    ):
+                        print(
+                            f"{ticker}: 本日のSELL注文が"
+                            f"{daily_sell_order_count}回となり、"
+                            f"1日の上限"
+                            f"{max_daily_sell_orders}回に達したため、"
+                            "SELL注文を見送りました。"
                         )
                     elif final_decision.signal == "SELL" and held_shares <= 0:
                         print(

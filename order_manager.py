@@ -221,6 +221,38 @@ def calculate_daily_buy_order_count() -> int:
 
     return count
 
+
+def calculate_daily_sell_order_count() -> int:
+    """本日記録されたSELL注文数を返す。"""
+
+    orders = load_paper_orders()
+    if not orders:
+        return 0
+
+    today = datetime.now().date()
+    count = 0
+
+    for order in orders:
+        if str(order.get("side", "")).upper() != "SELL":
+            continue
+
+        created_at = order.get("created_at")
+        if not created_at:
+            continue
+
+        try:
+            order_date = datetime.fromisoformat(
+                str(created_at)
+            ).date()
+        except ValueError:
+            continue
+
+        if order_date == today:
+            count += 1
+
+    return count
+
+
 def calculate_repurchase_cooldown_remaining_minutes(
     ticker: str,
     cooldown_minutes: int,
