@@ -116,6 +116,61 @@ def evaluate_trailing_stop(
     )
 
 
+def _rank_signal_results(output_df: pd.DataFrame) -> pd.DataFrame:
+    """売買可能性と判定の強さを考慮して銘柄を順位付けします。"""
+    ranked = output_df.copy()
+
+    if ranked.empty:
+        if "Rank" not in ranked.columns:
+            ranked["Rank"] = pd.Series(dtype="int64")
+        return ranked
+
+    ranked["Score"] = pd.to_numeric(
+        ranked["Score"],
+        errors="coerce",
+    ).fillna(50.0).clip(0.0, 100.0)
+
+    final_signal = ranked["FinalSignal"].fillna("HOLD").astype(str).str.upper()
+
+    ranked["_ActionPriority"] = final_signal.map(
+        {
+            "BUY": 0,
+            "SELL": 0,
+            "HOLD": 1,
+        }
+    ).fillna(2)
+
+    ranked["_DirectionalStrength"] = (
+        ranked["Score"] - 50.0
+    ).abs()
+
+    ranked = ranked.sort_values(
+        [
+            "_ActionPriority",
+            "_DirectionalStrength",
+            "Score",
+            "Ticker",
+        ],
+        ascending=[True, False, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    ranked = ranked.drop(
+        columns=["_ActionPriority", "_DirectionalStrength"],
+    )
+
+    if "Rank" in ranked.columns:
+        ranked = ranked.drop(columns=["Rank"])
+
+    ranked.insert(
+        ranked.columns.get_loc("Score") + 1,
+        "Rank",
+        range(1, len(ranked) + 1),
+    )
+
+    return ranked
+
+
 def run_signal_scan(
     tickers: list[str] | None = None,
     *,
@@ -732,8 +787,7 @@ def run_signal_scan(
     ]:
         output_df[numeric_column] = pd.to_numeric(output_df[numeric_column], errors="coerce").fillna(0)
 
-    output_df = output_df.sort_values(["Score", "Ticker"], ascending=[False, True], kind="mergesort").reset_index(drop=True)
-    output_df.insert(output_df.columns.get_loc("Score") + 1, "Rank", range(1, len(output_df) + 1))
+    output_df = _rank_signal_results(output_df)
 
     output_dir = _get_result_dir()
     output_path = output_dir / "latest_signals.xlsx"

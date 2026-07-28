@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from signal_runner import run_signal_scan
+from signal_runner import _rank_signal_results, run_signal_scan
 from dashboard import build_dashboard_html
 
 
@@ -187,3 +187,28 @@ def test_run_signal_scan_default_disables_orders():
     signature = inspect.signature(run_signal_scan)
 
     assert signature.parameters["allow_orders"].default is False
+
+def test_rank_signal_results_prioritizes_actionable_directional_strength():
+    source = pd.DataFrame(
+        [
+            {"Ticker": "HOLD-HIGH", "FinalSignal": "HOLD", "Score": 95},
+            {"Ticker": "BUY-STRONG", "FinalSignal": "BUY", "Score": 90},
+            {"Ticker": "SELL-STRONG", "FinalSignal": "SELL", "Score": 10},
+            {"Ticker": "BUY-WEAK", "FinalSignal": "BUY", "Score": 60},
+            {"Ticker": "HOLD-NEUTRAL", "FinalSignal": "HOLD", "Score": 50},
+        ]
+    )
+
+    ranked = _rank_signal_results(source)
+
+    assert ranked["Ticker"].tolist() == [
+        "BUY-STRONG",
+        "SELL-STRONG",
+        "BUY-WEAK",
+        "HOLD-HIGH",
+        "HOLD-NEUTRAL",
+    ]
+    assert ranked["Rank"].tolist() == [1, 2, 3, 4, 5]
+    assert "_ActionPriority" not in ranked.columns
+    assert "_DirectionalStrength" not in ranked.columns
+
