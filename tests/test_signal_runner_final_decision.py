@@ -1484,3 +1484,163 @@ def test_daily_buy_limit_does_not_block_sell(monkeypatch):
     assert created_orders[0]["signal"] == "SELL"
     assert created_orders[0]["shares"] == 100
 
+
+
+
+
+def test_buy_order_is_limited_by_risk_based_position_size(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.chdir(tmp_path)
+
+    signal_result = _technical_result("BUY")
+    signal_result.update(
+        {
+            "price": 1_000.0,
+            "stop_price": 970.0,
+            "risk_per_share": 30.0,
+            "reference_shares": 1_000,
+            "reference_amount_yen": 1_000_000,
+        }
+    )
+
+    dummy_df = pd.DataFrame(
+        {
+            "Close": [1_000.0],
+            "High": [1_010.0],
+            "Low": [990.0],
+        }
+    )
+
+    monkeypatch.setattr(
+        signal_runner,
+        "_safe_download",
+        lambda ticker: (dummy_df, None),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "load_optimized_settings",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_ticker_settings",
+        lambda ticker, settings: {
+            "ma_short": 5,
+            "ma_middle": 20,
+            "ma_long": 60,
+            "rsi_low": 50,
+            "rsi_high": 60,
+            "atr_multiplier": 2.0,
+        },
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "add_indicators",
+        lambda df, **kwargs: df,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "determine_signal",
+        lambda *args, **kwargs: signal_result,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="test",
+            provider="test",
+            available=True,
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "determine_final_decision",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            reason="test",
+        ),
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_available_cash",
+        lambda capital: 1_000_000.0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_daily_buy_order_count",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_daily_sell_order_count",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_daily_trading_amount",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_daily_realized_pnl",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_consecutive_losses",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_repurchase_cooldown_remaining_minutes",
+        lambda *args, **kwargs: 0,
+    )
+    monkeypatch.setattr(
+        signal_runner.pd.DataFrame,
+        "to_excel",
+        lambda *args, **kwargs: None,
+    )
+
+    from dataclasses import replace
+
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        replace(
+            signal_runner.SETTINGS,
+            max_order_shares=10_000,
+            max_position_allocation=1.0,
+            max_portfolio_allocation=1.0,
+        ),
+    )
+
+    recorded_orders = []
+
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: recorded_orders.append(kwargs)
+        or {
+            "side": kwargs["signal"],
+            "shares": kwargs["shares"],
+        },
+    )
+
+    signal_runner.run_signal_scan(
+        tickers=["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert len(recorded_orders) == 1
+    assert recorded_orders[0]["shares"] == 300

@@ -18,6 +18,8 @@ from config import (
     INTERVAL,
     LOT_SIZE,
     PERIOD,
+    RISK_PER_TRADE_RATE,
+    STOP_LOSS_RATE,
     TRADING_CAPITAL,
 )
 from ai_asset_platform.core.settings import SETTINGS
@@ -38,6 +40,7 @@ from order_manager import (
 )
 from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
+from risk_manager import calculate_position_size
 from signal_engine import determine_signal
 
 
@@ -480,10 +483,23 @@ def run_signal_scan(
                                 allocation_limit_shares // LOT_SIZE
                             ) * LOT_SIZE
 
+                            risk_limit_shares = (
+                                calculate_position_size(
+                                    trading_capital=TRADING_CAPITAL,
+                                    risk_per_trade_rate=(
+                                        RISK_PER_TRADE_RATE
+                                    ),
+                                    entry_price=reference_price,
+                                    stop_loss_rate=STOP_LOSS_RATE,
+                                    lot_size=LOT_SIZE,
+                                )
+                            )
+
                             order_shares = min(
                                 order_shares,
                                 affordable_shares,
                                 allocation_limit_shares,
+                                risk_limit_shares,
                             )
 
                         if order_signal == "SELL":
@@ -498,8 +514,9 @@ def run_signal_scan(
                         ):
                             print(
                                 f"{ticker}: 利用可能資金、"
-                                "ポートフォリオ全体の投資比率上限、または"
-                                "1銘柄あたりの資金配分上限では"
+                                "ポートフォリオ全体の投資比率上限、"
+                                "1銘柄あたりの資金配分上限、または"
+                                "1取引あたりの損失許容額では"
                                 f"{LOT_SIZE}株以上購入できないため、"
                                 "新規BUY注文を見送りました。"
                             )
