@@ -28,6 +28,7 @@ from order_manager import (
     calculate_consecutive_losses,
     calculate_daily_buy_order_count,
     calculate_daily_realized_pnl,
+    calculate_repurchase_cooldown_remaining_minutes,
     create_paper_order,
     get_open_positions,
 )
@@ -173,6 +174,25 @@ def run_signal_scan(
                         and daily_buy_order_count >= max_daily_buy_orders
                     )
 
+                    repurchase_cooldown_minutes = int(
+                        getattr(
+                            SETTINGS,
+                            "repurchase_cooldown_minutes",
+                            0,
+                        )
+                    )
+                    repurchase_cooldown_remaining = (
+                        calculate_repurchase_cooldown_remaining_minutes(
+                            ticker,
+                            repurchase_cooldown_minutes,
+                        )
+                        if (
+                            final_decision.signal == "BUY"
+                            and repurchase_cooldown_minutes > 0
+                        )
+                        else 0
+                    )
+
                     if (
                         final_decision.signal == "BUY"
                         and daily_loss_limit_reached
@@ -204,6 +224,16 @@ def run_signal_scan(
                             f"1日の上限"
                             f"{max_daily_buy_orders}回に達したため、"
                             "新規BUY注文を見送りました。"
+                        )
+                    elif (
+                        final_decision.signal == "BUY"
+                        and repurchase_cooldown_remaining > 0
+                    ):
+                        print(
+                            f"{ticker}: 直近のSELL注文からの"
+                            "再購入クールダウン中です。"
+                            f"あと約{repurchase_cooldown_remaining}分間、"
+                            "新規BUY注文を見送ります。"
                         )
                     elif final_decision.signal == "BUY" and held_shares > 0:
                         print(

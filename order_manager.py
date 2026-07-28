@@ -221,6 +221,66 @@ def calculate_daily_buy_order_count() -> int:
 
     return count
 
+def calculate_repurchase_cooldown_remaining_minutes(
+    ticker: str,
+    cooldown_minutes: int,
+    *,
+    current_time: datetime | None = None,
+) -> int:
+    """直近のSELLから再購入可能になるまでの残り時間を分単位で返します。
+
+    クールダウン対象外または期間終了後は0を返します。
+    不正な注文履歴は安全のため無視します。
+    """
+
+    try:
+        cooldown_minutes = int(cooldown_minutes)
+    except (TypeError, ValueError):
+        return 0
+
+    if cooldown_minutes <= 0:
+        return 0
+
+    ticker = str(ticker)
+    current_time = current_time or datetime.now()
+    latest_sell_time: datetime | None = None
+
+    for order in load_paper_orders():
+        if str(order.get("ticker", "")) != ticker:
+            continue
+
+        if str(order.get("side", "")).upper() != "SELL":
+            continue
+
+        created_at = order.get("created_at")
+        if not created_at:
+            continue
+
+        try:
+            sell_time = datetime.fromisoformat(str(created_at))
+        except (TypeError, ValueError):
+            continue
+
+        if latest_sell_time is None or sell_time > latest_sell_time:
+            latest_sell_time = sell_time
+
+    if latest_sell_time is None:
+        return 0
+
+    elapsed_seconds = (current_time - latest_sell_time).total_seconds()
+
+    if elapsed_seconds < 0:
+        return cooldown_minutes
+
+    cooldown_seconds = cooldown_minutes * 60
+    remaining_seconds = cooldown_seconds - elapsed_seconds
+
+    if remaining_seconds <= 0:
+        return 0
+
+    return int((remaining_seconds + 59) // 60)
+
+
 def calculate_daily_realized_pnl(
     target_date: date | None = None,
 ) -> float:
