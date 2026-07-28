@@ -182,6 +182,61 @@ def load_paper_orders() -> list[dict]:
     return orders
 
 
+OPEN_ORDER_STATUSES = {
+    "OPEN",
+    "PENDING",
+    "SUBMITTED",
+    "PARTIALLY_FILLED",
+}
+
+
+def get_open_orders(
+    *,
+    ticker: str | None = None,
+    side: str | None = None,
+) -> list[dict]:
+    """未約定状態の注文だけを取得します。"""
+
+    ticker_filter = str(ticker) if ticker is not None else None
+    side_filter = str(side).upper() if side is not None else None
+    open_orders: list[dict] = []
+
+    for order in load_paper_orders():
+        if not isinstance(order, dict):
+            continue
+
+        status = str(order.get("status", "")).upper()
+
+        if status not in OPEN_ORDER_STATUSES:
+            continue
+
+        if (
+            ticker_filter is not None
+            and str(order.get("ticker", "")) != ticker_filter
+        ):
+            continue
+
+        if (
+            side_filter is not None
+            and str(order.get("side", "")).upper() != side_filter
+        ):
+            continue
+
+        open_orders.append(order)
+
+    return open_orders
+
+
+def has_open_order(
+    ticker: str,
+    *,
+    side: str | None = None,
+) -> bool:
+    """指定銘柄に未約定注文が存在するか判定します。"""
+
+    return bool(get_open_orders(ticker=ticker, side=side))
+
+
 def calculate_realized_trade_pnls() -> list[float]:
     """注文履歴から売却約定ごとの実現損益を計算します。"""
 
