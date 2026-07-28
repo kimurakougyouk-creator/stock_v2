@@ -12,6 +12,7 @@ class PlatformSettings:
     system_version: str = "3.1-dev"
     run_mode: str = "DEVELOPMENT"
     enable_ai: bool = True
+    minimum_ai_confidence: float = 70.0
     emergency_stop: bool = False
     max_order_shares: int = 100
     max_positions: int = 5
@@ -55,6 +56,7 @@ if __name__ == "__main__":
     print("Version :", SETTINGS.system_version)
     print("Mode    :", SETTINGS.run_mode)
     print("AI      :", SETTINGS.enable_ai)
+    print("AI Conf :", SETTINGS.minimum_ai_confidence)
     print("Stop    :", SETTINGS.emergency_stop)
     print("Max Qty :", SETTINGS.max_order_shares)
     print("Max Pos :", SETTINGS.max_positions)

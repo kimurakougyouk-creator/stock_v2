@@ -230,6 +230,13 @@ def run_signal_scan(
             final_decision = determine_final_decision(
                 signal_result["signal"],
                 ai_result,
+                minimum_ai_confidence=float(
+                    getattr(
+                        SETTINGS,
+                        "minimum_ai_confidence",
+                        70.0,
+                    )
+                ),
             )
 
             order_signal = final_decision.signal

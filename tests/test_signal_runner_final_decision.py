@@ -1644,3 +1644,53 @@ def test_buy_order_is_limited_by_risk_based_position_size(
 
     assert len(recorded_orders) == 1
     assert recorded_orders[0]["shares"] == 300
+
+def test_configured_minimum_ai_confidence_blocks_order(monkeypatch):
+    created_orders = []
+
+    _prepare_common_mocks(monkeypatch, "BUY")
+
+    monkeypatch.setattr(
+        signal_runner,
+        "judge_with_ai",
+        lambda *args, **kwargs: SimpleNamespace(
+            signal="BUY",
+            score=90,
+            confidence=95.0,
+            reason="AI agrees but confidence is below configured minimum",
+            provider="test",
+            available=True,
+        ),
+    )
+
+    monkeypatch.setattr(
+        signal_runner,
+        "get_open_positions",
+        lambda: {},
+    )
+
+    monkeypatch.setattr(
+        signal_runner,
+        "create_paper_order",
+        lambda **kwargs: created_orders.append(kwargs),
+    )
+
+    monkeypatch.setattr(
+        signal_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            minimum_ai_confidence=96.0,
+            emergency_stop=False,
+        ),
+    )
+
+    result = signal_runner.run_signal_scan(
+        ["7203.T"],
+        allow_orders=True,
+        allow_email=False,
+    )
+
+    assert created_orders == []
+    assert result["records"][0]["FinalSignal"] == "HOLD"
+    assert "必要信頼度=96.0%" in result["records"][0]["FinalReason"]
+
