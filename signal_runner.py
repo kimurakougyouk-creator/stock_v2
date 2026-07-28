@@ -41,6 +41,7 @@ from order_manager import (
 )
 from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
+from decision_logger import log_decision
 from risk_manager import (
     calculate_open_position_risk,
     calculate_position_size,
@@ -688,6 +689,16 @@ def run_signal_scan(
                                     order_reason = "Time Stop"
                                 else:
                                     order_reason = "AI最終判定"
+
+                                log_decision(
+                                    ticker=ticker,
+                                    final_signal=order_signal,
+                                    ordered=True,
+                                    reason=order_reason,
+                                    ai_signal=ai_result.signal,
+                                    ai_confidence=float(ai_result.confidence),
+                                    technical_signal=signal_result["signal"],
+                                )
                                 print(
                                     f"{ticker}: {order_reason}による"
                                     "模擬注文を記録しました "

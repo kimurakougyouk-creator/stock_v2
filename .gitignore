@@ -235,3 +235,6 @@ signal_runner_v25_before.py
 results/paper_orders.jsonl
 signal_runner_v30_backup.py
 results/trailing_high_prices.json
+
+# Generated decision log
+results/decision_log.csv
