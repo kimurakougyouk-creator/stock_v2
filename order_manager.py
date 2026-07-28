@@ -10,6 +10,7 @@ import json
 
 ORDER_LOG_DIR = Path("results")
 ORDER_LOG_PATH = ORDER_LOG_DIR / "paper_orders.jsonl"
+TRADE_PNL_PATH = ORDER_LOG_DIR / "paper_trade_pnls.json"
 
 
 def create_paper_order(
@@ -43,6 +44,8 @@ def create_paper_order(
     with ORDER_LOG_PATH.open("a", encoding="utf-8") as file:
         file.write(json.dumps(order, ensure_ascii=False) + "\n")
 
+    save_realized_trade_pnls()
+
     return order
 
 
@@ -61,6 +64,73 @@ def load_paper_orders() -> list[dict]:
                 orders.append(json.loads(line))
 
     return orders
+
+
+def calculate_realized_trade_pnls() -> list[float]:
+    """注文履歴から売却約定ごとの実現損益を計算します。"""
+
+    positions: dict[str, int] = {}
+    average_costs: dict[str, float] = {}
+    realized_trade_pnls: list[float] = []
+
+    for order in load_paper_orders():
+        try:
+            ticker = str(order["ticker"])
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0 or price < 0:
+            continue
+
+        held_shares = positions.get(ticker, 0)
+        average_cost = average_costs.get(ticker, 0.0)
+
+        if side == "BUY":
+            total_cost = (held_shares * average_cost) + (shares * price)
+            new_shares = held_shares + shares
+
+            positions[ticker] = new_shares
+            average_costs[ticker] = (
+                total_cost / new_shares
+                if new_shares > 0
+                else 0.0
+            )
+
+        elif side == "SELL" and held_shares > 0:
+            sold_shares = min(shares, held_shares)
+            trade_pnl = (price - average_cost) * sold_shares
+            realized_trade_pnls.append(trade_pnl)
+
+            remaining_shares = held_shares - sold_shares
+            positions[ticker] = remaining_shares
+
+            if remaining_shares <= 0:
+                average_costs[ticker] = 0.0
+
+    return realized_trade_pnls
+
+
+def save_realized_trade_pnls() -> Path:
+    """実現損益履歴をダッシュボード用JSONへ保存します。"""
+
+    ORDER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "realized_trade_pnls": calculate_realized_trade_pnls(),
+    }
+
+    temporary_path = TRADE_PNL_PATH.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(TRADE_PNL_PATH)
+
+    return TRADE_PNL_PATH
 
 
 def calculate_available_cash(initial_capital: float) -> float:
