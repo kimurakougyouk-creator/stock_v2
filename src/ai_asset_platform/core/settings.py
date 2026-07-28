@@ -24,6 +24,7 @@ class PlatformSettings:
     daily_loss_limit_yen: float = 10_000.0
     max_consecutive_losses: int = 3
     max_holding_days: int = 30
+    trailing_stop_percent = 5.0
     enable_paper_trading: bool = True
     enable_live_trading: bool = False
     supported_markets: tuple[str, ...] = field(

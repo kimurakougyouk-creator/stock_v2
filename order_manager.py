@@ -11,6 +11,122 @@ import json
 ORDER_LOG_DIR = Path("results")
 ORDER_LOG_PATH = ORDER_LOG_DIR / "paper_orders.jsonl"
 TRADE_PNL_PATH = ORDER_LOG_DIR / "paper_trade_pnls.json"
+TRAILING_HIGH_PATH = ORDER_LOG_DIR / "trailing_high_prices.json"
+
+
+def load_trailing_high_prices() -> dict[str, float]:
+    """保有銘柄ごとの最高値を読み込みます。
+
+    保存ファイルが存在しない場合や内容が不正な場合は、
+    空の辞書を返します。
+    """
+
+    if not TRAILING_HIGH_PATH.exists():
+        return {}
+
+    try:
+        payload = json.loads(
+            TRAILING_HIGH_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    high_prices: dict[str, float] = {}
+
+    for ticker, price in payload.items():
+        try:
+            normalized_price = float(price)
+        except (TypeError, ValueError):
+            continue
+
+        if normalized_price <= 0:
+            continue
+
+        high_prices[str(ticker)] = normalized_price
+
+    return high_prices
+
+
+def save_trailing_high_prices(
+    high_prices: dict[str, float],
+) -> Path:
+    """保有銘柄ごとの最高値をJSONへ安全に保存します。"""
+
+    normalized: dict[str, float] = {}
+
+    for ticker, price in high_prices.items():
+        try:
+            normalized_price = float(price)
+        except (TypeError, ValueError):
+            continue
+
+        if normalized_price <= 0:
+            continue
+
+        normalized[str(ticker)] = normalized_price
+
+    ORDER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = TRAILING_HIGH_PATH.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(
+            normalized,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    temporary_path.replace(TRAILING_HIGH_PATH)
+
+    return TRAILING_HIGH_PATH
+
+
+def update_trailing_high_price(
+    ticker: str,
+    current_price: float,
+    *,
+    held_shares: int,
+) -> float | None:
+    """現在価格を使って保有銘柄の最高値を更新します。
+
+    保有株数が0以下の場合は、その銘柄の記録を削除して
+    Noneを返します。
+
+    現在価格が過去の最高値を上回った場合のみ更新します。
+    """
+
+    ticker = str(ticker)
+
+    try:
+        current_price = float(current_price)
+        held_shares = int(held_shares)
+    except (TypeError, ValueError):
+        return None
+
+    high_prices = load_trailing_high_prices()
+
+    if held_shares <= 0:
+        if ticker in high_prices:
+            del high_prices[ticker]
+            save_trailing_high_prices(high_prices)
+
+        return None
+
+    if current_price <= 0:
+        return high_prices.get(ticker)
+
+    previous_high = high_prices.get(ticker)
+
+    if previous_high is None or current_price > previous_high:
+        high_prices[ticker] = current_price
+        save_trailing_high_prices(high_prices)
+        return current_price
+
+    return previous_high
 
 
 def create_paper_order(

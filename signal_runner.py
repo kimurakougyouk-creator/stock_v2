@@ -34,6 +34,7 @@ from order_manager import (
     calculate_repurchase_cooldown_remaining_minutes,
     create_paper_order,
     get_open_positions,
+    update_trailing_high_price,
 )
 from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
@@ -59,6 +60,53 @@ def _safe_download(ticker: str) -> tuple[pd.DataFrame | None, str | None]:
         return None, "empty"
 
     return df, None
+
+
+def evaluate_trailing_stop(
+    *,
+    current_price: float,
+    highest_price: float | None,
+    trailing_stop_percent: float,
+    held_shares: int,
+) -> tuple[bool, float | None]:
+    """最高値からの下落率とTrailing Stop発動可否を返します。"""
+
+    try:
+        current_price = float(current_price)
+        trailing_stop_percent = float(trailing_stop_percent)
+        held_shares = int(held_shares)
+    except (TypeError, ValueError):
+        return False, None
+
+    if (
+        held_shares <= 0
+        or highest_price is None
+        or current_price <= 0
+        or trailing_stop_percent <= 0
+    ):
+        return False, None
+
+    try:
+        highest_price = float(highest_price)
+    except (TypeError, ValueError):
+        return False, None
+
+    if highest_price <= 0:
+        return False, None
+
+    if current_price >= highest_price:
+        return False, 0.0
+
+    drop_percent = (
+        (highest_price - current_price)
+        / highest_price
+        * 100.0
+    )
+
+    return (
+        drop_percent >= trailing_stop_percent,
+        drop_percent,
+    )
 
 
 def run_signal_scan(
@@ -126,11 +174,39 @@ def run_signal_scan(
             positions: dict[str, int] = {}
             held_shares = 0
             holding_days: int | None = None
+            trailing_high_price: float | None = None
+            trailing_stop_drop_percent: float | None = None
+            trailing_stop_triggered = False
             time_stop_triggered = False
+            forced_exit_triggered = False
 
             if allow_orders:
                 positions = get_open_positions()
                 held_shares = int(positions.get(ticker, 0))
+
+                trailing_high_price = update_trailing_high_price(
+                    ticker,
+                    float(signal_result["price"]),
+                    held_shares=held_shares,
+                )
+
+                trailing_stop_percent = float(
+                    getattr(
+                        SETTINGS,
+                        "trailing_stop_percent",
+                        0.0,
+                    )
+                )
+
+                (
+                    trailing_stop_triggered,
+                    trailing_stop_drop_percent,
+                ) = evaluate_trailing_stop(
+                    current_price=float(signal_result["price"]),
+                    highest_price=trailing_high_price,
+                    trailing_stop_percent=trailing_stop_percent,
+                    held_shares=held_shares,
+                )
 
                 max_holding_days = int(
                     getattr(SETTINGS, "max_holding_days", 0)
@@ -145,13 +221,28 @@ def run_signal_scan(
                         and holding_days >= max_holding_days
                     )
 
-                if time_stop_triggered:
+                if trailing_stop_triggered:
+                    order_signal = "SELL"
+                    print(
+                        f"{ticker}: 最高値"
+                        f"{trailing_high_price:,.2f}円から"
+                        f"{trailing_stop_drop_percent:.2f}％下落し、"
+                        f"設定値{trailing_stop_percent:.2f}％に"
+                        "達したため、Trailing Stopの"
+                        "SELL判定を発動します。"
+                    )
+                elif time_stop_triggered:
                     order_signal = "SELL"
                     print(
                         f"{ticker}: 保有期間が{holding_days}日となり、"
                         f"最大保有期間{max_holding_days}日に"
                         "達したため、Time StopのSELL判定を発動します。"
                     )
+
+                forced_exit_triggered = (
+                    trailing_stop_triggered
+                    or time_stop_triggered
+                )
 
             if allow_orders and order_signal in {"BUY", "SELL"}:
                 if SETTINGS.emergency_stop:
@@ -162,7 +253,7 @@ def run_signal_scan(
                 else:
                     shares = (
                         held_shares
-                        if time_stop_triggered
+                        if forced_exit_triggered
                         else int(signal_result["reference_shares"] or 0)
                     )
 
@@ -323,7 +414,7 @@ def run_signal_scan(
                         )
                         order_shares = (
                             shares
-                            if time_stop_triggered
+                            if forced_exit_triggered
                             else min(shares, max_order_shares)
                         )
 
@@ -460,11 +551,12 @@ def run_signal_scan(
                                     shares=order_shares,
                                     reference_price=float(signal_result["price"]),
                                 )
-                                order_reason = (
-                                    "Time Stop"
-                                    if time_stop_triggered
-                                    else "AI最終判定"
-                                )
+                                if trailing_stop_triggered:
+                                    order_reason = "Trailing Stop"
+                                elif time_stop_triggered:
+                                    order_reason = "Time Stop"
+                                else:
+                                    order_reason = "AI最終判定"
                                 print(
                                     f"{ticker}: {order_reason}による"
                                     "模擬注文を記録しました "
