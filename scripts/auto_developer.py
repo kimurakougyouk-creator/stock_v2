@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from src.ai_asset_platform.developer.planner import create_plan
+
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 TASK_FILE = PROJECT_DIR / "development_task.md"
@@ -71,6 +73,13 @@ def create_status_report() -> str:
     validate_safe_branch(branch)
     status = get_git_status()
 
+    plan = create_plan(TASK_FILE)
+
+    plan_lines = [
+        f"{index}. {step}"
+        for index, step in enumerate(plan.steps, start=1)
+    ]
+
     return "\n".join(
         [
             "========================================",
@@ -85,8 +94,12 @@ def create_status_report() -> str:
             "開発指示書:",
             task,
             "",
-            "✅ 安全確認が完了しました。",
-            "現在は確認専用モードです。",
+            "自動生成された実装計画:",
+            plan.title,
+            *plan_lines,
+            "",
+            "✅ 安全確認と実装計画の作成が完了しました。",
+            "現在は計画作成モードです。",
             "コードの自動変更やGit保存はまだ行いません。",
         ]
     )
