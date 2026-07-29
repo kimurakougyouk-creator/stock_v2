@@ -38,9 +38,24 @@ else
     exit 0
 fi
 
+# テストで自動更新される生成ファイルが、
+# 実行前に未変更だったかを記録する
+DECISION_REPORT="results/decision_log_report.csv"
+RESTORE_DECISION_REPORT=false
+
+if git diff --quiet -- "$DECISION_REPORT" &&
+   git diff --cached --quiet -- "$DECISION_REPORT"; then
+    RESTORE_DECISION_REPORT=true
+fi
+
 echo
 echo "=== ③ 全テスト ==="
 "$PYTHON" -m pytest -q
+
+# 実行前に未変更だった生成ファイルだけ元へ戻す
+if [ "$RESTORE_DECISION_REPORT" = true ]; then
+    git restore --worktree -- "$DECISION_REPORT" 2>/dev/null || true
+fi
 
 echo
 echo "✅ 全テストに合格しました。"
