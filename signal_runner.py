@@ -41,6 +41,10 @@ from order_manager import (
 )
 from optimization_settings import get_ticker_settings, load_optimized_settings
 from report_formatter import format_signal_report
+from decision_log_report import (
+    REPORT_FILE as DECISION_LOG_REPORT_FILE,
+    generate_decision_log_report,
+)
 from decision_logger import log_decision
 from risk_manager import (
     calculate_open_position_risk,
@@ -53,6 +57,31 @@ def _get_result_dir() -> Path:
     result_dir = Path("results")
     result_dir.mkdir(exist_ok=True)
     return result_dir
+
+
+def _generate_decision_report_safely() -> str | None:
+    """判断ログ集計レポートを安全に自動生成する。"""
+
+    try:
+        summary = generate_decision_log_report()
+    except FileNotFoundError:
+        print(
+            "判断ログがまだ存在しないため、"
+            "判断ログ集計レポートの作成をスキップしました。"
+        )
+        return None
+    except Exception as exc:  # pragma: no cover - defensive path
+        print(
+            "判断ログ集計レポートの作成中に"
+            f"エラーが発生しました。{exc}"
+        )
+        return None
+
+    print(
+        "判断ログ集計レポートを自動作成しました。"
+        f"判断件数: {summary['total_decisions']}件"
+    )
+    return str(DECISION_LOG_REPORT_FILE)
 
 
 def _safe_download(ticker: str) -> tuple[pd.DataFrame | None, str | None]:
@@ -893,10 +922,13 @@ def run_signal_scan(
     )
     print(summary_message)
 
+    decision_report_path = _generate_decision_report_safely()
+
     return {
         "records": records,
         "errors": errors,
         "output_path": str(output_path),
+        "decision_report_path": decision_report_path,
         "summary_message": summary_message,
     }
 
