@@ -18,6 +18,9 @@ class PerformanceSummary:
     average_loss: float
     largest_profit: float
     largest_loss: float
+    profit_factor: float
+    maximum_winning_streak: int
+    maximum_losing_streak: int
 
 
 def calculate_performance(
@@ -40,6 +43,37 @@ def calculate_performance(
     gross_profit = sum(profits)
     gross_loss = sum(losses)
 
+    if gross_loss < 0:
+        profit_factor = gross_profit / abs(gross_loss)
+    elif gross_profit > 0:
+        profit_factor = float("inf")
+    else:
+        profit_factor = 0.0
+
+    maximum_winning_streak = 0
+    maximum_losing_streak = 0
+    current_winning_streak = 0
+    current_losing_streak = 0
+
+    for pnl in pnls:
+        if pnl > 0:
+            current_winning_streak += 1
+            current_losing_streak = 0
+            maximum_winning_streak = max(
+                maximum_winning_streak,
+                current_winning_streak,
+            )
+        elif pnl < 0:
+            current_losing_streak += 1
+            current_winning_streak = 0
+            maximum_losing_streak = max(
+                maximum_losing_streak,
+                current_losing_streak,
+            )
+        else:
+            current_winning_streak = 0
+            current_losing_streak = 0
+
     return PerformanceSummary(
         total_trades=total_trades,
         winning_trades=len(profits),
@@ -61,4 +95,7 @@ def calculate_performance(
         ),
         largest_profit=max(profits, default=0.0),
         largest_loss=min(losses, default=0.0),
+        profit_factor=profit_factor,
+        maximum_winning_streak=maximum_winning_streak,
+        maximum_losing_streak=maximum_losing_streak,
     )
