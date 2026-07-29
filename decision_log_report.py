@@ -45,6 +45,17 @@ def generate_decision_log_report(
         for row in rows
     )
 
+    reason_counts = Counter(
+        row.get("Reason", "").strip() or "UNKNOWN"
+        for row in rows
+    )
+
+    not_ordered_reason_counts = Counter(
+        row.get("Reason", "").strip() or "UNKNOWN"
+        for row in rows
+        if row.get("Ordered", "").strip().upper() != "YES"
+    )
+
     confidence_values: list[float] = []
 
     for row in rows:
@@ -81,6 +92,10 @@ def generate_decision_log_report(
         "average_ai_confidence": average_ai_confidence,
         "final_signal_counts": dict(final_signal_counts),
         "ticker_counts": dict(ticker_counts),
+        "reason_counts": dict(reason_counts),
+        "not_ordered_reason_counts": dict(
+            not_ordered_reason_counts
+        ),
     }
 
     report_file.parent.mkdir(
@@ -157,6 +172,28 @@ def generate_decision_log_report(
                 [
                     "Ticker",
                     ticker,
+                    count,
+                ]
+            )
+
+        for reason, count in sorted(
+            reason_counts.items()
+        ):
+            writer.writerow(
+                [
+                    "Reason",
+                    reason,
+                    count,
+                ]
+            )
+
+        for reason, count in sorted(
+            not_ordered_reason_counts.items()
+        ):
+            writer.writerow(
+                [
+                    "NotOrderedReason",
+                    reason,
                     count,
                 ]
             )

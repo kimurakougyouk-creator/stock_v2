@@ -102,7 +102,35 @@ def test_generate_decision_log_report_creates_summary(
         "7203.T": 2,
         "6758.T": 1,
     }
+    assert result["reason_counts"] == {
+        "AI最終判定": 2,
+        "リスク管理": 1,
+    }
+    assert result["not_ordered_reason_counts"] == {
+        "リスク管理": 1,
+    }
     assert report_file.exists()
+
+    report_rows = list(
+        csv.DictReader(
+            report_file.open(
+                "r",
+                encoding="utf-8-sig",
+                newline="",
+            )
+        )
+    )
+
+    assert {
+        "Category": "Reason",
+        "Item": "AI最終判定",
+        "Value": "2",
+    } in report_rows
+    assert {
+        "Category": "NotOrderedReason",
+        "Item": "リスク管理",
+        "Value": "1",
+    } in report_rows
 
 
 def test_generate_decision_log_report_handles_empty_log(
@@ -130,6 +158,8 @@ def test_generate_decision_log_report_handles_empty_log(
     assert result["not_ordered_count"] == 0
     assert result["order_rate"] == 0.0
     assert result["average_ai_confidence"] == 0.0
+    assert result["reason_counts"] == {}
+    assert result["not_ordered_reason_counts"] == {}
     assert report_file.exists()
 
 
