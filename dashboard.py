@@ -13,6 +13,7 @@ from config import TRADING_CAPITAL
 from ai_asset_platform.reports import (
     append_performance_history,
     calculate_performance,
+    calculate_performance_health,
     read_performance_trend,
 )
 from ai_asset_platform.reports.performance_chart import (
@@ -65,6 +66,17 @@ def _performance_status_label(status: str) -> str:
         "improving": "改善",
         "stable": "安定",
         "declining": "悪化",
+    }
+    return labels.get(status, "不明")
+
+def _performance_health_status_label(status: str) -> str:
+    """運用成績の健全度状態を日本語表示へ変換する。"""
+    labels = {
+        "EXCELLENT": "優秀",
+        "GOOD": "良好",
+        "CAUTION": "注意",
+        "POOR": "不調",
+        "NO_DATA": "データ不足",
     }
     return labels.get(status, "不明")
 
@@ -265,6 +277,7 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
     trade_statistics = calculate_trade_statistics(realized_trades)
     decision_report = _safe_read_decision_report(base_dir)
     performance = calculate_performance(trade_pnls)
+    performance_health = calculate_performance_health(performance)
     performance_trend = read_performance_trend(
         base_dir / "performance_history.csv"
     )
@@ -644,6 +657,22 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
         </ul>
       </div>
     </div>
+  </div>
+  <div class=\"card\">
+    <h2>運用成績の健全度</h2>
+    <div class=\"grid\">
+      <div class=\"metric\"><strong>総合スコア</strong><br>{performance_health.score} / 100</div>
+      <div class=\"metric\"><strong>評価</strong><br>{performance_health.grade}</div>
+      <div class=\"metric\"><strong>状態</strong><br>{_performance_health_status_label(performance_health.status)}</div>
+      <div class=\"metric\"><strong>取引数評価</strong><br>{performance_health.sample_score} / 25</div>
+      <div class=\"metric\"><strong>勝率評価</strong><br>{performance_health.win_rate_score} / 25</div>
+      <div class=\"metric\"><strong>利益効率評価</strong><br>{performance_health.profit_factor_score} / 25</div>
+      <div class=\"metric\"><strong>損益・リスク評価</strong><br>{performance_health.risk_reward_score} / 25</div>
+    </div>
+    <p>
+      取引数、勝率、プロフィットファクター、
+      純利益と最大ドローダウンのバランスを総合評価しています。
+    </p>
   </div>
   <div class=\"card\">
     <h2>Paper Trading運用成績</h2>

@@ -112,3 +112,116 @@ def calculate_performance(
         maximum_losing_streak=maximum_losing_streak,
         maximum_drawdown=maximum_drawdown,
     )
+
+
+@dataclass(frozen=True)
+class PerformanceHealth:
+    """運用成績の健全度を0～100点で表す。"""
+
+    score: int
+    grade: str
+    status: str
+    sample_score: int
+    win_rate_score: int
+    profit_factor_score: int
+    risk_reward_score: int
+
+
+def calculate_performance_health(
+    performance: PerformanceSummary,
+) -> PerformanceHealth:
+    """運用成績から健全度スコアを計算する。
+
+    評価項目は次の4項目で、それぞれ最大25点とする。
+
+    - 取引数
+    - 勝率
+    - プロフィットファクター
+    - 純利益と最大ドローダウンのバランス
+    """
+    if performance.total_trades == 0:
+        return PerformanceHealth(
+            score=0,
+            grade="N/A",
+            status="NO_DATA",
+            sample_score=0,
+            win_rate_score=0,
+            profit_factor_score=0,
+            risk_reward_score=0,
+        )
+
+    if performance.total_trades >= 20:
+        sample_score = 25
+    elif performance.total_trades >= 10:
+        sample_score = 15
+    elif performance.total_trades >= 5:
+        sample_score = 8
+    else:
+        sample_score = 3
+
+    if performance.win_rate >= 60:
+        win_rate_score = 25
+    elif performance.win_rate >= 50:
+        win_rate_score = 20
+    elif performance.win_rate >= 40:
+        win_rate_score = 10
+    else:
+        win_rate_score = 0
+
+    if performance.profit_factor >= 2.0:
+        profit_factor_score = 25
+    elif performance.profit_factor >= 1.5:
+        profit_factor_score = 20
+    elif performance.profit_factor >= 1.0:
+        profit_factor_score = 10
+    else:
+        profit_factor_score = 0
+
+    if performance.net_profit <= 0:
+        risk_reward_score = 0
+    elif performance.maximum_drawdown == 0:
+        risk_reward_score = 25
+    else:
+        profit_drawdown_ratio = (
+            performance.net_profit
+            / performance.maximum_drawdown
+        )
+
+        if profit_drawdown_ratio >= 2.0:
+            risk_reward_score = 25
+        elif profit_drawdown_ratio >= 1.0:
+            risk_reward_score = 20
+        elif profit_drawdown_ratio >= 0.5:
+            risk_reward_score = 10
+        else:
+            risk_reward_score = 0
+
+    score = (
+        sample_score
+        + win_rate_score
+        + profit_factor_score
+        + risk_reward_score
+    )
+
+    if score >= 80:
+        grade = "A"
+        status = "EXCELLENT"
+    elif score >= 60:
+        grade = "B"
+        status = "GOOD"
+    elif score >= 40:
+        grade = "C"
+        status = "CAUTION"
+    else:
+        grade = "D"
+        status = "POOR"
+
+    return PerformanceHealth(
+        score=score,
+        grade=grade,
+        status=status,
+        sample_score=sample_score,
+        win_rate_score=win_rate_score,
+        profit_factor_score=profit_factor_score,
+        risk_reward_score=risk_reward_score,
+    )
