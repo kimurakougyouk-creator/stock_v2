@@ -88,6 +88,37 @@ def _safe_read_trade_pnls(base_dir: Path) -> list[float]:
     return pnls
 
 
+
+def _safe_read_decision_report(base_dir: Path) -> dict[str, str]:
+    """判断ログ集計CSVを安全に読み込む。"""
+
+    import csv
+
+    path = base_dir / "decision_log_report.csv"
+
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open(
+            "r",
+            encoding="utf-8-sig",
+            newline="",
+        ) as f:
+            reader = csv.DictReader(f)
+
+            result = {}
+
+            for row in reader:
+                if row.get("Category") == "Summary":
+                    result[row["Item"]] = row["Value"]
+
+            return result
+
+    except Exception:
+        return {}
+
+
 def build_dashboard_html(base_dir: Path | None = None) -> str:
     base_dir = Path(base_dir or Path("results"))
     base_dir.mkdir(exist_ok=True, parents=True)
@@ -95,7 +126,29 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
     signal_df = _safe_read_signal_excel(base_dir)
     summary_info = _safe_read_summary_excel(base_dir)
     trade_pnls = _safe_read_trade_pnls(base_dir)
+    decision_report = _safe_read_decision_report(base_dir)
     performance = calculate_performance(trade_pnls)
+
+    total_decisions = decision_report.get(
+        "TotalDecisions",
+        "0",
+    )
+    ordered_count = decision_report.get(
+        "OrderedCount",
+        "0",
+    )
+    not_ordered_count = decision_report.get(
+        "NotOrderedCount",
+        "0",
+    )
+    order_rate = decision_report.get(
+        "OrderRatePercent",
+        "0",
+    )
+    average_ai_confidence = decision_report.get(
+        "AverageAIConfidence",
+        "0",
+    )
 
     if signal_df.empty:
         rows = []
@@ -309,6 +362,16 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
       <div class=\"metric\"><strong>平均スコア</strong><br>{average_score:.1f}</div>
       <div class=\"metric\"><strong>参考運用資金</strong><br>{_format_currency(TRADING_CAPITAL)}</div>
       <div class=\"metric\"><strong>サマリー</strong><br>{summary_line}</div>
+    </div>
+  </div>
+  <div class=\"card\">
+    <h2>注文判断ログ集計</h2>
+    <div class=\"grid\">
+      <div class=\"metric\"><strong>判断件数</strong><br>{html.escape(str(total_decisions))}</div>
+      <div class=\"metric\"><strong>注文実行件数</strong><br>{html.escape(str(ordered_count))}</div>
+      <div class=\"metric\"><strong>注文未実行件数</strong><br>{html.escape(str(not_ordered_count))}</div>
+      <div class=\"metric\"><strong>注文実行率</strong><br>{html.escape(str(order_rate))}%</div>
+      <div class=\"metric\"><strong>AI平均信頼度</strong><br>{html.escape(str(average_ai_confidence))}</div>
     </div>
   </div>
   <div class=\"card\">

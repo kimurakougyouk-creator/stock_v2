@@ -17,3 +17,32 @@ def test_write_dashboard_html(tmp_path: Path) -> None:
 
     assert output.exists()
     assert output.name == "dashboard.html"
+
+
+def test_build_dashboard_shows_decision_log_summary(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "decision_log_report.csv"
+    report.write_text(
+        """Category,Item,Value
+Summary,TotalDecisions,10
+Summary,OrderedCount,3
+Summary,NotOrderedCount,7
+Summary,OrderRatePercent,30.0
+Summary,AverageAIConfidence,82.5
+""",
+        encoding="utf-8-sig",
+    )
+
+    html = build_dashboard_html(tmp_path)
+
+    assert "注文判断ログ集計" in html
+    assert "判断件数" in html
+    assert "10" in html
+    assert "注文実行件数" in html
+    assert "3" in html
+    assert "注文未実行件数" in html
+    assert "7" in html
+    assert "30.0%" in html
+    assert "82.5" in html
+
