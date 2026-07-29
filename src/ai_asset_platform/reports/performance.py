@@ -21,6 +21,7 @@ class PerformanceSummary:
     profit_factor: float
     maximum_winning_streak: int
     maximum_losing_streak: int
+    maximum_drawdown: float
 
 
 def calculate_performance(
@@ -55,7 +56,18 @@ def calculate_performance(
     current_winning_streak = 0
     current_losing_streak = 0
 
+    cumulative_profit = 0.0
+    peak_profit = 0.0
+    maximum_drawdown = 0.0
+
     for pnl in pnls:
+        cumulative_profit += pnl
+        peak_profit = max(peak_profit, cumulative_profit)
+        maximum_drawdown = max(
+            maximum_drawdown,
+            peak_profit - cumulative_profit,
+        )
+
         if pnl > 0:
             current_winning_streak += 1
             current_losing_streak = 0
@@ -98,4 +110,5 @@ def calculate_performance(
         profit_factor=profit_factor,
         maximum_winning_streak=maximum_winning_streak,
         maximum_losing_streak=maximum_losing_streak,
+        maximum_drawdown=maximum_drawdown,
     )

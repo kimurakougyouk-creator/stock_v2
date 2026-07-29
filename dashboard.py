@@ -663,6 +663,7 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
       <div class=\"metric\"><strong>プロフィットファクター</strong><br>{_format_profit_factor(performance.profit_factor)}</div>
       <div class=\"metric\"><strong>最大連勝数</strong><br>{performance.maximum_winning_streak}回</div>
       <div class=\"metric\"><strong>最大連敗数</strong><br>{performance.maximum_losing_streak}回</div>
+      <div class=\"metric\"><strong>最大ドローダウン</strong><br>{_format_currency(performance.maximum_drawdown)}円</div>
     </div>
   </div>
   {performance_trend_html}
