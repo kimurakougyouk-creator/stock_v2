@@ -15,6 +15,9 @@ from ai_asset_platform.reports import (
     calculate_performance,
     read_performance_trend,
 )
+from ai_asset_platform.reports.performance_chart import (
+    build_performance_chart_html,
+)
 
 
 def _format_currency(value: Any) -> str:
@@ -263,6 +266,9 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
     decision_report = _safe_read_decision_report(base_dir)
     performance = calculate_performance(trade_pnls)
     performance_trend = read_performance_trend(
+        base_dir / "performance_history.csv"
+    )
+    performance_chart_html = build_performance_chart_html(
         base_dir / "performance_history.csv"
     )
 
@@ -660,6 +666,7 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
     </div>
   </div>
   {performance_trend_html}
+  {performance_chart_html}
   <div class=\"card\">
     <h2>銘柄ランキング</h2>
     <table>
