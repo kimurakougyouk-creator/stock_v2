@@ -20,6 +20,16 @@ def test_log_decision_creates_csv_with_correct_values(
         ai_signal="BUY",
         ai_confidence=82.34,
         technical_signal="BUY",
+        price=2500.5,
+        score=85.0,
+        grade="A",
+        rsi=55.25,
+        atr=80.5,
+        ma_short=2450.0,
+        ma_middle=2400.0,
+        ma_long=2300.0,
+        ai_score=88.0,
+        ai_provider="test-provider",
     )
 
     assert log_file.exists()
@@ -39,6 +49,16 @@ def test_log_decision_creates_csv_with_correct_values(
     assert rows[0]["AISignal"] == "BUY"
     assert rows[0]["AIConfidence"] == "82.3"
     assert rows[0]["TechnicalSignal"] == "BUY"
+    assert rows[0]["Price"] == "2500.5"
+    assert rows[0]["Score"] == "85.0"
+    assert rows[0]["Grade"] == "A"
+    assert rows[0]["RSI"] == "55.25"
+    assert rows[0]["ATR"] == "80.5"
+    assert rows[0]["MAShort"] == "2450.0"
+    assert rows[0]["MAMiddle"] == "2400.0"
+    assert rows[0]["MALong"] == "2300.0"
+    assert rows[0]["AIScore"] == "88.0"
+    assert rows[0]["AIProvider"] == "test-provider"
     assert rows[0]["Timestamp"]
 
 

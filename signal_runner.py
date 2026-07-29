@@ -727,6 +727,22 @@ def run_signal_scan(
                                     ai_signal=ai_result.signal,
                                     ai_confidence=float(ai_result.confidence),
                                     technical_signal=signal_result["signal"],
+                                    price=float(signal_result["price"]),
+                                    score=float(signal_result["score"]),
+                                    grade=str(signal_result["grade"]),
+                                    rsi=float(signal_result["rsi"]),
+                                    atr=float(signal_result["atr"]),
+                                    ma_short=float(
+                                        signal_result["ma_short"]
+                                    ),
+                                    ma_middle=float(
+                                        signal_result["ma_middle"]
+                                    ),
+                                    ma_long=float(
+                                        signal_result["ma_long"]
+                                    ),
+                                    ai_score=float(ai_result.score),
+                                    ai_provider=str(ai_result.provider),
                                 )
                                 print(
                                     f"{ticker}: {order_reason}による"
