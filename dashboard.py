@@ -10,7 +10,10 @@ from typing import Any
 import pandas as pd
 
 from config import TRADING_CAPITAL
-from ai_asset_platform.reports import calculate_performance
+from ai_asset_platform.reports import (
+    append_performance_history,
+    calculate_performance,
+)
 
 
 def _format_currency(value: Any) -> str:
@@ -628,8 +631,20 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
 def write_dashboard_html(base_dir: Path | None = None) -> Path:
     base_dir = Path(base_dir or Path("results"))
     base_dir.mkdir(exist_ok=True, parents=True)
+
+    trade_pnls = _safe_read_trade_pnls(base_dir)
+    performance = calculate_performance(trade_pnls)
+
+    append_performance_history(
+        performance,
+        base_dir / "performance_history.csv",
+    )
+
     output_path = base_dir / "dashboard.html"
-    output_path.write_text(build_dashboard_html(base_dir), encoding="utf-8")
+    output_path.write_text(
+        build_dashboard_html(base_dir),
+        encoding="utf-8",
+    )
     return output_path
 
 
