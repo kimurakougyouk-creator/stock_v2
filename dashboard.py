@@ -13,6 +13,7 @@ from config import TRADING_CAPITAL
 from ai_asset_platform.reports import (
     append_performance_history,
     calculate_performance,
+    read_performance_trend,
 )
 
 
@@ -33,6 +34,36 @@ def _format_profit_factor(value: Any) -> str:
     if numeric_value == float("inf"):
         return "∞（損失なし）"
     return f"{numeric_value:.2f}"
+
+
+def _format_signed_number(
+    value: Any,
+    *,
+    decimals: int = 1,
+) -> str:
+    """増減値をプラス・マイナス記号付きで表示する。"""
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return "-"
+
+    if numeric_value == float("inf"):
+        return "+∞"
+
+    if numeric_value == float("-inf"):
+        return "-∞"
+
+    return f"{numeric_value:+,.{decimals}f}"
+
+
+def _performance_status_label(status: str) -> str:
+    """英語の推移状態を日本語表示へ変換する。"""
+    labels = {
+        "improving": "改善",
+        "stable": "安定",
+        "declining": "悪化",
+    }
+    return labels.get(status, "不明")
 
 
 def _safe_read_signal_excel(base_dir: Path) -> pd.DataFrame:
@@ -231,6 +262,51 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
     trade_statistics = calculate_trade_statistics(realized_trades)
     decision_report = _safe_read_decision_report(base_dir)
     performance = calculate_performance(trade_pnls)
+    performance_trend = read_performance_trend(
+        base_dir / "performance_history.csv"
+    )
+
+    if performance_trend is None:
+        performance_trend_html = """
+    <div class="card">
+      <h2>運用成績の推移</h2>
+      <p>比較できる成績履歴がまだありません。</p>
+    </div>
+"""
+    else:
+        performance_trend_html = f"""
+    <div class="card">
+      <h2>運用成績の推移</h2>
+      <div class="grid">
+        <div class="metric">
+          <strong>総合状態</strong><br>
+          {_performance_status_label(performance_trend.status)}
+        </div>
+        <div class="metric">
+          <strong>純損益の変化</strong><br>
+          {_format_signed_number(performance_trend.net_profit_change, decimals=0)}円
+        </div>
+        <div class="metric">
+          <strong>勝率の変化</strong><br>
+          {_format_signed_number(performance_trend.win_rate_change)}ポイント
+        </div>
+        <div class="metric">
+          <strong>プロフィットファクターの変化</strong><br>
+          {_format_signed_number(performance_trend.profit_factor_change, decimals=2)}
+        </div>
+        <div class="metric">
+          <strong>取引数の変化</strong><br>
+          {performance_trend.total_trades_change:+d}件
+        </div>
+      </div>
+      <p>
+        比較期間:
+        {html.escape(performance_trend.previous_recorded_at)}
+        ～
+        {html.escape(performance_trend.latest_recorded_at)}
+      </p>
+    </div>
+"""
 
     decision_summary = decision_report.get("Summary", {})
     reason_counts = decision_report.get("Reason", {})
@@ -583,6 +659,7 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
       <div class=\"metric\"><strong>最大連敗数</strong><br>{performance.maximum_losing_streak}回</div>
     </div>
   </div>
+  {performance_trend_html}
   <div class=\"card\">
     <h2>銘柄ランキング</h2>
     <table>
