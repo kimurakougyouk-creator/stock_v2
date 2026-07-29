@@ -10,13 +10,13 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
-# scriptsディレクトリから直接実行した場合でも、
-# プロジェクト内のsrcパッケージを読み込めるようにする。
 project_dir_text = str(PROJECT_DIR)
 if project_dir_text not in sys.path:
     sys.path.insert(0, project_dir_text)
 
 from src.ai_asset_platform.developer.planner import create_plan
+
+
 TASK_FILE = PROJECT_DIR / "development_task.md"
 PLAN_FILE = PROJECT_DIR / ".ai_developer" / "development_plan.md"
 PROTECTED_BRANCHES = {"main", "master"}
@@ -73,19 +73,26 @@ def get_git_status() -> str:
     return status or "変更なし"
 
 
+def _numbered_lines(items: list[str]) -> list[str]:
+    """項目を番号付きの表示へ変換する。"""
+    return [
+        f"{index}. {item}"
+        for index, item in enumerate(items, start=1)
+    ]
+
+
+def _bullet_lines(items: list[str]) -> list[str]:
+    """項目を箇条書き表示へ変換する。"""
+    return [f"- {item}" for item in items]
+
+
 def create_status_report() -> str:
     """自動開発開始前の安全確認結果を作る。"""
     task = load_task()
     branch = get_current_branch()
     validate_safe_branch(branch)
     status = get_git_status()
-
     plan = create_plan(TASK_FILE)
-
-    plan_lines = [
-        f"{index}. {step}"
-        for index, step in enumerate(plan.steps, start=1)
-    ]
 
     return "\n".join(
         [
@@ -103,7 +110,16 @@ def create_status_report() -> str:
             "",
             "自動生成された実装計画:",
             plan.title,
-            *plan_lines,
+            *_numbered_lines(plan.steps),
+            "",
+            "変更候補ファイル:",
+            *_bullet_lines(plan.target_files),
+            "",
+            "推奨テスト:",
+            *_bullet_lines(plan.recommended_tests),
+            "",
+            "安全確認:",
+            *_bullet_lines(plan.safety_checks),
             "",
             "✅ 安全確認と実装計画の作成が完了しました。",
             "現在は計画作成モードです。",

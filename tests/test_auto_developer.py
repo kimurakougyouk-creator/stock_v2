@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.auto_developer as auto_developer
 from scripts.auto_developer import (
     load_task,
     save_status_report,
@@ -46,7 +47,7 @@ def test_validate_safe_branch_rejects_protected_branch(
 
 
 def test_validate_safe_branch_accepts_version_branch() -> None:
-    validate_safe_branch("version-7.3")
+    validate_safe_branch("version-7.7")
 
 
 def test_save_status_report_writes_plan_file(
@@ -71,3 +72,44 @@ def test_save_status_report_writes_plan_file(
     assert output_file.read_text(
         encoding="utf-8",
     ) == report + "\n"
+
+
+def test_status_report_shows_suggestions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    task_file = tmp_path / "development_task.md"
+    task_file.write_text(
+        "dashboardと注文処理を改善してpytestを実行する",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        auto_developer,
+        "TASK_FILE",
+        task_file,
+    )
+    monkeypatch.setattr(
+        auto_developer,
+        "PROJECT_DIR",
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        auto_developer,
+        "get_current_branch",
+        lambda: "version-7.7",
+    )
+    monkeypatch.setattr(
+        auto_developer,
+        "get_git_status",
+        lambda: "変更なし",
+    )
+
+    report = auto_developer.create_status_report()
+
+    assert "変更候補ファイル:" in report
+    assert "- dashboard.py" in report
+    assert "推奨テスト:" in report
+    assert "- tests/test_dashboard.py" in report
+    assert "安全確認:" in report
+    assert "- 実注文が無効の状態を維持" in report
