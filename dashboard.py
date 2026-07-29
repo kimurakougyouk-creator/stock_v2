@@ -89,6 +89,37 @@ def _safe_read_trade_pnls(base_dir: Path) -> list[float]:
 
 
 
+
+def _safe_read_realized_trades(
+    base_dir: Path,
+) -> list[dict]:
+    """Paper Tradingの詳細な確定取引履歴を安全に読み込む。"""
+
+    path = base_dir / "paper_trade_pnls.json"
+
+    if not path.exists():
+        return []
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+
+    if not isinstance(data, dict):
+        return []
+
+    trades = data.get("realized_trades", [])
+
+    if not isinstance(trades, list):
+        return []
+
+    return [
+        trade
+        for trade in trades
+        if isinstance(trade, dict)
+    ]
+
+
 def _safe_read_decision_report(
     base_dir: Path,
 ) -> dict[str, dict[str, str]]:
@@ -127,6 +158,56 @@ def _safe_read_decision_report(
         return {}
 
 
+
+def calculate_trade_statistics(
+    realized_trades: list[dict],
+) -> list[dict]:
+    """銘柄別の実現損益を集計する。"""
+
+    stats: dict[str, dict] = {}
+
+    for trade in realized_trades:
+        ticker = str(trade.get("ticker", "")).strip()
+        if not ticker:
+            continue
+
+        pnl = float(trade.get("realized_pnl", 0.0))
+
+        item = stats.setdefault(
+            ticker,
+            {
+                "ticker": ticker,
+                "total_profit": 0.0,
+                "wins": 0,
+                "trades": 0,
+            },
+        )
+
+        item["total_profit"] += pnl
+        item["trades"] += 1
+
+        if pnl > 0:
+            item["wins"] += 1
+
+    results = []
+
+    for item in stats.values():
+        trades = item["trades"]
+        item["win_rate"] = (
+            item["wins"] / trades * 100
+            if trades
+            else 0.0
+        )
+        results.append(item)
+
+    results.sort(
+        key=lambda x: x["total_profit"],
+        reverse=True,
+    )
+
+    return results
+
+
 def build_dashboard_html(base_dir: Path | None = None) -> str:
     base_dir = Path(base_dir or Path("results"))
     base_dir.mkdir(exist_ok=True, parents=True)
@@ -134,6 +215,8 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
     signal_df = _safe_read_signal_excel(base_dir)
     summary_info = _safe_read_summary_excel(base_dir)
     trade_pnls = _safe_read_trade_pnls(base_dir)
+    realized_trades = _safe_read_realized_trades(base_dir)
+    trade_statistics = calculate_trade_statistics(realized_trades)
     decision_report = _safe_read_decision_report(base_dir)
     performance = calculate_performance(trade_pnls)
 
@@ -334,6 +417,26 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
                 ])
             )
 
+    trade_statistics_rows = []
+
+    for rank, item in enumerate(trade_statistics, start=1):
+        trade_statistics_rows.append(
+            "<tr>"
+            f"<td>{rank}</td>"
+            f"<td>{html.escape(str(item['ticker']))}</td>"
+            f"<td>{int(item['trades'])}</td>"
+            f"<td>{int(item['wins'])}</td>"
+            f"<td>{float(item['win_rate']):.1f}%</td>"
+            f"<td>{_format_currency(item['total_profit'])}</td>"
+            "</tr>"
+        )
+
+    trade_statistics_html = (
+        "\n".join(trade_statistics_rows)
+        if trade_statistics_rows
+        else "<tr><td colspan='6'>確定取引データがありません</td></tr>"
+    )
+
     error_items = "<li>エラー0件</li>" if not errors else "".join(f"<li>{html.escape(str(error))}</li>" for error in errors)
     rows_html = "\n".join(html_rows) if html_rows else "<tr><td colspan='17'>データがありません</td></tr>"
     summary_line = html.escape(summary_text) if summary_text else "-"
@@ -402,6 +505,24 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
       <div class=\"metric\"><strong>参考運用資金</strong><br>{_format_currency(TRADING_CAPITAL)}</div>
       <div class=\"metric\"><strong>サマリー</strong><br>{summary_line}</div>
     </div>
+  </div>
+  <div class=\"card\">
+    <h2>銘柄別確定損益ランキング</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>順位</th>
+          <th>銘柄</th>
+          <th>取引回数</th>
+          <th>勝ち数</th>
+          <th>勝率</th>
+          <th>合計実現損益</th>
+        </tr>
+      </thead>
+      <tbody>
+        {trade_statistics_html}
+      </tbody>
+    </table>
   </div>
   <div class=\"card\">
     <h2>注文判断ログ集計</h2>

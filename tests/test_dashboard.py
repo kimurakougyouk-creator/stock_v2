@@ -54,3 +54,87 @@ NotOrderedReason,リスク管理,7
     assert "注文見送り理由" in html
     assert "リスク管理: 7件" in html
 
+
+
+def test_calculate_trade_statistics_groups_by_ticker() -> None:
+    from dashboard import calculate_trade_statistics
+
+    realized_trades = [
+        {
+            "ticker": "7203.T",
+            "realized_pnl": 1000.0,
+        },
+        {
+            "ticker": "7203.T",
+            "realized_pnl": -400.0,
+        },
+        {
+            "ticker": "8306.T",
+            "realized_pnl": 1200.0,
+        },
+    ]
+
+    result = calculate_trade_statistics(realized_trades)
+
+    assert result == [
+        {
+            "ticker": "8306.T",
+            "total_profit": 1200.0,
+            "wins": 1,
+            "trades": 1,
+            "win_rate": 100.0,
+        },
+        {
+            "ticker": "7203.T",
+            "total_profit": 600.0,
+            "wins": 1,
+            "trades": 2,
+            "win_rate": 50.0,
+        },
+    ]
+
+
+def test_build_dashboard_shows_trade_statistics(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from dashboard import build_dashboard_html
+
+    data = {
+        "realized_trade_pnls": [
+            1000.0,
+            -400.0,
+            1200.0,
+        ],
+        "realized_trades": [
+            {
+                "ticker": "7203.T",
+                "realized_pnl": 1000.0,
+            },
+            {
+                "ticker": "7203.T",
+                "realized_pnl": -400.0,
+            },
+            {
+                "ticker": "8306.T",
+                "realized_pnl": 1200.0,
+            },
+        ],
+    }
+
+    path = tmp_path / "paper_trade_pnls.json"
+    path.write_text(
+        json.dumps(data, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    html = build_dashboard_html(tmp_path)
+
+    assert "銘柄別確定損益ランキング" in html
+    assert "8306.T" in html
+    assert "7203.T" in html
+    assert "100.0%" in html
+    assert "50.0%" in html
+    assert ">1,200<" in html
+    assert ">600<" in html
