@@ -138,3 +138,58 @@ def test_build_dashboard_shows_trade_statistics(
     assert "50.0%" in html
     assert ">1,200<" in html
     assert ">600<" in html
+
+
+def test_build_dashboard_shows_advanced_performance_statistics(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    data = {
+        "realized_trade_pnls": [
+            1000.0,
+            500.0,
+            -300.0,
+            -200.0,
+            -100.0,
+            400.0,
+        ],
+    }
+
+    path = tmp_path / "paper_trade_pnls.json"
+    path.write_text(
+        json.dumps(data, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    html = build_dashboard_html(tmp_path)
+
+    assert "プロフィットファクター" in html
+    assert ">3.17<" in html
+    assert "最大連勝数" in html
+    assert ">2回<" in html
+    assert "最大連敗数" in html
+    assert ">3回<" in html
+
+
+def test_build_dashboard_shows_no_loss_profit_factor(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    data = {
+        "realized_trade_pnls": [
+            100.0,
+            200.0,
+        ],
+    }
+
+    path = tmp_path / "paper_trade_pnls.json"
+    path.write_text(
+        json.dumps(data, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    html = build_dashboard_html(tmp_path)
+
+    assert "∞（損失なし）" in html

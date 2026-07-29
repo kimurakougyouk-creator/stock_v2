@@ -23,6 +23,15 @@ def _format_currency(value: Any) -> str:
     return f"{numeric:,.0f}"
 
 
+
+def _format_profit_factor(value: Any) -> str:
+    """プロフィットファクターを表示用に整える。"""
+    numeric_value = float(value)
+    if numeric_value == float("inf"):
+        return "∞（損失なし）"
+    return f"{numeric_value:.2f}"
+
+
 def _safe_read_signal_excel(base_dir: Path) -> pd.DataFrame:
     signal_path = base_dir / "latest_signals.xlsx"
     if not signal_path.exists():
@@ -566,6 +575,9 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
       <div class=\"metric\"><strong>平均損失</strong><br>{_format_currency(performance.average_loss)}円</div>
       <div class=\"metric\"><strong>最大利益</strong><br>{_format_currency(performance.largest_profit)}円</div>
       <div class=\"metric\"><strong>最大損失</strong><br>{_format_currency(performance.largest_loss)}円</div>
+      <div class=\"metric\"><strong>プロフィットファクター</strong><br>{_format_profit_factor(performance.profit_factor)}</div>
+      <div class=\"metric\"><strong>最大連勝数</strong><br>{performance.maximum_winning_streak}回</div>
+      <div class=\"metric\"><strong>最大連敗数</strong><br>{performance.maximum_losing_streak}回</div>
     </div>
   </div>
   <div class=\"card\">
