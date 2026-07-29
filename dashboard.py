@@ -89,7 +89,9 @@ def _safe_read_trade_pnls(base_dir: Path) -> list[float]:
 
 
 
-def _safe_read_decision_report(base_dir: Path) -> dict[str, str]:
+def _safe_read_decision_report(
+    base_dir: Path,
+) -> dict[str, dict[str, str]]:
     """判断ログ集計CSVを安全に読み込む。"""
 
     import csv
@@ -107,11 +109,17 @@ def _safe_read_decision_report(base_dir: Path) -> dict[str, str]:
         ) as f:
             reader = csv.DictReader(f)
 
-            result = {}
+            result: dict[str, dict[str, str]] = {}
 
             for row in reader:
-                if row.get("Category") == "Summary":
-                    result[row["Item"]] = row["Value"]
+                category = row.get("Category", "").strip()
+                item = row.get("Item", "").strip()
+                value = row.get("Value", "").strip()
+
+                if not category or not item:
+                    continue
+
+                result.setdefault(category, {})[item] = value
 
             return result
 
@@ -129,23 +137,30 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
     decision_report = _safe_read_decision_report(base_dir)
     performance = calculate_performance(trade_pnls)
 
-    total_decisions = decision_report.get(
+    decision_summary = decision_report.get("Summary", {})
+    reason_counts = decision_report.get("Reason", {})
+    not_ordered_reason_counts = decision_report.get(
+        "NotOrderedReason",
+        {},
+    )
+
+    total_decisions = decision_summary.get(
         "TotalDecisions",
         "0",
     )
-    ordered_count = decision_report.get(
+    ordered_count = decision_summary.get(
         "OrderedCount",
         "0",
     )
-    not_ordered_count = decision_report.get(
+    not_ordered_count = decision_summary.get(
         "NotOrderedCount",
         "0",
     )
-    order_rate = decision_report.get(
+    order_rate = decision_summary.get(
         "OrderRatePercent",
         "0",
     )
-    average_ai_confidence = decision_report.get(
+    average_ai_confidence = decision_summary.get(
         "AverageAIConfidence",
         "0",
     )
@@ -324,6 +339,30 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
     summary_line = html.escape(summary_text) if summary_text else "-"
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    reason_items_html = (
+        "".join(
+            "<li>"
+            f"{html.escape(str(reason))}: "
+            f"{html.escape(str(count))}件"
+            "</li>"
+            for reason, count in reason_counts.items()
+        )
+        if reason_counts
+        else "<li>データがありません</li>"
+    )
+
+    not_ordered_reason_items_html = (
+        "".join(
+            "<li>"
+            f"{html.escape(str(reason))}: "
+            f"{html.escape(str(count))}件"
+            "</li>"
+            for reason, count in not_ordered_reason_counts.items()
+        )
+        if not_ordered_reason_counts
+        else "<li>注文見送りはありません</li>"
+    )
+
     html_content = f"""<!DOCTYPE html>
 <html lang=\"ja\">
 <head>
@@ -372,6 +411,23 @@ def build_dashboard_html(base_dir: Path | None = None) -> str:
       <div class=\"metric\"><strong>注文未実行件数</strong><br>{html.escape(str(not_ordered_count))}</div>
       <div class=\"metric\"><strong>注文実行率</strong><br>{html.escape(str(order_rate))}%</div>
       <div class=\"metric\"><strong>AI平均信頼度</strong><br>{html.escape(str(average_ai_confidence))}</div>
+    </div>
+  </div>
+  <div class=\"card\">
+    <h2>判断理由別集計</h2>
+    <div class=\"grid\">
+      <div class=\"metric\">
+        <strong>すべての判断理由</strong>
+        <ul>
+          {reason_items_html}
+        </ul>
+      </div>
+      <div class=\"metric\">
+        <strong>注文見送り理由</strong>
+        <ul>
+          {not_ordered_reason_items_html}
+        </ul>
+      </div>
     </div>
   </div>
   <div class=\"card\">

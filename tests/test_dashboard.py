@@ -30,6 +30,9 @@ Summary,OrderedCount,3
 Summary,NotOrderedCount,7
 Summary,OrderRatePercent,30.0
 Summary,AverageAIConfidence,82.5
+Reason,AI最終判定,8
+Reason,Time Stop,2
+NotOrderedReason,リスク管理,7
 """,
         encoding="utf-8-sig",
     )
@@ -45,4 +48,9 @@ Summary,AverageAIConfidence,82.5
     assert "7" in html
     assert "30.0%" in html
     assert "82.5" in html
+    assert "判断理由別集計" in html
+    assert "AI最終判定: 8件" in html
+    assert "Time Stop: 2件" in html
+    assert "注文見送り理由" in html
+    assert "リスク管理: 7件" in html
 
