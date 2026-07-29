@@ -284,14 +284,77 @@ def calculate_realized_trade_pnls() -> list[float]:
     return realized_trade_pnls
 
 
+def calculate_realized_trades() -> list[dict]:
+    """注文履歴から売却約定ごとの詳細な確定取引履歴を計算します。"""
+
+    positions: dict[str, int] = {}
+    average_costs: dict[str, float] = {}
+    realized_trades: list[dict] = []
+
+    for order in load_paper_orders():
+        try:
+            ticker = str(order["ticker"])
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0 or price < 0:
+            continue
+
+        held_shares = positions.get(ticker, 0)
+        average_cost = average_costs.get(ticker, 0.0)
+
+        if side == "BUY":
+            total_cost = (held_shares * average_cost) + (shares * price)
+            new_shares = held_shares + shares
+
+            positions[ticker] = new_shares
+            average_costs[ticker] = (
+                total_cost / new_shares
+                if new_shares > 0
+                else 0.0
+            )
+
+        elif side == "SELL" and held_shares > 0:
+            sold_shares = min(shares, held_shares)
+            trade_pnl = (price - average_cost) * sold_shares
+
+            realized_trades.append(
+                {
+                    "ticker": ticker,
+                    "shares": sold_shares,
+                    "average_cost": average_cost,
+                    "sell_price": price,
+                    "realized_pnl": trade_pnl,
+                    "sold_at": order.get("created_at"),
+                }
+            )
+
+            remaining_shares = held_shares - sold_shares
+            positions[ticker] = remaining_shares
+
+            if remaining_shares <= 0:
+                average_costs[ticker] = 0.0
+
+    return realized_trades
+
+
 def save_realized_trade_pnls() -> Path:
     """実現損益履歴をダッシュボード用JSONへ保存します。"""
 
     ORDER_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+    realized_trades = calculate_realized_trades()
+
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
-        "realized_trade_pnls": calculate_realized_trade_pnls(),
+        "realized_trade_pnls": [
+            trade["realized_pnl"]
+            for trade in realized_trades
+        ],
+        "realized_trades": realized_trades,
     }
 
     temporary_path = TRADE_PNL_PATH.with_suffix(".json.tmp")

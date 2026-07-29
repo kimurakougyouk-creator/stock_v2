@@ -104,3 +104,38 @@ def test_sell_more_than_position_uses_held_shares_only(
         trade_pnl_path.read_text(encoding="utf-8")
     )
     assert payload["realized_trade_pnls"] == [500.0]
+
+
+def test_realized_trade_details_are_saved(isolated_order_files):
+    """銘柄・株数・価格・損益・売却日時がJSONへ保存される。"""
+    _, trade_pnl_path = isolated_order_files
+
+    order_manager.create_paper_order(
+        ticker="7203.T",
+        signal="BUY",
+        shares=10,
+        reference_price=1000.0,
+    )
+    order_manager.create_paper_order(
+        ticker="7203.T",
+        signal="SELL",
+        shares=10,
+        reference_price=1100.0,
+    )
+
+    payload = json.loads(
+        trade_pnl_path.read_text(encoding="utf-8")
+    )
+
+    assert payload["realized_trades"] == [
+        {
+            "ticker": "7203.T",
+            "shares": 10,
+            "average_cost": 1000.0,
+            "sell_price": 1100.0,
+            "realized_pnl": 1000.0,
+            "sold_at": payload["realized_trades"][0]["sold_at"],
+        }
+    ]
+    assert payload["realized_trades"][0]["sold_at"]
+
