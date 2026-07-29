@@ -7,11 +7,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from src.ai_asset_platform.developer.planner import create_plan
-
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+# scriptsディレクトリから直接実行した場合でも、
+# プロジェクト内のsrcパッケージを読み込めるようにする。
+project_dir_text = str(PROJECT_DIR)
+if project_dir_text not in sys.path:
+    sys.path.insert(0, project_dir_text)
+
+from src.ai_asset_platform.developer.planner import create_plan
 TASK_FILE = PROJECT_DIR / "development_task.md"
+PLAN_FILE = PROJECT_DIR / ".ai_developer" / "development_plan.md"
 PROTECTED_BRANCHES = {"main", "master"}
 
 
@@ -105,14 +112,36 @@ def create_status_report() -> str:
     )
 
 
+def save_status_report(
+    report: str,
+    output_file: Path = PLAN_FILE,
+) -> Path:
+    """自動生成した開発計画をファイルへ保存する。"""
+    output_file.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    output_file.write_text(
+        report.rstrip() + "\n",
+        encoding="utf-8",
+    )
+    return output_file
+
+
 def main() -> int:
     """コマンドライン実行処理。"""
     try:
-        print(create_status_report())
+        report = create_status_report()
+        saved_file = save_status_report(report)
+
+        print(report)
+        print()
+        print(f"開発計画を保存しました: {saved_file}")
     except (
         FileNotFoundError,
         ValueError,
         RuntimeError,
+        OSError,
         subprocess.CalledProcessError,
     ) as error:
         print(f"エラー: {error}", file=sys.stderr)
