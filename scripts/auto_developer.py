@@ -15,6 +15,9 @@ if project_dir_text not in sys.path:
     sys.path.insert(0, project_dir_text)
 
 from src.ai_asset_platform.developer.planner import create_plan
+from src.ai_asset_platform.developer.priority import (
+    select_next_priority,
+)
 
 
 TASK_FILE = PROJECT_DIR / "development_task.md"
@@ -129,6 +132,7 @@ def create_status_report() -> str:
     validate_safe_branch(branch)
     status = get_git_status()
     plan = create_plan(TASK_FILE)
+    priority = select_next_priority(plan)
     readiness, readiness_reasons = evaluate_readiness(
         status,
         plan.target_files,
@@ -161,6 +165,14 @@ def create_status_report() -> str:
             "",
             "安全確認:",
             *_bullet_lines(plan.safety_checks),
+            "",
+            "次に実装すべき最優先タスク:",
+            f"タスク: {priority.title}",
+            f"対象ファイル: {priority.target_file}",
+            f"推奨テスト: {priority.recommended_test}",
+            f"優先度スコア: {priority.score}",
+            "優先理由:",
+            *_bullet_lines(priority.reasons),
             "",
             f"実行準備度: {readiness}",
             "判定理由:",
