@@ -4,6 +4,7 @@ import pytest
 
 import scripts.auto_developer as auto_developer
 from scripts.auto_developer import (
+    evaluate_readiness,
     load_task,
     save_status_report,
     validate_safe_branch,
@@ -113,3 +114,48 @@ def test_status_report_shows_suggestions(
     assert "- tests/test_dashboard.py" in report
     assert "安全確認:" in report
     assert "- 実注文が無効の状態を維持" in report
+    assert "実行準備度: READY" in report
+    assert "判定理由:" in report
+
+def test_evaluate_readiness_returns_ready() -> None:
+    readiness, reasons = evaluate_readiness(
+        "変更なし",
+        ["dashboard.py"],
+        ["tests/test_dashboard.py"],
+    )
+
+    assert readiness == "READY"
+    assert "未保存の変更なし" in reasons
+
+
+def test_evaluate_readiness_requires_review_for_changes() -> None:
+    readiness, reasons = evaluate_readiness(
+        "M dashboard.py",
+        ["dashboard.py"],
+        ["tests/test_dashboard.py"],
+    )
+
+    assert readiness == "REVIEW_REQUIRED"
+    assert (
+        "未保存の変更があるため、内容確認が必要"
+        in reasons
+    )
+
+
+def test_evaluate_readiness_requires_review_for_unknown_task() -> None:
+    readiness, reasons = evaluate_readiness(
+        "変更なし",
+        ["開発指示を確認して変更対象を特定"],
+        ["関連する既存テストを特定"],
+    )
+
+    assert readiness == "REVIEW_REQUIRED"
+    assert (
+        "変更対象ファイルを自動特定できていない"
+        in reasons
+    )
+    assert (
+        "実行するテストを自動特定できていない"
+        in reasons
+    )
+

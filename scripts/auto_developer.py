@@ -86,6 +86,42 @@ def _bullet_lines(items: list[str]) -> list[str]:
     return [f"- {item}" for item in items]
 
 
+def evaluate_readiness(
+    status: str,
+    target_files: list[str],
+    recommended_tests: list[str],
+) -> tuple[str, list[str]]:
+    """開発計画が実行準備済みか安全側で判定する。"""
+    reasons: list[str] = []
+
+    if status != "変更なし":
+        reasons.append(
+            "未保存の変更があるため、内容確認が必要"
+        )
+
+    if target_files == [
+        "開発指示を確認して変更対象を特定"
+    ]:
+        reasons.append(
+            "変更対象ファイルを自動特定できていない"
+        )
+
+    if recommended_tests == [
+        "関連する既存テストを特定"
+    ]:
+        reasons.append(
+            "実行するテストを自動特定できていない"
+        )
+
+    if reasons:
+        return "REVIEW_REQUIRED", reasons
+
+    return "READY", [
+        "変更対象と推奨テストを特定済み",
+        "未保存の変更なし",
+    ]
+
+
 def create_status_report() -> str:
     """自動開発開始前の安全確認結果を作る。"""
     task = load_task()
@@ -93,6 +129,11 @@ def create_status_report() -> str:
     validate_safe_branch(branch)
     status = get_git_status()
     plan = create_plan(TASK_FILE)
+    readiness, readiness_reasons = evaluate_readiness(
+        status,
+        plan.target_files,
+        plan.recommended_tests,
+    )
 
     return "\n".join(
         [
@@ -120,6 +161,10 @@ def create_status_report() -> str:
             "",
             "安全確認:",
             *_bullet_lines(plan.safety_checks),
+            "",
+            f"実行準備度: {readiness}",
+            "判定理由:",
+            *_bullet_lines(readiness_reasons),
             "",
             "✅ 安全確認と実装計画の作成が完了しました。",
             "現在は計画作成モードです。",
