@@ -116,6 +116,9 @@ def test_status_report_shows_suggestions(
     assert "- 実注文が無効の状態を維持" in report
     assert "実行準備度: READY" in report
     assert "判定理由:" in report
+    assert "生成された実行タスク:" in report
+    assert "タスク名:" in report
+    assert "実行可能: True" in report
 
 def test_evaluate_readiness_returns_ready() -> None:
     readiness, reasons = evaluate_readiness(

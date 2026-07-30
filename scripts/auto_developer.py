@@ -18,6 +18,9 @@ from src.ai_asset_platform.developer.planner import create_plan
 from src.ai_asset_platform.developer.priority import (
     select_next_priority,
 )
+from src.ai_asset_platform.developer.task import (
+    create_development_task,
+)
 
 
 TASK_FILE = PROJECT_DIR / "development_task.md"
@@ -138,6 +141,11 @@ def create_status_report() -> str:
         plan.target_files,
         plan.recommended_tests,
     )
+    development_task = create_development_task(
+        plan,
+        priority,
+        readiness,
+    )
 
     return "\n".join(
         [
@@ -177,6 +185,12 @@ def create_status_report() -> str:
             f"実行準備度: {readiness}",
             "判定理由:",
             *_bullet_lines(readiness_reasons),
+            "",
+            "生成された実行タスク:",
+            f"タスク名: {development_task.title}",
+            f"対象ファイル: {development_task.target_file}",
+            f"推奨テスト: {development_task.recommended_test}",
+            f"実行可能: {development_task.executable}",
             "",
             "✅ 安全確認と実装計画の作成が完了しました。",
             "現在は計画作成モードです。",
