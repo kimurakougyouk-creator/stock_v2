@@ -1,6 +1,6 @@
-from src.ai_asset_platform.developer.planner import DevelopmentPlan
-from src.ai_asset_platform.developer.priority import DevelopmentPriority
-from src.ai_asset_platform.developer.task import (
+from ai_asset_platform.developer.planner import DevelopmentPlan
+from ai_asset_platform.developer.priority import DevelopmentPriority
+from ai_asset_platform.developer.task import (
     create_development_task,
 )
 

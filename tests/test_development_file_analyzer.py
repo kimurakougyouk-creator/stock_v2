@@ -1,7 +1,7 @@
 import unittest
 
-from src.ai_asset_platform.developer.file_analyzer import analyze_task
-from src.ai_asset_platform.developer.task import DevelopmentTask
+from ai_asset_platform.developer.file_analyzer import analyze_task
+from ai_asset_platform.developer.task import DevelopmentTask
 
 
 class TestDevelopmentFileAnalyzer(unittest.TestCase):

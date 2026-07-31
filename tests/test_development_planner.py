@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.ai_asset_platform.developer.planner import create_plan
+from ai_asset_platform.developer.planner import create_plan
 
 
 def _create_task(tmp_path: Path, text: str) -> Path:

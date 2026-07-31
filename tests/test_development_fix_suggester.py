@@ -1,4 +1,4 @@
-from src.ai_asset_platform.developer.fix_suggester import suggest_fixes
+from ai_asset_platform.developer.fix_suggester import suggest_fixes
 
 
 def test_suggest_fixes_generates_expected_titles():

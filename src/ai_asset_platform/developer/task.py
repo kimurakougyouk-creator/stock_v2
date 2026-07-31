@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.ai_asset_platform.developer.planner import DevelopmentPlan
-from src.ai_asset_platform.developer.priority import DevelopmentPriority
+from ai_asset_platform.developer.planner import DevelopmentPlan
+from ai_asset_platform.developer.priority import DevelopmentPriority
 
 
 READY_STATUS = "READY"

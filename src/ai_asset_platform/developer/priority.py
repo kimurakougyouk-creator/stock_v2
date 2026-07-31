@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.ai_asset_platform.developer.planner import DevelopmentPlan
+from ai_asset_platform.developer.planner import DevelopmentPlan
 
 
 @dataclass(frozen=True)

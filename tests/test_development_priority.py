@@ -1,5 +1,5 @@
-from src.ai_asset_platform.developer.planner import DevelopmentPlan
-from src.ai_asset_platform.developer.priority import (
+from ai_asset_platform.developer.planner import DevelopmentPlan
+from ai_asset_platform.developer.priority import (
     select_next_priority,
 )
 
