@@ -1,4 +1,4 @@
-from ai_asset_platform.execution.order_request import OrderRequest
+from ai_asset_platform.brokers.orders import OrderRequest
 
 
 class OrderQueue:

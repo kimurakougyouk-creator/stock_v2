@@ -1,5 +1,5 @@
+from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
 from ai_asset_platform.execution.order_queue import OrderQueue
-from ai_asset_platform.execution.order_request import OrderRequest
 
 
 def test_enqueue_and_dequeue():
@@ -7,7 +7,7 @@ def test_enqueue_and_dequeue():
 
     order = OrderRequest(
         symbol="7203.T",
-        action="BUY",
+        side=OrderSide.BUY,
         quantity=100,
     )
 

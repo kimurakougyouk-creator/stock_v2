@@ -1,11 +1,5 @@
-from ai_asset_platform.execution.order_request import OrderRequest
+from ai_asset_platform.brokers.orders import OrderRequest
 
 
 def validate_order_request(order: OrderRequest) -> bool:
-    if order.quantity <= 0:
-        return False
-
-    if order.action not in {"BUY", "SELL"}:
-        return False
-
-    return True
+    return bool(order.symbol.strip()) and order.quantity > 0
