@@ -24,6 +24,7 @@ from config import (
 )
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.paper_order_sync import build_paper_order_sync
+from ai_asset_platform.execution.order_limit_reason import detect_buy_order_limit_reason
 from indicators import add_indicators
 from mail import send_mail
 from order_manager import (
@@ -656,15 +657,27 @@ def run_signal_scan(
                             order_signal == "BUY"
                             and order_shares <= 0
                         ):
-                            print(
-                                f"{ticker}: 利用可能資金、"
-                                "ポートフォリオ全体の投資比率上限、"
-                                "1銘柄あたりの資金配分上限、"
-                                "1取引あたりの損失許容額、または"
-                                "全保有ポジションの合計リスク上限では"
-                                f"{LOT_SIZE}株以上購入できないため、"
-                                "新規BUY注文を見送りました。"
+                            limit_reason = detect_buy_order_limit_reason(
+                                requested_shares=LOT_SIZE,
+                                affordable_shares=affordable_shares,
+                                allocation_limit_shares=allocation_limit_shares,
+                                risk_limit_shares=risk_limit_shares,
+                                portfolio_risk_limit_shares=(
+                                    portfolio_risk_limit_shares
+                                ),
                             )
+
+                            if limit_reason is not None:
+                                print(
+                                    f"{ticker}: BUY注文を見送りました。"
+                                    f"原因={limit_reason.message} / "
+                                    f"制限株数={limit_reason.limit_shares}株"
+                                )
+                            else:
+                                print(
+                                    f"{ticker}: 注文数量上限により、"
+                                    "新規BUY注文を見送りました。"
+                                )
                         elif order_shares <= 0:
                             print(
                                 f"{ticker}: 注文数量上限により、"
