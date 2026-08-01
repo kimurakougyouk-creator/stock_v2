@@ -23,6 +23,7 @@ from config import (
     TRADING_CAPITAL,
 )
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.execution.paper_order_sync import build_paper_order_sync
 from indicators import add_indicators
 from mail import send_mail
 from order_manager import (
@@ -706,11 +707,28 @@ def run_signal_scan(
                                     "超えるため、注文を見送りました。"
                                 )
                             elif SETTINGS.enable_paper_trading:
-                                paper_order = create_paper_order(
+                                paper_order_sync = build_paper_order_sync(
                                     ticker=ticker,
                                     signal=order_signal,
                                     shares=order_shares,
-                                    reference_price=float(signal_result["price"]),
+                                    reference_price=float(
+                                        signal_result["price"]
+                                    ),
+                                )
+
+                                paper_order = create_paper_order(
+                                    ticker=paper_order_sync.legacy_order[
+                                        "ticker"
+                                    ],
+                                    signal=paper_order_sync.legacy_order[
+                                        "side"
+                                    ],
+                                    shares=paper_order_sync.legacy_order[
+                                        "shares"
+                                    ],
+                                    reference_price=paper_order_sync.legacy_order[
+                                        "reference_price"
+                                    ],
                                 )
                                 if trailing_stop_triggered:
                                     order_reason = "Trailing Stop"
