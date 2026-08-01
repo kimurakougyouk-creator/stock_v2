@@ -793,10 +793,33 @@ def run_signal_scan(
                                     "注文を見送りました。"
                                 )
                     else:
-                        print(
-                            f"{ticker}: 最終{order_signal}判定ですが、"
-                            "資金管理により注文を見送りました。"
-                        )
+                        if (
+                            order_signal == "BUY"
+                            and shares <= 0
+                        ):
+                            risk_per_share = float(
+                                signal_result.get("risk_per_share") or 0.0
+                            )
+                            max_loss_yen = float(
+                                signal_result.get("max_loss_yen") or 0.0
+                            )
+                            raw_risk_shares = (
+                                int(max_loss_yen // risk_per_share)
+                                if risk_per_share > 0
+                                else 0
+                            )
+
+                            print(
+                                f"{ticker}: BUY注文を見送りました。"
+                                "原因=1取引あたりの損失許容額 / "
+                                f"最大{raw_risk_shares}株 / "
+                                f"最低売買単位={LOT_SIZE}株"
+                            )
+                        else:
+                            print(
+                                f"{ticker}: 最終{order_signal}判定ですが、"
+                                "資金管理により注文を見送りました。"
+                            )
 
             record = {
                 "Ticker": ticker,

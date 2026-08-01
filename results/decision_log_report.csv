@@ -1,11 +1,11 @@
 ﻿Category,Item,Value
-Summary,TotalDecisions,2077
-Summary,OrderedCount,2077
+Summary,TotalDecisions,2145
+Summary,OrderedCount,2145
 Summary,NotOrderedCount,0
 Summary,OrderRatePercent,100.0
 Summary,AverageAIConfidence,93.2
-FinalSignal,BUY,915
-FinalSignal,SELL,1162
-Ticker,7203.T,2077
-Reason,AI最終判定,1825
-Reason,Time Stop,252
+FinalSignal,BUY,947
+FinalSignal,SELL,1198
+Ticker,7203.T,2145
+Reason,AI最終判定,1885
+Reason,Time Stop,260
