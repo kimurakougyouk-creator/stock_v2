@@ -9,20 +9,20 @@ from ai_asset_platform.brokers.orders import (
     OrderSide,
     OrderType,
 )
-from ai_asset_platform.brokers.sbi_paper import SbiPaperAdapter
+from ai_asset_platform.brokers.base import BrokerAdapter
 
 
 class ExecutionService:
     def __init__(
         self,
-        broker: SbiPaperAdapter,
+        broker: BrokerAdapter,
         account: Account,
     ) -> None:
         self._broker = broker
         self._account = account
 
     @property
-    def broker(self) -> SbiPaperAdapter:
+    def broker(self) -> BrokerAdapter:
         return self._broker
 
     @property

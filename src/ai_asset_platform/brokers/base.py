@@ -4,6 +4,8 @@
 
 from abc import ABC, abstractmethod
 
+from ai_asset_platform.brokers.orders import FillResult, OrderRequest
+
 
 class BrokerAdapter(ABC):
     @property
@@ -22,3 +24,15 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def disconnect(self) -> None:
         """証券会社との接続を終了する。"""
+
+    @abstractmethod
+    def place_order(self, order: OrderRequest):
+        """注文を証券会社へ送る。"""
+
+    @abstractmethod
+    def fill_order(
+        self,
+        order: OrderRequest,
+        price: float,
+    ) -> FillResult:
+        """注文を約定させ、その結果を返す。"""
