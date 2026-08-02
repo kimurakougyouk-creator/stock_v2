@@ -272,6 +272,7 @@ def run_signal_scan(
             )
 
             order_signal = final_decision.signal
+            decision_ordered = False
             positions: dict[str, int] = {}
             held_shares = 0
             holding_days: int | None = None
@@ -750,31 +751,7 @@ def run_signal_scan(
                                 else:
                                     order_reason = "AI最終判定"
 
-                                log_decision(
-                                    ticker=ticker,
-                                    final_signal=order_signal,
-                                    ordered=True,
-                                    reason=order_reason,
-                                    ai_signal=ai_result.signal,
-                                    ai_confidence=float(ai_result.confidence),
-                                    technical_signal=signal_result["signal"],
-                                    price=float(signal_result["price"]),
-                                    score=float(signal_result["score"]),
-                                    grade=str(signal_result["grade"]),
-                                    rsi=float(signal_result["rsi"]),
-                                    atr=float(signal_result["atr"]),
-                                    ma_short=float(
-                                        signal_result["ma_short"]
-                                    ),
-                                    ma_middle=float(
-                                        signal_result["ma_middle"]
-                                    ),
-                                    ma_long=float(
-                                        signal_result["ma_long"]
-                                    ),
-                                    ai_score=float(ai_result.score),
-                                    ai_provider=str(ai_result.provider),
-                                )
+                                decision_ordered = True
                                 print(
                                     f"{ticker}: {order_reason}による"
                                     "模擬注文を記録しました "
@@ -855,7 +832,7 @@ def run_signal_scan(
             log_decision(
                 ticker=ticker,
                 final_signal=final_decision.signal,
-                ordered=False,
+                ordered=decision_ordered,
                 reason=final_decision.reason,
                 ai_signal=ai_result.signal,
                 ai_confidence=ai_result.confidence,
