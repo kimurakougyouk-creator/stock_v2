@@ -851,6 +851,27 @@ def run_signal_scan(
                 "FinalReason": final_decision.reason,
             }
             records.append(record)
+
+            log_decision(
+                ticker=ticker,
+                final_signal=final_decision.signal,
+                ordered=False,
+                reason=final_decision.reason,
+                ai_signal=ai_result.signal,
+                ai_confidence=ai_result.confidence,
+                technical_signal=signal_result["signal"],
+                price=signal_result["price"],
+                score=signal_result["score"],
+                grade=signal_result["grade"],
+                rsi=signal_result["rsi"],
+                atr=signal_result["atr"],
+                ma_short=signal_result["ma_short"],
+                ma_middle=signal_result["ma_middle"],
+                ma_long=signal_result["ma_long"],
+                ai_score=ai_result.score,
+                ai_provider=ai_result.provider,
+            )
+
             print(
                 f"{ticker}: "
                 f"テクニカル={signal_result['signal']} / "
