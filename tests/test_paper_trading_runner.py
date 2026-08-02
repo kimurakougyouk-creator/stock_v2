@@ -13,6 +13,7 @@ def test_paper_runner_enables_orders_only_for_paper(monkeypatch):
         "SETTINGS",
         SimpleNamespace(
             enable_paper_trading=True,
+            enable_live_trading=False,
             live_trading_unlocked=False,
         ),
     )
@@ -67,6 +68,7 @@ def test_paper_runner_rejects_live_unlocked(monkeypatch):
         "SETTINGS",
         SimpleNamespace(
             enable_paper_trading=True,
+            enable_live_trading=False,
             live_trading_unlocked=True,
         ),
     )
@@ -113,3 +115,18 @@ def test_paper_runner_main_prints_error_health(monkeypatch, capsys):
     assert "1件のエラーが発生しました。" in output
     assert "シグナル件数: 9" in output
     assert "エラー件数  : 1" in output
+
+
+def test_paper_runner_rejects_live_trading_enabled(monkeypatch):
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            enable_paper_trading=True,
+            enable_live_trading=True,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Live Tradingが有効"):
+        paper_trading_runner.run_paper_trading()

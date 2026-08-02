@@ -19,6 +19,12 @@ def run_paper_trading() -> dict:
             "Paper Tradingが無効です。実行を中止しました。"
         )
 
+    if SETTINGS.enable_live_trading:
+        raise RuntimeError(
+            "Live Tradingが有効なため、"
+            "安全のためPaper試運転を中止しました。"
+        )
+
     if SETTINGS.live_trading_unlocked:
         raise RuntimeError(
             "Live Tradingが解除されているため、"
