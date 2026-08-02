@@ -8,6 +8,7 @@ Paper Trading専用ランナー。
 """
 
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.reports.paper_trading_health import evaluate_paper_trading_health
 from signal_runner import _create_configured_ai_provider, run_signal_scan
 
 
@@ -41,10 +42,20 @@ def main() -> None:
 
     result = run_paper_trading()
 
+    signal_count = len(result["records"])
+    error_count = len(result["errors"])
+
+    health = evaluate_paper_trading_health(
+        signal_count=signal_count,
+        error_count=error_count,
+    )
+
     print("=" * 50)
-    print("Paper Trading正常終了")
-    print(f"シグナル件数: {len(result['records'])}")
-    print(f"エラー件数  : {len(result['errors'])}")
+    print("Paper Trading実行結果")
+    print(f"診断結果    : {health.status}")
+    print(f"状態        : {health.message}")
+    print(f"シグナル件数: {health.signal_count}")
+    print(f"エラー件数  : {health.error_count}")
     print("=" * 50)
 
 

@@ -73,3 +73,43 @@ def test_paper_runner_rejects_live_unlocked(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Live Trading"):
         paper_trading_runner.run_paper_trading()
+
+
+def test_paper_runner_main_prints_normal_health(monkeypatch, capsys):
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "run_paper_trading",
+        lambda: {
+            "records": [{} for _ in range(10)],
+            "errors": [],
+        },
+    )
+
+    paper_trading_runner.main()
+
+    output = capsys.readouterr().out
+
+    assert "診断結果    : NORMAL" in output
+    assert "Paper Tradingは正常です。" in output
+    assert "シグナル件数: 10" in output
+    assert "エラー件数  : 0" in output
+
+
+def test_paper_runner_main_prints_error_health(monkeypatch, capsys):
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "run_paper_trading",
+        lambda: {
+            "records": [{} for _ in range(9)],
+            "errors": ["download error"],
+        },
+    )
+
+    paper_trading_runner.main()
+
+    output = capsys.readouterr().out
+
+    assert "診断結果    : ERROR" in output
+    assert "1件のエラーが発生しました。" in output
+    assert "シグナル件数: 9" in output
+    assert "エラー件数  : 1" in output
