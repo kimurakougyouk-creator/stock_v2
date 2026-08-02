@@ -8,6 +8,7 @@ Paper Trading専用ランナー。
 """
 
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.execution.paper_trading_loop import run_paper_trading_loop
 from ai_asset_platform.reports.paper_trading_health import evaluate_paper_trading_health
 from signal_runner import _create_configured_ai_provider, run_signal_scan
 
@@ -32,6 +33,22 @@ def run_paper_trading() -> dict:
         allow_email=False,
     )
 
+
+
+def run_continuous_paper_trading(
+    *,
+    max_runs: int = 3,
+):
+    """
+    Paper Tradingを安全に複数回実行する。
+
+    ERRORを検出した場合は自動停止する。
+    """
+
+    return run_paper_trading_loop(
+        run_once=run_paper_trading,
+        max_runs=max_runs,
+    )
 
 def main() -> None:
     print("=" * 50)
