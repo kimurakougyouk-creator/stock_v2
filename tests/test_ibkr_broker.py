@@ -23,7 +23,23 @@ def test_ibkr_starts_disconnected():
     assert broker.is_connected() is False
 
 
-def test_ibkr_connect_does_not_fake_connection():
+def test_ibkr_connect_does_not_fake_connection(monkeypatch):
+    from ai_asset_platform.brokers.ibkr_connection import (
+        IbkrConnectionResult,
+    )
+
+    def fake_probe(config):
+        return IbkrConnectionResult(
+            connected=False,
+            next_order_id=None,
+            message="TWS unavailable",
+        )
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
+        fake_probe,
+    )
+
     broker = IbkrBrokerAdapter()
 
     assert broker.connect() is False
@@ -85,4 +101,52 @@ def test_ibkr_disconnect_is_safe():
 
     broker.disconnect()
 
+    assert broker.is_connected() is False
+
+
+def test_ibkr_connect_uses_safe_paper_probe(monkeypatch):
+    from ai_asset_platform.brokers.ibkr_connection import (
+        IbkrConnectionResult,
+    )
+
+    def fake_probe(config):
+        return IbkrConnectionResult(
+            connected=True,
+            next_order_id=123,
+            message="test connection",
+        )
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
+        fake_probe,
+    )
+
+    broker = IbkrBrokerAdapter()
+
+    assert broker.connect() is True
+    assert broker.is_connected() is True
+
+
+def test_ibkr_connect_stays_disconnected_when_probe_fails(
+    monkeypatch,
+):
+    from ai_asset_platform.brokers.ibkr_connection import (
+        IbkrConnectionResult,
+    )
+
+    def fake_probe(config):
+        return IbkrConnectionResult(
+            connected=False,
+            next_order_id=None,
+            message="test failure",
+        )
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
+        fake_probe,
+    )
+
+    broker = IbkrBrokerAdapter()
+
+    assert broker.connect() is False
     assert broker.is_connected() is False

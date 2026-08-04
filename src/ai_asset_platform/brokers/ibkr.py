@@ -5,6 +5,9 @@ from ai_asset_platform.brokers.ibkr_config import (
     IbkrConnectionConfig,
     create_ibkr_paper_config,
 )
+from ai_asset_platform.brokers.ibkr_connection import (
+    probe_ibkr_paper_connection,
+)
 from ai_asset_platform.brokers.orders import (
     FillResult,
     OrderRequest,
@@ -34,9 +37,12 @@ class IbkrBrokerAdapter(BrokerAdapter):
     def connect(self) -> bool:
         self.config.validate()
 
-        # 実API接続は次Version以降で追加する。
-        self._connected = False
-        return False
+        result = probe_ibkr_paper_connection(
+            self.config,
+        )
+
+        self._connected = result.connected
+        return self._connected
 
     def is_connected(self) -> bool:
         return self._connected
