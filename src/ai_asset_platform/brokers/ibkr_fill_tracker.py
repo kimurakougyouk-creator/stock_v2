@@ -29,5 +29,24 @@ class IbkrFillTracker:
     def processed_filled(self, order_id: int) -> float:
         return self._processed_filled.get(order_id, 0.0)
 
+    def snapshot(self) -> dict[int, float]:
+        return dict(self._processed_filled)
+
+    def restore(self, processed_filled: dict[int, float]) -> None:
+        restored: dict[int, float] = {}
+
+        for order_id, quantity in processed_filled.items():
+            if order_id < 0:
+                raise ValueError("IBKR order_idは0以上にしてください。")
+
+            if quantity < 0:
+                raise ValueError(
+                    "IBKR処理済み約定数量は0以上にしてください。"
+                )
+
+            restored[int(order_id)] = float(quantity)
+
+        self._processed_filled = restored
+
     def clear(self, order_id: int) -> None:
         self._processed_filled.pop(order_id, None)
