@@ -150,3 +150,95 @@ def test_ibkr_connect_stays_disconnected_when_probe_fails(
 
     assert broker.connect() is False
     assert broker.is_connected() is False
+
+
+def test_ibkr_connected_order_is_prepared_but_not_sent(
+    monkeypatch,
+):
+    from ai_asset_platform.brokers.ibkr_connection import (
+        IbkrConnectionResult,
+    )
+
+    def fake_probe(config):
+        return IbkrConnectionResult(
+            connected=True,
+            next_order_id=123,
+            message="test connection",
+        )
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
+        fake_probe,
+    )
+
+    broker = IbkrBrokerAdapter()
+
+    assert broker.connect() is True
+
+    result = broker.place_order(
+        OrderRequest(
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            quantity=1,
+        )
+    )
+
+    assert result.order_id == "IBKR-PAPER-PREPARED"
+    assert result.status is OrderStatus.REJECTED
+    assert "準備まで完了" in result.message
+    assert "送信していません" in result.message
+
+
+def test_ibkr_connected_order_keeps_transmission_disabled(
+    monkeypatch,
+):
+    from dataclasses import dataclass
+
+    from ai_asset_platform.brokers.ibkr_connection import (
+        IbkrConnectionResult,
+    )
+
+    def fake_probe(config):
+        return IbkrConnectionResult(
+            connected=True,
+            next_order_id=123,
+            message="test connection",
+        )
+
+    @dataclass
+    class FakeOrder:
+        transmit: bool = True
+
+    @dataclass
+    class FakePrepared:
+        order: FakeOrder
+
+    def unsafe_prepare(order, config):
+        return FakePrepared(
+            order=FakeOrder(transmit=True),
+        )
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
+        fake_probe,
+    )
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.prepare_ibkr_paper_order",
+        unsafe_prepare,
+    )
+
+    broker = IbkrBrokerAdapter()
+
+    assert broker.connect() is True
+
+    with pytest.raises(
+        RuntimeError,
+        match="transmitが有効",
+    ):
+        broker.place_order(
+            OrderRequest(
+                symbol="AAPL",
+                side=OrderSide.BUY,
+                quantity=1,
+            )
+        )

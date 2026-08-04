@@ -8,6 +8,9 @@ from ai_asset_platform.brokers.ibkr_config import (
 from ai_asset_platform.brokers.ibkr_connection import (
     probe_ibkr_paper_connection,
 )
+from ai_asset_platform.brokers.ibkr_paper_order_sender import (
+    prepare_ibkr_paper_order,
+)
 from ai_asset_platform.brokers.orders import (
     FillResult,
     OrderRequest,
@@ -58,10 +61,23 @@ class IbkrBrokerAdapter(BrokerAdapter):
                 message="IBKRへ接続されていないため注文しません。",
             )
 
+        prepared = prepare_ibkr_paper_order(
+            order,
+            self.config,
+        )
+
+        if prepared.order.transmit:
+            raise RuntimeError(
+                "安全停止: IBKR Paper注文のtransmitが有効です。"
+            )
+
         return OrderResult(
-            order_id="IBKR-NOT-IMPLEMENTED",
+            order_id="IBKR-PAPER-PREPARED",
             status=OrderStatus.REJECTED,
-            message="IBKR実注文機能はまだ無効です。",
+            message=(
+                "IBKR Paper注文の安全な準備まで完了しました。"
+                "注文は送信していません。"
+            ),
         )
 
     def fill_order(
