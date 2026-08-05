@@ -24,20 +24,10 @@ def test_ibkr_starts_disconnected():
 
 
 def test_ibkr_connect_does_not_fake_connection(monkeypatch):
-    from ai_asset_platform.brokers.ibkr_connection import (
-        IbkrConnectionResult,
-    )
-
-    def fake_probe(config):
-        return IbkrConnectionResult(
-            connected=False,
-            next_order_id=None,
-            message="TWS unavailable",
-        )
 
     monkeypatch.setattr(
-        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
-        fake_probe,
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        lambda config: None,
     )
 
     broker = IbkrBrokerAdapter()
@@ -105,20 +95,29 @@ def test_ibkr_disconnect_is_safe():
 
 
 def test_ibkr_connect_uses_safe_paper_probe(monkeypatch):
-    from ai_asset_platform.brokers.ibkr_connection import (
-        IbkrConnectionResult,
+
+    from ai_asset_platform.brokers.ibkr_session import (
+        IbkrPaperSession,
     )
 
-    def fake_probe(config):
-        return IbkrConnectionResult(
-            connected=True,
-            next_order_id=123,
-            message="test connection",
-        )
+    class FakeClient:
+        def __init__(self):
+            self.connected = True
+
+        def isConnected(self):
+            return self.connected
+
+        def disconnect(self):
+            self.connected = False
+
+    session = IbkrPaperSession(
+        client=FakeClient(),
+        next_order_id=123,
+    )
 
     monkeypatch.setattr(
-        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
-        fake_probe,
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        lambda config: session,
     )
 
     broker = IbkrBrokerAdapter()
@@ -130,20 +129,10 @@ def test_ibkr_connect_uses_safe_paper_probe(monkeypatch):
 def test_ibkr_connect_stays_disconnected_when_probe_fails(
     monkeypatch,
 ):
-    from ai_asset_platform.brokers.ibkr_connection import (
-        IbkrConnectionResult,
-    )
-
-    def fake_probe(config):
-        return IbkrConnectionResult(
-            connected=False,
-            next_order_id=None,
-            message="test failure",
-        )
 
     monkeypatch.setattr(
-        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
-        fake_probe,
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        lambda config: None,
     )
 
     broker = IbkrBrokerAdapter()
@@ -155,20 +144,29 @@ def test_ibkr_connect_stays_disconnected_when_probe_fails(
 def test_ibkr_connected_order_is_prepared_but_not_sent(
     monkeypatch,
 ):
-    from ai_asset_platform.brokers.ibkr_connection import (
-        IbkrConnectionResult,
+
+    from ai_asset_platform.brokers.ibkr_session import (
+        IbkrPaperSession,
     )
 
-    def fake_probe(config):
-        return IbkrConnectionResult(
-            connected=True,
-            next_order_id=123,
-            message="test connection",
-        )
+    class FakeClient:
+        def __init__(self):
+            self.connected = True
+
+        def isConnected(self):
+            return self.connected
+
+        def disconnect(self):
+            self.connected = False
+
+    session = IbkrPaperSession(
+        client=FakeClient(),
+        next_order_id=123,
+    )
 
     monkeypatch.setattr(
-        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
-        fake_probe,
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        lambda config: session,
     )
 
     broker = IbkrBrokerAdapter()
@@ -194,16 +192,25 @@ def test_ibkr_connected_order_keeps_transmission_disabled(
 ):
     from dataclasses import dataclass
 
-    from ai_asset_platform.brokers.ibkr_connection import (
-        IbkrConnectionResult,
+
+    from ai_asset_platform.brokers.ibkr_session import (
+        IbkrPaperSession,
     )
 
-    def fake_probe(config):
-        return IbkrConnectionResult(
-            connected=True,
-            next_order_id=123,
-            message="test connection",
-        )
+    class FakeClient:
+        def __init__(self):
+            self.connected = True
+
+        def isConnected(self):
+            return self.connected
+
+        def disconnect(self):
+            self.connected = False
+
+    session = IbkrPaperSession(
+        client=FakeClient(),
+        next_order_id=123,
+    )
 
     @dataclass
     class FakeOrder:
@@ -219,8 +226,8 @@ def test_ibkr_connected_order_keeps_transmission_disabled(
         )
 
     monkeypatch.setattr(
-        "ai_asset_platform.brokers.ibkr.probe_ibkr_paper_connection",
-        fake_probe,
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        lambda config: session,
     )
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.prepare_ibkr_paper_order",

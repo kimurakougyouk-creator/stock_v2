@@ -5,8 +5,9 @@ from ai_asset_platform.brokers.ibkr_config import (
     IbkrConnectionConfig,
     create_ibkr_paper_config,
 )
-from ai_asset_platform.brokers.ibkr_connection import (
-    probe_ibkr_paper_connection,
+from ai_asset_platform.brokers.ibkr_session import (
+    IbkrPaperSession,
+    open_ibkr_paper_session,
 )
 from ai_asset_platform.brokers.ibkr_paper_order_sender import (
     prepare_ibkr_paper_order,
@@ -31,7 +32,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
         config: IbkrConnectionConfig | None = None,
     ) -> None:
         self.config = config or create_ibkr_paper_config()
-        self._connected = False
+        self._session: IbkrPaperSession | None = None
 
     @property
     def name(self) -> str:
@@ -40,21 +41,29 @@ class IbkrBrokerAdapter(BrokerAdapter):
     def connect(self) -> bool:
         self.config.validate()
 
-        result = probe_ibkr_paper_connection(
+        if self.is_connected():
+            return True
+
+        self._session = open_ibkr_paper_session(
             self.config,
         )
 
-        self._connected = result.connected
-        return self._connected
+        return self.is_connected()
 
     def is_connected(self) -> bool:
-        return self._connected
+        return (
+            self._session is not None
+            and self._session.connected
+        )
 
     def disconnect(self) -> None:
-        self._connected = False
+        if self._session is not None:
+            self._session.disconnect()
+
+        self._session = None
 
     def place_order(self, order: OrderRequest) -> OrderResult:
-        if not self._connected:
+        if not self.is_connected():
             return OrderResult(
                 order_id="IBKR-NOT-CONNECTED",
                 status=OrderStatus.REJECTED,
