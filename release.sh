@@ -66,7 +66,11 @@ git diff --stat
 git diff --cached --stat || true
 
 echo
-read -r -p "コミットメッセージを入力してください: " COMMIT_MESSAGE
+COMMIT_MESSAGE="${1:-}"
+
+if [ -z "${COMMIT_MESSAGE// }" ]; then
+    read -r -p "コミットメッセージを入力してください: " COMMIT_MESSAGE
+fi
 
 if [ -z "${COMMIT_MESSAGE// }" ]; then
     echo "エラー: コミットメッセージが空です。"
