@@ -27,7 +27,7 @@ def test_ibkr_starts_disconnected():
 def test_ibkr_connect_does_not_fake_connection(monkeypatch):
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: None,
+        lambda config, **kwargs: None,
     )
     broker = IbkrBrokerAdapter()
     assert broker.connect() is False
@@ -102,7 +102,7 @@ def test_ibkr_connect_uses_safe_paper_probe(monkeypatch):
     session = _paper_session()
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: session,
+        lambda config, **kwargs: session,
     )
     broker = IbkrBrokerAdapter()
     assert broker.connect() is True
@@ -112,7 +112,7 @@ def test_ibkr_connect_uses_safe_paper_probe(monkeypatch):
 def test_ibkr_connect_stays_disconnected_when_probe_fails(monkeypatch):
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: None,
+        lambda config, **kwargs: None,
     )
     broker = IbkrBrokerAdapter()
     assert broker.connect() is False
@@ -123,7 +123,7 @@ def test_ibkr_connected_order_is_ready_but_not_sent_by_default(monkeypatch):
     session = _paper_session()
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: session,
+        lambda config, **kwargs: session,
     )
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr_paper_transmitter.validate_ibkr_paper_test_order",
@@ -148,7 +148,7 @@ def test_ibkr_connected_order_keeps_transmission_disabled(monkeypatch):
     session = _paper_session()
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: session,
+        lambda config, **kwargs: session,
     )
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr_paper_transmitter.validate_ibkr_paper_test_order",
