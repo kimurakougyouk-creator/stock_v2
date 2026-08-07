@@ -19,7 +19,7 @@ def test_broker_uses_persistent_paper_session(monkeypatch):
 
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: session,
+        lambda config, **kwargs: session,
     )
 
     broker = IbkrBrokerAdapter()
@@ -33,7 +33,7 @@ def test_broker_stays_disconnected_when_session_open_fails(
 ):
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: None,
+        lambda config, **kwargs: None,
     )
 
     broker = IbkrBrokerAdapter()
@@ -47,7 +47,7 @@ def test_broker_disconnect_closes_session(monkeypatch):
 
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: session,
+        lambda config, **kwargs: session,
     )
 
     broker = IbkrBrokerAdapter()
@@ -64,7 +64,7 @@ def test_repeated_connect_reuses_existing_session(monkeypatch):
     calls = 0
     session = FakeSession()
 
-    def fake_open(config):
+    def fake_open(config, **kwargs):
         nonlocal calls
         calls += 1
         return session
