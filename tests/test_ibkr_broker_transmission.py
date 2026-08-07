@@ -51,7 +51,7 @@ def _connect_broker(monkeypatch, *, enable_transmission=False):
     session = FakeSession()
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
-        lambda config: session,
+        lambda config, **kwargs: session,
     )
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr_paper_transmitter.validate_ibkr_paper_test_order",
