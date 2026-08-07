@@ -60,9 +60,18 @@ def test_connection_loss_blocks_order_until_reconnect(monkeypatch, tmp_path):
 
 def test_reconnect_keeps_fill_state_restored(monkeypatch, tmp_path):
     state_path = tmp_path / "fills.json"
+    order = OrderRequest(symbol="AAPL", side=OrderSide.BUY, quantity=3)
+
     first = IbkrBrokerAdapter(fill_state_path=state_path)
-    first._fill_runtime.tracker.restore({123: 2.0})
-    first._fill_runtime.store.save(first._fill_runtime.tracker.snapshot())
+    first._fill_runtime.register_order(123, order)
+    first._fill_runtime.process_order_status(
+        123,
+        "Submitted",
+        2,
+        1,
+        100.0,
+    )
+    assert first.processed_filled(123) == 2.0
 
     sessions = [FakeSession(next_order_id=200), FakeSession(next_order_id=300)]
     index = 0
