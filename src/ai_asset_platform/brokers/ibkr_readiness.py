@@ -90,7 +90,7 @@ def evaluate_ibkr_readiness(
         next_action="PythonからTWS Paper APIへの実接続テストを行う",
         message=(
             "Paper実機テスト直前まで準備完了です。"
-            "注文送信はまだ無効です。"
+            "注文送信は安全のためデフォルトで無効です。"
         ),
     )
 

@@ -67,7 +67,7 @@ def prepare_ibkr_paper_order(
             f"未対応のIBKR注文種別です: {request.order_type}"
         )
 
-    # Version 13.9では送信機能を明示的に無効化。
+    # 注文準備段階では安全のため送信を無効化する。
     ib_order.transmit = False
 
     return IbkrPreparedOrder(

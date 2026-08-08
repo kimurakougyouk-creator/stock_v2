@@ -30,12 +30,12 @@ def run_ibkr_paper_test_flow(
     """
     IBKR Paperテストの安全な実行フロー。
 
-    Version 13.8では、
     1. API/TWS事前診断
     2. Paper注文安全ガード
     まで自動実行する。
 
-    実際の注文送信はまだ行わない。
+    このフロー自体は注文を送信せず、
+    Paper注文を安全に実行できる状態かを判定する。
     """
     preflight = preflight or run_ibkr_paper_preflight()
 
@@ -79,7 +79,7 @@ def run_ibkr_paper_test_flow(
         guard_status=guard.status,
         message=(
             "IBKR Paperテスト注文を実行できる直前まで準備完了です。"
-            "Version 13.8では安全のため注文送信はまだ無効です。"
+            "この確認フローでは注文を送信していません。"
         ),
     )
 
