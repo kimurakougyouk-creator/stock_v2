@@ -23,11 +23,17 @@ def validate_ibkr_paper_test_order(
     quantity: int,
     *,
     preflight: IbkrPreflightResult | None = None,
+    use_gateway: bool = False,
 ) -> IbkrPaperOrderGuardResult:
     """
     IBKR Paperテスト注文を送る「前」だけを検証する安全ガード。
 
     この関数自身は注文を一切送信しない。
+
+    use_gateway=False (デフォルト) はTWS Paper Trading (127.0.0.1:7497)、
+    use_gateway=True はIB Gateway Paper Trading (127.0.0.1:4002) を対象にする。
+    preflightを明示的に渡した場合はuse_gatewayより優先される。
+    既存呼び出し側の動作(TWS/7497)はデフォルト値により変わらない。
     """
     symbol = symbol.strip().upper()
 
@@ -59,7 +65,7 @@ def validate_ibkr_paper_test_order(
             message="初回IBKR Paperテスト注文は数量1だけ許可します。",
         )
 
-    config = create_ibkr_paper_config()
+    config = create_ibkr_paper_config(use_gateway=use_gateway)
 
     if not config.paper_trading:
         return IbkrPaperOrderGuardResult(
@@ -79,7 +85,7 @@ def validate_ibkr_paper_test_order(
             message="Live Trading許可中のため停止しました。",
         )
 
-    preflight = preflight or run_ibkr_paper_preflight()
+    preflight = preflight or run_ibkr_paper_preflight(use_gateway=use_gateway)
 
     if preflight.status != "READY_TO_CONNECT":
         return IbkrPaperOrderGuardResult(

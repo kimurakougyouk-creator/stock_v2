@@ -67,3 +67,72 @@ def test_preflight_stops_when_api_not_ready(monkeypatch):
 
     assert result.status == "NOT_READY"
     assert result.api_ready is False
+
+
+def test_preflight_gateway_waits_for_ib_gateway(monkeypatch):
+    monkeypatch.setattr(
+        ibkr_preflight,
+        "diagnose_ibkr_environment",
+        lambda: ReadyDiagnostic(),
+    )
+    monkeypatch.setattr(
+        ibkr_preflight,
+        "_is_port_open",
+        lambda host, port, timeout=1.0: False,
+    )
+
+    result = ibkr_preflight.run_ibkr_paper_preflight(use_gateway=True)
+
+    assert result.status == "WAITING_FOR_TWS"
+    assert result.api_ready is True
+    assert result.tws_port_open is False
+    assert result.port == 4002
+    assert "IB Gateway" in result.message
+
+
+def test_preflight_gateway_ready_to_connect(monkeypatch):
+    monkeypatch.setattr(
+        ibkr_preflight,
+        "diagnose_ibkr_environment",
+        lambda: ReadyDiagnostic(),
+    )
+
+    seen_ports = []
+
+    def fake_is_port_open(host, port, timeout=1.0):
+        seen_ports.append(port)
+        return True
+
+    monkeypatch.setattr(
+        ibkr_preflight,
+        "_is_port_open",
+        fake_is_port_open,
+    )
+
+    result = ibkr_preflight.run_ibkr_paper_preflight(use_gateway=True)
+
+    assert result.status == "READY_TO_CONNECT"
+    assert result.api_ready is True
+    assert result.tws_port_open is True
+    assert result.host == "127.0.0.1"
+    assert result.port == 4002
+    assert seen_ports == [4002]
+
+
+def test_preflight_gateway_api_not_ready_reports_gateway_port(monkeypatch):
+    monkeypatch.setattr(
+        ibkr_preflight,
+        "diagnose_ibkr_environment",
+        lambda: NotReadyDiagnostic(),
+    )
+    monkeypatch.setattr(
+        ibkr_preflight,
+        "_is_port_open",
+        lambda host, port, timeout=1.0: False,
+    )
+
+    result = ibkr_preflight.run_ibkr_paper_preflight(use_gateway=True)
+
+    assert result.status == "NOT_READY"
+    assert result.api_ready is False
+    assert result.port == 4002
