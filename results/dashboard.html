@@ -23,21 +23,110 @@
   <div class="card">
     <h1>stock_v2 ダッシュボード</h1>
     <p class="note">実注文ではなく参考情報です。</p>
-    <p>生成日時: 2026-07-25 15:06:24</p>
+    <p>生成日時: 2026-07-29 18:26:18</p>
   </div>
   <div class="card">
     <h2>実行サマリー</h2>
     <div class="grid">
-      <div class="metric"><strong>対象銘柄数</strong><br>10</div>
-      <div class="metric"><strong>BUY</strong><br>1</div>
+      <div class="metric"><strong>対象銘柄数</strong><br>0</div>
+      <div class="metric"><strong>BUY</strong><br>0</div>
       <div class="metric"><strong>SELL</strong><br>0</div>
-      <div class="metric"><strong>HOLD</strong><br>9</div>
-      <div class="metric"><strong>最高スコア</strong><br>100.0</div>
-      <div class="metric"><strong>平均スコア</strong><br>57.0</div>
+      <div class="metric"><strong>HOLD</strong><br>0</div>
+      <div class="metric"><strong>最高スコア</strong><br>0.0</div>
+      <div class="metric"><strong>平均スコア</strong><br>0.0</div>
       <div class="metric"><strong>参考運用資金</strong><br>1,000,000</div>
-      <div class="metric"><strong>サマリー</strong><br>-</div>
+      <div class="metric"><strong>サマリー</strong><br>シグナルデータが取得できませんでした。</div>
     </div>
   </div>
+  <div class="card">
+    <h2>銘柄別確定損益ランキング</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>順位</th>
+          <th>銘柄</th>
+          <th>取引回数</th>
+          <th>勝ち数</th>
+          <th>勝率</th>
+          <th>合計実現損益</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan='6'>確定取引データがありません</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>注文判断ログ集計</h2>
+    <div class="grid">
+      <div class="metric"><strong>判断件数</strong><br>720</div>
+      <div class="metric"><strong>注文実行件数</strong><br>720</div>
+      <div class="metric"><strong>注文未実行件数</strong><br>0</div>
+      <div class="metric"><strong>注文実行率</strong><br>100.0%</div>
+      <div class="metric"><strong>AI平均信頼度</strong><br>93.1</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>判断理由別集計</h2>
+    <div class="grid">
+      <div class="metric">
+        <strong>すべての判断理由</strong>
+        <ul>
+          <li>AI最終判定: 630件</li><li>Time Stop: 90件</li>
+        </ul>
+      </div>
+      <div class="metric">
+        <strong>注文見送り理由</strong>
+        <ul>
+          <li>注文見送りはありません</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>運用成績の健全度</h2>
+    <div class="grid">
+      <div class="metric"><strong>総合スコア</strong><br>0 / 100</div>
+      <div class="metric"><strong>評価</strong><br>N/A</div>
+      <div class="metric"><strong>状態</strong><br>データ不足</div>
+      <div class="metric"><strong>取引数評価</strong><br>0 / 25</div>
+      <div class="metric"><strong>勝率評価</strong><br>0 / 25</div>
+      <div class="metric"><strong>利益効率評価</strong><br>0 / 25</div>
+      <div class="metric"><strong>損益・リスク評価</strong><br>0 / 25</div>
+    </div>
+    <p>
+      取引数、勝率、プロフィットファクター、
+      純利益と最大ドローダウンのバランスを総合評価しています。
+    </p>
+  </div>
+  <div class="card">
+    <h2>Paper Trading運用成績</h2>
+    <div class="grid">
+      <div class="metric"><strong>総取引数</strong><br>0</div>
+      <div class="metric"><strong>勝ち取引</strong><br>0</div>
+      <div class="metric"><strong>負け取引</strong><br>0</div>
+      <div class="metric"><strong>引き分け</strong><br>0</div>
+      <div class="metric"><strong>勝率</strong><br>0.0%</div>
+      <div class="metric"><strong>純損益</strong><br>0円</div>
+      <div class="metric"><strong>総利益</strong><br>0円</div>
+      <div class="metric"><strong>総損失</strong><br>0円</div>
+      <div class="metric"><strong>平均利益</strong><br>0円</div>
+      <div class="metric"><strong>平均損失</strong><br>0円</div>
+      <div class="metric"><strong>最大利益</strong><br>0円</div>
+      <div class="metric"><strong>最大損失</strong><br>0円</div>
+      <div class="metric"><strong>プロフィットファクター</strong><br>0.00</div>
+      <div class="metric"><strong>最大連勝数</strong><br>0回</div>
+      <div class="metric"><strong>最大連敗数</strong><br>0回</div>
+      <div class="metric"><strong>最大ドローダウン</strong><br>0円</div>
+    </div>
+  </div>
+  
+    <div class="card">
+      <h2>運用成績の推移</h2>
+      <p>比較できる成績履歴がまだありません。</p>
+    </div>
+
+  <div class="card"><h2>運用成績グラフ</h2><p>グラフ表示に必要な成績履歴がまだありません。</p></div>
   <div class="card">
     <h2>銘柄ランキング</h2>
     <table>
@@ -45,7 +134,9 @@
         <tr>
           <th>順位</th>
           <th>Ticker</th>
-          <th>Signal</th>
+          <th>テクニカル判定</th>
+          <th>AI最終判定</th>
+          <th>AI信頼度</th>
           <th>Score</th>
           <th>Rank</th>
           <th>Close</th>
@@ -56,159 +147,12 @@
           <th>ReferenceAmountYen</th>
           <th>StopPrice</th>
           <th>PositionSizingReason</th>
+          <th>AI判定理由</th>
+          <th>最終判定理由</th>
         </tr>
       </thead>
       <tbody>
-        <tr>
-<td>1</td>
-<td>8306.T</td>
-<td class='signal-buy'>BUY</td>
-<td>100</td>
-<td>A</td>
-<td>3,754</td>
-<td>72.76595744680851</td>
-<td>131.9546460466904</td>
-<td>108.0</td>
-<td>0</td>
-<td>0</td>
-<td>3,641</td>
-<td>参考株数が100株未満のため0株としました。</td>
-</tr>
-<tr>
-<td>2</td>
-<td>9432.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>100</td>
-<td>A</td>
-<td>151</td>
-<td>68.5714379135545</td>
-<td>1.058512313681064</td>
-<td>2.092857360839844</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
-<tr>
-<td>3</td>
-<td>6501.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>90</td>
-<td>A</td>
-<td>4,850</td>
-<td>62.22684703433923</td>
-<td>10.91955270557628</td>
-<td>137.5714285714286</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
-<tr>
-<td>4</td>
-<td>6758.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>72</td>
-<td>B</td>
-<td>3,409</td>
-<td>53.05263157894736</td>
-<td>23.3121595216362</td>
-<td>76.28571428571429</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
-<tr>
-<td>5</td>
-<td>6098.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>70</td>
-<td>B</td>
-<td>12,055</td>
-<td>52.29202037351443</td>
-<td>433.7060962678825</td>
-<td>387.8571428571428</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
-<tr>
-<td>6</td>
-<td>7203.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>60</td>
-<td>B</td>
-<td>2,897</td>
-<td>57.11340206185567</td>
-<td>21.52534935291669</td>
-<td>60.42857142857143</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
-<tr>
-<td>7</td>
-<td>6861.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>28</td>
-<td>D</td>
-<td>71,820</td>
-<td>28.21171634121275</td>
-<td>-1292.930785947348</td>
-<td>2350.0</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
-<tr>
-<td>8</td>
-<td>4063.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>20</td>
-<td>D</td>
-<td>6,702</td>
-<td>45.4383464005702</td>
-<td>-43.71144526283751</td>
-<td>302.2142857142857</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
-<tr>
-<td>9</td>
-<td>8035.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>16</td>
-<td>E</td>
-<td>62,660</td>
-<td>32.9339378238342</td>
-<td>-330.8487271337945</td>
-<td>4185.0</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
-<tr>
-<td>10</td>
-<td>9984.T</td>
-<td class='signal-hold'>HOLD</td>
-<td>14</td>
-<td>E</td>
-<td>5,500</td>
-<td>40.15887025595763</td>
-<td>-217.0396306074199</td>
-<td>436.4285714285714</td>
-<td>0</td>
-<td>0</td>
-<td>0</td>
-<td>BUY判定ではないため、参考株数は0です。</td>
-</tr>
+        <tr><td colspan='17'>データがありません</td></tr>
       </tbody>
     </table>
   </div>

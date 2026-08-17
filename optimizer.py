@@ -4,6 +4,16 @@ from strategy import create_buy_signal
 from backtest import run_backtest
 
 
+def calculate_score(result):
+    """利益・危険度・勝率・売買回数から総合点を計算する"""
+    return (
+        result["total_profit"]
+        - result["max_drawdown"]
+        + result["win_rate"] * 0.10
+        + min(result["trade_count"], 20) * 0.25
+    )
+
+
 def find_best_setting(df):
     """最適な設定を探す"""
 
@@ -56,7 +66,7 @@ def find_best_setting(df):
                 if not eligible:
                     continue
 
-                if best_result is None or result["total_profit"] > best_result["total_profit"]:
+                if best_result is None or calculate_score(result) > calculate_score(best_result):
                     best_result = result
                     best_atr = atr
                     best_ma = (ma_short, ma_middle, ma_long)

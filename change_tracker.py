@@ -232,9 +232,21 @@ def update_change_tracking(current_df: pd.DataFrame | None, base_dir: Path | Non
             for row in important_changes:
                 message_lines.append(f"- {row['Ticker']}: {row['PreviousSignal']} -> {row['CurrentSignal']} / Score {row['PreviousScore']:.1f} -> {row['CurrentScore']:.1f} / Rank {row['PreviousRank']} -> {row['CurrentRank']} / {row['ChangeReason']}")
             if send_mail_fn is not None:
-                send_mail_fn(EMAIL_ADDRESS, APP_PASSWORD, EMAIL_ADDRESS, "重要変化通知", "\n".join(message_lines))
-            else:
-                send_mail(EMAIL_ADDRESS, APP_PASSWORD, EMAIL_ADDRESS, "重要変化通知", "\n".join(message_lines))
+                send_mail_fn(
+                    EMAIL_ADDRESS,
+                    APP_PASSWORD,
+                    EMAIL_ADDRESS,
+                    "重要変化通知",
+                    "\n".join(message_lines),
+                )
+            elif EMAIL_ADDRESS and APP_PASSWORD:
+                send_mail(
+                    EMAIL_ADDRESS,
+                    APP_PASSWORD,
+                    EMAIL_ADDRESS,
+                    "重要変化通知",
+                    "\n".join(message_lines),
+                )
 
     history_dir = base_dir / "history"
     history_dir.mkdir(exist_ok=True, parents=True)

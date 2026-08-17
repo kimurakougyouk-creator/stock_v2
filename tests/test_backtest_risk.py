@@ -2,8 +2,8 @@ from datetime import datetime
 import sys
 import types
 
-sys.modules.setdefault("indicators", types.SimpleNamespace(add_indicators=lambda df, *args: df))
-sys.modules.setdefault("strategy", types.SimpleNamespace(create_buy_signal=lambda df, *args: df))
+sys.modules.setdefault("indicators", types.SimpleNamespace(add_indicators=lambda df, *args, **kwargs: df))
+sys.modules.setdefault("strategy", types.SimpleNamespace(create_buy_signal=lambda df, *args, **kwargs: df))
 
 from backtest import run_backtest
 

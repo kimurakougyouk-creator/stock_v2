@@ -1,0 +1,870 @@
+"""Version 3.0の注文管理。
+
+初期状態では実際の注文を送信せず、注文内容だけを安全に記録します。
+"""
+
+from datetime import date, datetime
+from pathlib import Path
+import json
+
+
+ORDER_LOG_DIR = Path("results")
+ORDER_LOG_PATH = ORDER_LOG_DIR / "paper_orders.jsonl"
+TRADE_PNL_PATH = ORDER_LOG_DIR / "paper_trade_pnls.json"
+TRAILING_HIGH_PATH = ORDER_LOG_DIR / "trailing_high_prices.json"
+
+
+def load_trailing_high_prices() -> dict[str, float]:
+    """保有銘柄ごとの最高値を読み込みます。
+
+    保存ファイルが存在しない場合や内容が不正な場合は、
+    空の辞書を返します。
+    """
+
+    if not TRAILING_HIGH_PATH.exists():
+        return {}
+
+    try:
+        payload = json.loads(
+            TRAILING_HIGH_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    high_prices: dict[str, float] = {}
+
+    for ticker, price in payload.items():
+        try:
+            normalized_price = float(price)
+        except (TypeError, ValueError):
+            continue
+
+        if normalized_price <= 0:
+            continue
+
+        high_prices[str(ticker)] = normalized_price
+
+    return high_prices
+
+
+def save_trailing_high_prices(
+    high_prices: dict[str, float],
+) -> Path:
+    """保有銘柄ごとの最高値をJSONへ安全に保存します。"""
+
+    normalized: dict[str, float] = {}
+
+    for ticker, price in high_prices.items():
+        try:
+            normalized_price = float(price)
+        except (TypeError, ValueError):
+            continue
+
+        if normalized_price <= 0:
+            continue
+
+        normalized[str(ticker)] = normalized_price
+
+    ORDER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = TRAILING_HIGH_PATH.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(
+            normalized,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    temporary_path.replace(TRAILING_HIGH_PATH)
+
+    return TRAILING_HIGH_PATH
+
+
+def update_trailing_high_price(
+    ticker: str,
+    current_price: float,
+    *,
+    held_shares: int,
+) -> float | None:
+    """現在価格を使って保有銘柄の最高値を更新します。
+
+    保有株数が0以下の場合は、その銘柄の記録を削除して
+    Noneを返します。
+
+    現在価格が過去の最高値を上回った場合のみ更新します。
+    """
+
+    ticker = str(ticker)
+
+    try:
+        current_price = float(current_price)
+        held_shares = int(held_shares)
+    except (TypeError, ValueError):
+        return None
+
+    high_prices = load_trailing_high_prices()
+
+    if held_shares <= 0:
+        if ticker in high_prices:
+            del high_prices[ticker]
+            save_trailing_high_prices(high_prices)
+
+        return None
+
+    if current_price <= 0:
+        return high_prices.get(ticker)
+
+    previous_high = high_prices.get(ticker)
+
+    if previous_high is None or current_price > previous_high:
+        high_prices[ticker] = current_price
+        save_trailing_high_prices(high_prices)
+        return current_price
+
+    return previous_high
+
+
+def create_paper_order(
+    ticker: str,
+    signal: str,
+    shares: int,
+    reference_price: float,
+) -> dict:
+    """模擬注文を作成してファイルへ記録します。"""
+
+    signal = str(signal).upper()
+
+    if signal not in {"BUY", "SELL"}:
+        raise ValueError("signalはBUYまたはSELLを指定してください。")
+
+    if int(shares) <= 0:
+        raise ValueError("sharesは1株以上を指定してください。")
+
+    order = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "mode": "PAPER",
+        "ticker": str(ticker),
+        "side": signal,
+        "shares": int(shares),
+        "reference_price": float(reference_price),
+        "status": "RECORDED",
+    }
+
+    ORDER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with ORDER_LOG_PATH.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(order, ensure_ascii=False) + "\n")
+
+    save_realized_trade_pnls()
+
+    return order
+
+
+def load_paper_orders() -> list[dict]:
+    """保存済みの模擬注文を読み込みます。"""
+
+    if not ORDER_LOG_PATH.exists():
+        return []
+
+    orders = []
+
+    with ORDER_LOG_PATH.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                orders.append(json.loads(line))
+
+    return orders
+
+
+OPEN_ORDER_STATUSES = {
+    "OPEN",
+    "PENDING",
+    "SUBMITTED",
+    "PARTIALLY_FILLED",
+}
+
+
+def get_open_orders(
+    *,
+    ticker: str | None = None,
+    side: str | None = None,
+) -> list[dict]:
+    """未約定状態の注文だけを取得します。"""
+
+    ticker_filter = str(ticker) if ticker is not None else None
+    side_filter = str(side).upper() if side is not None else None
+    open_orders: list[dict] = []
+
+    for order in load_paper_orders():
+        if not isinstance(order, dict):
+            continue
+
+        status = str(order.get("status", "")).upper()
+
+        if status not in OPEN_ORDER_STATUSES:
+            continue
+
+        if (
+            ticker_filter is not None
+            and str(order.get("ticker", "")) != ticker_filter
+        ):
+            continue
+
+        if (
+            side_filter is not None
+            and str(order.get("side", "")).upper() != side_filter
+        ):
+            continue
+
+        open_orders.append(order)
+
+    return open_orders
+
+
+def has_open_order(
+    ticker: str,
+    *,
+    side: str | None = None,
+) -> bool:
+    """指定銘柄に未約定注文が存在するか判定します。"""
+
+    return bool(get_open_orders(ticker=ticker, side=side))
+
+
+def calculate_realized_trade_pnls() -> list[float]:
+    """注文履歴から売却約定ごとの実現損益を計算します。"""
+
+    positions: dict[str, int] = {}
+    average_costs: dict[str, float] = {}
+    realized_trade_pnls: list[float] = []
+
+    for order in load_paper_orders():
+        try:
+            ticker = str(order["ticker"])
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0 or price < 0:
+            continue
+
+        held_shares = positions.get(ticker, 0)
+        average_cost = average_costs.get(ticker, 0.0)
+
+        if side == "BUY":
+            total_cost = (held_shares * average_cost) + (shares * price)
+            new_shares = held_shares + shares
+
+            positions[ticker] = new_shares
+            average_costs[ticker] = (
+                total_cost / new_shares
+                if new_shares > 0
+                else 0.0
+            )
+
+        elif side == "SELL" and held_shares > 0:
+            sold_shares = min(shares, held_shares)
+            trade_pnl = (price - average_cost) * sold_shares
+            realized_trade_pnls.append(trade_pnl)
+
+            remaining_shares = held_shares - sold_shares
+            positions[ticker] = remaining_shares
+
+            if remaining_shares <= 0:
+                average_costs[ticker] = 0.0
+
+    return realized_trade_pnls
+
+
+def calculate_realized_trades() -> list[dict]:
+    """注文履歴から売却約定ごとの詳細な確定取引履歴を計算します。"""
+
+    positions: dict[str, int] = {}
+    average_costs: dict[str, float] = {}
+    realized_trades: list[dict] = []
+
+    for order in load_paper_orders():
+        try:
+            ticker = str(order["ticker"])
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0 or price < 0:
+            continue
+
+        held_shares = positions.get(ticker, 0)
+        average_cost = average_costs.get(ticker, 0.0)
+
+        if side == "BUY":
+            total_cost = (held_shares * average_cost) + (shares * price)
+            new_shares = held_shares + shares
+
+            positions[ticker] = new_shares
+            average_costs[ticker] = (
+                total_cost / new_shares
+                if new_shares > 0
+                else 0.0
+            )
+
+        elif side == "SELL" and held_shares > 0:
+            sold_shares = min(shares, held_shares)
+            trade_pnl = (price - average_cost) * sold_shares
+
+            realized_trades.append(
+                {
+                    "ticker": ticker,
+                    "shares": sold_shares,
+                    "average_cost": average_cost,
+                    "sell_price": price,
+                    "realized_pnl": trade_pnl,
+                    "sold_at": order.get("created_at"),
+                }
+            )
+
+            remaining_shares = held_shares - sold_shares
+            positions[ticker] = remaining_shares
+
+            if remaining_shares <= 0:
+                average_costs[ticker] = 0.0
+
+    return realized_trades
+
+
+def save_realized_trade_pnls() -> Path:
+    """実現損益履歴をダッシュボード用JSONへ保存します。"""
+
+    ORDER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    realized_trades = calculate_realized_trades()
+
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "realized_trade_pnls": [
+            trade["realized_pnl"]
+            for trade in realized_trades
+        ],
+        "realized_trades": realized_trades,
+    }
+
+    temporary_path = TRADE_PNL_PATH.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(TRADE_PNL_PATH)
+
+    return TRADE_PNL_PATH
+
+
+def calculate_available_cash(initial_capital: float) -> float:
+    """注文履歴を使って現在利用できる現金残高を計算します。
+
+    BUY金額を差し引き、SELL金額を加算します。
+    手数料や税金は現段階では計算に含めません。
+    """
+
+    try:
+        available_cash = float(initial_capital)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "initial_capitalは0以上の数値を指定してください。"
+        ) from exc
+
+    if available_cash < 0:
+        raise ValueError(
+            "initial_capitalは0以上の数値を指定してください。"
+        )
+
+    for order in load_paper_orders():
+        try:
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0 or price < 0:
+            continue
+
+        order_amount = shares * price
+
+        if side == "BUY":
+            available_cash -= order_amount
+        elif side == "SELL":
+            available_cash += order_amount
+
+    return max(0.0, available_cash)
+
+
+def get_open_positions() -> dict[str, int]:
+    """現在の保有株数を銘柄ごとに集計します。"""
+
+    positions = {}
+
+    for order in load_paper_orders():
+        ticker = order["ticker"]
+        shares = int(order["shares"])
+
+        if order["side"] == "BUY":
+            positions[ticker] = positions.get(ticker, 0) + shares
+        elif order["side"] == "SELL":
+            positions[ticker] = positions.get(ticker, 0) - shares
+
+    return {ticker: shares for ticker, shares in positions.items() if shares != 0}
+
+
+
+def calculate_position_holding_days(
+    ticker: str,
+    *,
+    current_time: datetime | None = None,
+) -> int | None:
+    """現在保有中の最も古い残存株の保有日数を返します。
+
+    BUY注文を取得日の古い順に保有ロットとして管理し、
+    SELL注文は古いロットから順番に差し引きます。
+
+    現在保有していない場合はNoneを返します。
+    不正な注文履歴は安全のため無視します。
+    """
+
+    ticker = str(ticker)
+    current_time = current_time or datetime.now()
+    open_lots: list[list[object]] = []
+
+    for order in load_paper_orders():
+        if str(order.get("ticker", "")) != ticker:
+            continue
+
+        try:
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            created_at = datetime.fromisoformat(
+                str(order["created_at"])
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0:
+            continue
+
+        if side == "BUY":
+            open_lots.append([shares, created_at])
+
+        elif side == "SELL":
+            remaining_to_sell = shares
+
+            while remaining_to_sell > 0 and open_lots:
+                lot_shares = int(open_lots[0][0])
+
+                if remaining_to_sell >= lot_shares:
+                    remaining_to_sell -= lot_shares
+                    open_lots.pop(0)
+                else:
+                    open_lots[0][0] = lot_shares - remaining_to_sell
+                    remaining_to_sell = 0
+
+    if not open_lots:
+        return None
+
+    oldest_buy_time = open_lots[0][1]
+
+    if not isinstance(oldest_buy_time, datetime):
+        return None
+
+    elapsed_seconds = (
+        current_time - oldest_buy_time
+    ).total_seconds()
+
+    if elapsed_seconds <= 0:
+        return 0
+
+    return int(elapsed_seconds // 86_400)
+
+
+def calculate_daily_buy_order_count() -> int:
+    """本日記録されたBUY注文数を返す。"""
+
+    orders = load_paper_orders()
+    if not orders:
+        return 0
+
+    today = datetime.now().date()
+    count = 0
+
+    for order in orders:
+        if str(order.get("side", "")).upper() != "BUY":
+            continue
+
+        created_at = order.get("created_at")
+        if not created_at:
+            continue
+
+        try:
+            order_date = datetime.fromisoformat(
+                str(created_at)
+            ).date()
+        except ValueError:
+            continue
+
+        if order_date == today:
+            count += 1
+
+    return count
+
+
+def calculate_daily_sell_order_count() -> int:
+    """本日記録されたSELL注文数を返す。"""
+
+    orders = load_paper_orders()
+    if not orders:
+        return 0
+
+    today = datetime.now().date()
+    count = 0
+
+    for order in orders:
+        if str(order.get("side", "")).upper() != "SELL":
+            continue
+
+        created_at = order.get("created_at")
+        if not created_at:
+            continue
+
+        try:
+            order_date = datetime.fromisoformat(
+                str(created_at)
+            ).date()
+        except ValueError:
+            continue
+
+        if order_date == today:
+            count += 1
+
+    return count
+
+
+def calculate_daily_trading_amount() -> float:
+    """本日記録されたBUY・SELL注文の売買代金合計を返す。"""
+
+    orders = load_paper_orders()
+    if not orders:
+        return 0.0
+
+    today = datetime.now().date()
+    total_amount = 0.0
+
+    for order in orders:
+        side = str(order.get("side", "")).upper()
+        if side not in {"BUY", "SELL"}:
+            continue
+
+        created_at = order.get("created_at")
+        if not created_at:
+            continue
+
+        try:
+            order_date = datetime.fromisoformat(
+                str(created_at)
+            ).date()
+            shares = int(order.get("shares", 0))
+            reference_price = float(
+                order.get("reference_price", 0.0)
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if order_date != today:
+            continue
+
+        if shares <= 0 or reference_price <= 0:
+            continue
+
+        total_amount += shares * reference_price
+
+    return total_amount
+
+
+def calculate_repurchase_cooldown_remaining_minutes(
+    ticker: str,
+    cooldown_minutes: int,
+    *,
+    current_time: datetime | None = None,
+) -> int:
+    """直近のSELLから再購入可能になるまでの残り時間を分単位で返します。
+
+    クールダウン対象外または期間終了後は0を返します。
+    不正な注文履歴は安全のため無視します。
+    """
+
+    try:
+        cooldown_minutes = int(cooldown_minutes)
+    except (TypeError, ValueError):
+        return 0
+
+    if cooldown_minutes <= 0:
+        return 0
+
+    ticker = str(ticker)
+    current_time = current_time or datetime.now()
+    latest_sell_time: datetime | None = None
+
+    for order in load_paper_orders():
+        if str(order.get("ticker", "")) != ticker:
+            continue
+
+        if str(order.get("side", "")).upper() != "SELL":
+            continue
+
+        created_at = order.get("created_at")
+        if not created_at:
+            continue
+
+        try:
+            sell_time = datetime.fromisoformat(str(created_at))
+        except (TypeError, ValueError):
+            continue
+
+        if latest_sell_time is None or sell_time > latest_sell_time:
+            latest_sell_time = sell_time
+
+    if latest_sell_time is None:
+        return 0
+
+    elapsed_seconds = (current_time - latest_sell_time).total_seconds()
+
+    if elapsed_seconds < 0:
+        return cooldown_minutes
+
+    cooldown_seconds = cooldown_minutes * 60
+    remaining_seconds = cooldown_seconds - elapsed_seconds
+
+    if remaining_seconds <= 0:
+        return 0
+
+    return int((remaining_seconds + 59) // 60)
+
+
+def calculate_daily_realized_pnl(
+    target_date: date | None = None,
+) -> float:
+    """指定日の売却で確定した損益を注文履歴から計算します。
+
+    買付価格は銘柄ごとの移動平均取得価格を使用します。
+    target_dateを省略した場合は今日の損益を返します。
+    """
+
+    if target_date is None:
+        target_date = date.today()
+
+    positions: dict[str, int] = {}
+    average_costs: dict[str, float] = {}
+    daily_realized_pnl = 0.0
+
+    for order in load_paper_orders():
+        try:
+            created_at = datetime.fromisoformat(str(order["created_at"]))
+            ticker = str(order["ticker"])
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0:
+            continue
+
+        held_shares = positions.get(ticker, 0)
+        average_cost = average_costs.get(ticker, 0.0)
+
+        if side == "BUY":
+            total_cost = (held_shares * average_cost) + (shares * price)
+            new_shares = held_shares + shares
+
+            positions[ticker] = new_shares
+            average_costs[ticker] = (
+                total_cost / new_shares
+                if new_shares > 0
+                else 0.0
+            )
+
+        elif side == "SELL" and held_shares > 0:
+            sold_shares = min(shares, held_shares)
+            trade_pnl = (price - average_cost) * sold_shares
+
+            if created_at.date() == target_date:
+                daily_realized_pnl += trade_pnl
+
+            remaining_shares = held_shares - sold_shares
+            positions[ticker] = remaining_shares
+
+            if remaining_shares <= 0:
+                average_costs[ticker] = 0.0
+
+    return daily_realized_pnl
+
+
+def calculate_consecutive_losses() -> int:
+    """直近の確定取引が何回連続で損失になったかを返します。
+
+    SELLごとの確定損益を移動平均取得価格で計算します。
+    利益または損益ゼロの取引があると連敗はリセットされます。
+    """
+
+    positions: dict[str, int] = {}
+    average_costs: dict[str, float] = {}
+    realized_trade_pnls: list[float] = []
+
+    for order in load_paper_orders():
+        try:
+            ticker = str(order["ticker"])
+            side = str(order["side"]).upper()
+            shares = int(order["shares"])
+            price = float(order["reference_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if shares <= 0:
+            continue
+
+        held_shares = positions.get(ticker, 0)
+        average_cost = average_costs.get(ticker, 0.0)
+
+        if side == "BUY":
+            total_cost = (held_shares * average_cost) + (shares * price)
+            new_shares = held_shares + shares
+
+            positions[ticker] = new_shares
+            average_costs[ticker] = (
+                total_cost / new_shares
+                if new_shares > 0
+                else 0.0
+            )
+
+        elif side == "SELL" and held_shares > 0:
+            sold_shares = min(shares, held_shares)
+            trade_pnl = (price - average_cost) * sold_shares
+            realized_trade_pnls.append(trade_pnl)
+
+            remaining_shares = held_shares - sold_shares
+            positions[ticker] = remaining_shares
+
+            if remaining_shares <= 0:
+                average_costs[ticker] = 0.0
+
+    consecutive_losses = 0
+
+    for trade_pnl in reversed(realized_trade_pnls):
+        if trade_pnl < 0:
+            consecutive_losses += 1
+        else:
+            break
+
+    return consecutive_losses
+
+
+def calculate_unrealized_pnl(current_prices: dict[str, float]) -> dict[str, float]:
+    """現在価格から保有銘柄の含み損益を計算します。"""
+
+    pnl = {}
+
+    for order in load_paper_orders():
+        if order["side"] != "BUY":
+            continue
+
+        ticker = order["ticker"]
+
+        if ticker not in current_prices:
+            continue
+
+        buy_price = float(order["reference_price"])
+        current_price = float(current_prices[ticker])
+        shares = int(order["shares"])
+
+        pnl[ticker] = (current_price - buy_price) * shares
+
+    return pnl
+
+
+def calculate_portfolio_value(current_prices: dict[str, float]) -> float:
+    """現在の保有資産評価額を計算します。"""
+
+    total = 0.0
+
+    positions = get_open_positions()
+
+    for ticker, shares in positions.items():
+        if ticker not in current_prices:
+            continue
+
+        total += current_prices[ticker] * shares
+
+    return total
+
+
+def generate_portfolio_report(current_prices: dict[str, float]) -> str:
+    """資産状況レポートを作成します。"""
+
+    value = calculate_portfolio_value(current_prices)
+    pnl = calculate_unrealized_pnl(current_prices)
+
+    lines = []
+    lines.append(f"日時: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    lines.append(f"資産評価額: {value:,.0f}円")
+
+    if pnl:
+        lines.append("含み損益:")
+        for ticker, profit in pnl.items():
+            lines.append(f"  {ticker}: {profit:,.0f}円")
+
+    return "\n".join(lines)
+
+
+def save_portfolio_report(current_prices: dict[str, float], filename: str = "portfolio_report.txt") -> None:
+    """資産レポートをテキストファイルへ保存します。"""
+
+    report = generate_portfolio_report(current_prices)
+
+    with open(filename, "a+", encoding="utf-8") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+
+        if file_size > 0:
+            f.seek(file_size - 1)
+            if f.read(1) != "\n":
+                f.write("\n")
+
+        f.write(report)
+        f.write("\n" + "=" * 40 + "\n")
+
+def generate_order_list():
+    """保存されているペーパー注文を見やすい一覧にする。"""
+    orders = load_paper_orders()
+
+    lines = ["===== 注文一覧 ====="]
+
+    if not orders:
+        lines.append("注文はありません")
+        return "\n".join(lines)
+
+    for i, order in enumerate(orders, 1):
+        lines.append(
+            f"{i}. {order['ticker']} "
+            f"{order['side']} "
+            f"{order['shares']}株 "
+            f"@ {order['reference_price']:,.0f}円 "
+            f"({order['status']})"
+        )
+
+    return "\n".join(lines)

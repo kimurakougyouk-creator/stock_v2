@@ -1,0 +1,301 @@
+import unittest
+
+from ai_asset_platform.brokers.orders import FillResult, OrderSide
+from ai_asset_platform.portfolio.portfolio import Portfolio
+
+
+class TestPortfolioBuy(unittest.TestCase):
+    def test_first_buy_creates_position(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+
+        position = portfolio.get_position("7203.T")
+
+        self.assertIsNotNone(position)
+        self.assertEqual(position.quantity, 100)
+        self.assertEqual(position.average_price, 3000.0)
+
+    def test_additional_buy_updates_average_price(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+        portfolio.apply_fill(
+            FillResult(
+                "2",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3200.0,
+            )
+        )
+
+        position = portfolio.get_position("7203.T")
+
+        self.assertIsNotNone(position)
+        self.assertEqual(position.quantity, 200)
+        self.assertAlmostEqual(
+            position.average_price,
+            3100.0,
+        )
+
+
+class TestPortfolioSell(unittest.TestCase):
+    def test_partial_sale_records_profit(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+        portfolio.apply_fill(
+            FillResult(
+                "2",
+                "7203.T",
+                OrderSide.SELL,
+                40,
+                3200.0,
+            )
+        )
+
+        position = portfolio.get_position("7203.T")
+
+        self.assertIsNotNone(position)
+        self.assertEqual(position.quantity, 60)
+        self.assertEqual(position.average_price, 3000.0)
+        self.assertEqual(portfolio.realized_pnl, 8000.0)
+
+    def test_sale_records_loss(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+        portfolio.apply_fill(
+            FillResult(
+                "2",
+                "7203.T",
+                OrderSide.SELL,
+                20,
+                2800.0,
+            )
+        )
+
+        self.assertEqual(portfolio.realized_pnl, -4000.0)
+
+    def test_multiple_sales_accumulate_realized_pnl(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+        portfolio.apply_fill(
+            FillResult(
+                "2",
+                "7203.T",
+                OrderSide.SELL,
+                40,
+                3200.0,
+            )
+        )
+        portfolio.apply_fill(
+            FillResult(
+                "3",
+                "7203.T",
+                OrderSide.SELL,
+                60,
+                3100.0,
+            )
+        )
+
+        self.assertIsNone(portfolio.get_position("7203.T"))
+        self.assertEqual(portfolio.realized_pnl, 14000.0)
+
+    def test_sell_more_than_holding_is_rejected(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+
+        with self.assertRaises(ValueError):
+            portfolio.apply_fill(
+                FillResult(
+                    "2",
+                    "7203.T",
+                    OrderSide.SELL,
+                    101,
+                    3200.0,
+                )
+            )
+
+        self.assertEqual(portfolio.realized_pnl, 0.0)
+
+
+class TestPortfolioValuation(unittest.TestCase):
+    def test_calculates_combined_unrealized_pnl(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+        portfolio.apply_fill(
+            FillResult(
+                "2",
+                "6758.T",
+                OrderSide.BUY,
+                50,
+                2000.0,
+            )
+        )
+
+        result = portfolio.calculate_unrealized_pnl(
+            {
+                "7203.T": 3200.0,
+                "6758.T": 1900.0,
+            }
+        )
+
+        self.assertEqual(result, 15000.0)
+
+    def test_calculates_total_assets(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+
+        result = portfolio.calculate_total_assets(
+            cash=700_000.0,
+            market_prices={"7203.T": 3200.0},
+        )
+
+        self.assertEqual(result, 1_020_000.0)
+
+    def test_missing_market_price_is_rejected(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+
+        with self.assertRaises(ValueError):
+            portfolio.calculate_total_assets(
+                cash=700_000.0,
+                market_prices={},
+            )
+
+    def test_non_positive_market_price_is_rejected(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+
+        with self.assertRaises(ValueError):
+            portfolio.calculate_total_assets(
+                cash=700_000.0,
+                market_prices={"7203.T": 0.0},
+            )
+
+
+class TestPortfolioSummary(unittest.TestCase):
+    def test_get_summary(self):
+        portfolio = Portfolio()
+
+        portfolio.apply_fill(
+            FillResult(
+                "1",
+                "7203.T",
+                OrderSide.BUY,
+                100,
+                3000.0,
+            )
+        )
+
+        summary = portfolio.get_summary(
+            cash=700_000.0,
+            market_prices={"7203.T": 3200.0},
+        )
+
+        self.assertEqual(summary["cash"], 700_000.0)
+        self.assertEqual(summary["holdings"], 320_000.0)
+        self.assertEqual(summary["total_assets"], 1_020_000.0)
+        self.assertEqual(summary["realized_pnl"], 0.0)
+        self.assertEqual(summary["unrealized_pnl"], 20_000.0)
+
+    def test_negative_cash_is_rejected(self):
+        portfolio = Portfolio()
+
+        with self.assertRaises(ValueError):
+            portfolio.get_summary(
+                cash=-1.0,
+                market_prices={},
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

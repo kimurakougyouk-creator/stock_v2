@@ -135,3 +135,10 @@ TICKER_FILE = "tickers.csv"
 
 RESULT_DIR = "results"
 EXCEL_FILE = "results/backtest_result.xlsx"
+
+# ==========================
+# Version 3.0 売買設定
+# ==========================
+PAPER_TRADING = True
+INITIAL_CAPITAL = 1000000
+MAX_POSITION_PER_TRADE = 0.10
