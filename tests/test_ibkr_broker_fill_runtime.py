@@ -27,6 +27,80 @@ class FakeTransmitResult:
     message: str
 
 
+def test_connect_wires_exec_details_handler(monkeypatch, tmp_path):
+    captured = {}
+    session = IbkrPaperSession(
+        client=FakeClient(),
+        next_order_id=123,
+    )
+
+    def fake_open(config, *, order_status_handler=None, exec_details_handler=None):
+        captured["order_status_handler"] = order_status_handler
+        captured["exec_details_handler"] = exec_details_handler
+        return session
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+
+    broker = IbkrBrokerAdapter(
+        fill_state_path=tmp_path / "fill_state.json",
+    )
+
+    assert broker.connect() is True
+    assert callable(captured["order_status_handler"])
+    assert callable(captured["exec_details_handler"])
+    assert captured["exec_details_handler"] == broker._fill_runtime.process_execution
+
+
+def test_exec_details_handler_registers_fill_without_order_status(
+    monkeypatch,
+    tmp_path,
+):
+    captured = {}
+    fills = []
+    session = IbkrPaperSession(
+        client=FakeClient(),
+        next_order_id=123,
+    )
+
+    def fake_open(config, *, order_status_handler=None, exec_details_handler=None):
+        captured["exec_details_handler"] = exec_details_handler
+        return session
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.transmit_ibkr_paper_order",
+        lambda *args, **kwargs: FakeTransmitResult(
+            sent=True,
+            order_id=123,
+            message="paper sent",
+        ),
+    )
+
+    broker = IbkrBrokerAdapter(
+        enable_paper_order_transmission=True,
+        fill_state_path=tmp_path / "fill_state.json",
+        on_fill=fills.append,
+    )
+    assert broker.connect() is True
+
+    request = OrderRequest(symbol="AAPL", side=OrderSide.BUY, quantity=1)
+    result = broker.place_order(request)
+    assert result.status is OrderStatus.ACCEPTED
+
+    # orderStatusコールバックは一度も発火せず、execDetailsだけで約定登録する。
+    captured["exec_details_handler"](123, "exec-1", 1.0, 150.0)
+
+    assert broker.processed_filled(123) == 1.0
+    assert len(fills) == 1
+    assert fills[0].fill_price == 150.0
+
+
 def test_connect_wires_order_status_handler(monkeypatch, tmp_path):
     captured = {}
     session = IbkrPaperSession(
@@ -34,7 +108,7 @@ def test_connect_wires_order_status_handler(monkeypatch, tmp_path):
         next_order_id=123,
     )
 
-    def fake_open(config, *, order_status_handler=None):
+    def fake_open(config, *, order_status_handler=None, **kwargs):
         captured["handler"] = order_status_handler
         return session
 
@@ -62,7 +136,7 @@ def test_sent_order_is_registered_for_fill_runtime(
         next_order_id=123,
     )
 
-    def fake_open(config, *, order_status_handler=None):
+    def fake_open(config, *, order_status_handler=None, **kwargs):
         captured["handler"] = order_status_handler
         return session
 
@@ -120,7 +194,7 @@ def test_unknown_order_status_is_ignored_safely(
         next_order_id=123,
     )
 
-    def fake_open(config, *, order_status_handler=None):
+    def fake_open(config, *, order_status_handler=None, **kwargs):
         captured["handler"] = order_status_handler
         return session
 

@@ -134,6 +134,74 @@ def test_corrupt_state_file_is_rejected(tmp_path):
         store.load()
 
 
+def test_execution_ledger_can_be_saved_and_loaded(tmp_path):
+    store = IbkrFillStateStore(tmp_path / "ibkr_fill_state.json")
+
+    store.save(
+        {100: 2.0},
+        {100: {"exec-1": (1.0, 100.0), "exec-2": (1.0, 102.0)}},
+    )
+
+    assert store.load() == {100: 2.0}
+    assert store.load_execution_ledger() == {
+        100: {"exec-1": (1.0, 100.0), "exec-2": (1.0, 102.0)}
+    }
+
+
+def test_missing_execution_ledger_file_returns_empty(tmp_path):
+    store = IbkrFillStateStore(tmp_path / "ibkr_fill_state.json")
+
+    assert store.load_execution_ledger() == {}
+
+
+def test_old_file_without_execution_ledger_key_loads_as_empty(tmp_path):
+    """execution_ledgerキーを持たない旧バージョンのファイルでも安全に読める。"""
+    path = tmp_path / "ibkr_fill_state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "processed_filled": {"100": 1.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = IbkrFillStateStore(path)
+
+    assert store.load() == {100: 1.0}
+    assert store.load_execution_ledger() == {}
+
+
+def test_save_without_execution_ledger_argument_defaults_to_empty(tmp_path):
+    """execution_ledger引数を省略した既存呼び出しは壊れない(後方互換)。"""
+    store = IbkrFillStateStore(tmp_path / "ibkr_fill_state.json")
+
+    store.save({100: 1.0})
+
+    assert store.load() == {100: 1.0}
+    assert store.load_execution_ledger() == {}
+
+
+def test_corrupt_execution_ledger_is_rejected(tmp_path):
+    path = tmp_path / "ibkr_fill_state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "processed_filled": {"100": 1.0},
+                "execution_ledger": {"100": "not-a-dict"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = IbkrFillStateStore(path)
+
+    with pytest.raises(ValueError):
+        store.load_execution_ledger()
+
+
 def test_negative_saved_quantity_is_rejected(tmp_path):
     path = tmp_path / "ibkr_fill_state.json"
     path.write_text(

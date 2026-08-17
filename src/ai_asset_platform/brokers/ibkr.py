@@ -60,6 +60,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
         self._session = open_ibkr_paper_session(
             self.config,
             order_status_handler=self._fill_runtime.process_order_status,
+            exec_details_handler=self._fill_runtime.process_execution,
         )
         return self.is_connected()
 

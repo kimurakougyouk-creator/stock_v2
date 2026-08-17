@@ -65,7 +65,7 @@ def _connected_gateway(
     session = session or FakeSession()
     captured = {}
 
-    def fake_open(config, *, order_status_handler=None):
+    def fake_open(config, *, order_status_handler=None, **kwargs):
         captured["handler"] = order_status_handler
         return session
 

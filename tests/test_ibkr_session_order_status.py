@@ -56,3 +56,55 @@ def test_order_status_without_handler_is_safe():
         "",
         0.0,
     )
+
+
+class _FakeContract:
+    symbol = "AAPL"
+
+
+class _FakeExecution:
+    orderId = 123
+    execId = "exec-1"
+    shares = 1.0
+    price = 100.0
+
+
+def test_exec_details_callback_routes_execution_data():
+    received = []
+    client = _IbkrPaperClient(
+        exec_details_handler=lambda *args: received.append(args),
+    )
+
+    client.execDetails(9001, _FakeContract(), _FakeExecution())
+
+    assert received == [(123, "exec-1", 1.0, 100.0)]
+
+
+def test_exec_details_without_handler_is_safe():
+    client = _IbkrPaperClient()
+
+    client.execDetails(9001, _FakeContract(), _FakeExecution())
+
+
+def test_order_status_handler_is_unaffected_by_exec_details_handler():
+    """execDetailsハンドラの追加後もorderStatus経路が壊れていないこと。"""
+    received = []
+    client = _IbkrPaperClient(
+        order_status_handler=lambda *args: received.append(args),
+    )
+
+    client.orderStatus(
+        123,
+        "Submitted",
+        1,
+        2,
+        200.5,
+        0,
+        0,
+        200.5,
+        1,
+        "",
+        0.0,
+    )
+
+    assert received == [(123, "Submitted", 1.0, 2.0, 200.5)]

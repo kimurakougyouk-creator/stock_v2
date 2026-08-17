@@ -11,6 +11,7 @@ from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
 
 
 OrderStatusHandler = Callable[[int, str, float, float, float], None]
+ExecutionHandler = Callable[[int, str, float, float], None]
 
 
 class _IbkrPaperClient(EWrapper, EClient):
@@ -18,6 +19,7 @@ class _IbkrPaperClient(EWrapper, EClient):
         self,
         *,
         order_status_handler: OrderStatusHandler | None = None,
+        exec_details_handler: ExecutionHandler | None = None,
     ) -> None:
         EWrapper.__init__(self)
         EClient.__init__(self, self)
@@ -25,6 +27,7 @@ class _IbkrPaperClient(EWrapper, EClient):
         self.ready = Event()
         self.next_order_id: int | None = None
         self._order_status_handler = order_status_handler
+        self._exec_details_handler = exec_details_handler
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.next_order_id = orderId
@@ -53,6 +56,22 @@ class _IbkrPaperClient(EWrapper, EClient):
             float(filled),
             float(remaining),
             float(avgFillPrice),
+        )
+
+    def execDetails(  # noqa: N802
+        self,
+        reqId,
+        contract,
+        execution,
+    ) -> None:
+        if self._exec_details_handler is None:
+            return
+
+        self._exec_details_handler(
+            int(execution.orderId),
+            str(execution.execId),
+            float(execution.shares),
+            float(execution.price),
         )
 
     def error(
@@ -86,13 +105,14 @@ def open_ibkr_paper_session(
     *,
     timeout: float = 5.0,
     order_status_handler: OrderStatusHandler | None = None,
+    exec_details_handler: ExecutionHandler | None = None,
 ) -> IbkrPaperSession | None:
     """
     IBKR Paper APIへの持続接続を安全に開始する。
 
     注文は送信しない。
     Live Tradingは許可しない。
-    orderStatusは指定された安全なハンドラへ渡す。
+    orderStatus/execDetailsは指定された安全なハンドラへ渡す。
     """
     config.validate()
 
@@ -108,6 +128,7 @@ def open_ibkr_paper_session(
 
     client = _IbkrPaperClient(
         order_status_handler=order_status_handler,
+        exec_details_handler=exec_details_handler,
     )
 
     try:
