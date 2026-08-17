@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass, field
 
 from ai_asset_platform.brokers.ibkr_config import (
@@ -5,6 +6,7 @@ from ai_asset_platform.brokers.ibkr_config import (
     create_ibkr_paper_config,
 )
 from ai_asset_platform.brokers.ibkr_first_paper_test import (
+    REQUIRED_CLIENT_ID,
     REQUIRED_QUANTITY,
     REQUIRED_SIDE,
     REQUIRED_SYMBOL,
@@ -51,8 +53,16 @@ def _ready_guard(*args, **kwargs):
     )
 
 
-def _connected_gateway(monkeypatch, tmp_path, *, enable_transmission):
-    session = FakeSession()
+def _connected_gateway(
+    monkeypatch,
+    tmp_path,
+    *,
+    enable_transmission,
+    session=None,
+    lock_path=None,
+    fill_state_name="fills.json",
+):
+    session = session or FakeSession()
     captured = {}
 
     def fake_open(config, *, order_status_handler=None):
@@ -70,7 +80,10 @@ def _connected_gateway(monkeypatch, tmp_path, *, enable_transmission):
 
     gateway = IbkrFirstPaperTestGateway(
         enable_transmission=enable_transmission,
-        fill_state_path=tmp_path / "fills.json",
+        fill_state_path=tmp_path / fill_state_name,
+        # 実運用ロック(data/ibkr_first_paper_test_send.lock)を汚さないよう、
+        # テストでは必ず一時ディレクトリ配下のロックパスを使う。
+        lock_path=lock_path or (tmp_path / "send.lock"),
     )
     assert gateway.connect() is True
     return gateway, session, captured
@@ -97,6 +110,13 @@ def test_gateway_is_fixed_to_ib_gateway_paper_endpoint():
     assert gateway.config.port == 4002
     assert gateway.config.paper_trading is True
     assert gateway.config.allow_live_trading is False
+    assert gateway.config.client_id == REQUIRED_CLIENT_ID
+
+
+def test_client_id_is_dedicated_and_differs_from_generic_default():
+    """汎用システムの既定client_id(0)と衝突しないことを確認する。"""
+    gateway = IbkrFirstPaperTestGateway()
+    assert gateway.config.client_id != 0
 
 
 def test_connect_fails_safely_when_probe_returns_none(monkeypatch, tmp_path):
@@ -179,25 +199,164 @@ def test_second_attempt_is_blocked_even_when_transmission_disabled(
     assert session.client.calls == []
 
 
-# --- 要件10-11: nextValidId取得 / orderStatus確認 ---
+# --- プロセスを跨いだ永続one-shot送信ロック ---
 
 
-def test_order_id_comes_from_real_ibkr_next_valid_id(monkeypatch, tmp_path):
-    session = FakeSession(next_order_id=987)
+def test_dry_run_does_not_create_persistent_lock_file(monkeypatch, tmp_path):
+    lock_path = tmp_path / "send.lock"
+    gateway, session, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=False,
+        lock_path=lock_path,
+    )
+
+    result = gateway.place_first_test_order()
+
+    assert result.sent is False
+    assert session.client.calls == []
+    assert lock_path.exists() is False
+
+
+def test_first_transmission_creates_lock_and_second_process_is_blocked(
+    monkeypatch, tmp_path
+):
+    """1回目の送信試行だけが永続ロックを作成し許可され、
+    別インスタンス(=別プロセスを模擬)からの2回目は必ずBLOCKEDになることを検証する。
+    """
+    lock_path = tmp_path / "send.lock"
+    session = FakeSession()
+
+    first_gateway, _, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=True,
+        session=session,
+        lock_path=lock_path,
+        fill_state_name="fills_a.json",
+    )
+    first_result = first_gateway.place_first_test_order()
+
+    assert first_result.sent is True
+    assert lock_path.exists() is True
+    assert len(session.client.calls) == 1
+
+    # 別プロセスからの再実行を模擬した、完全に新しいインスタンス。
+    # プロセス内one-shot(_attempted)は新規なので無関係。永続ロックだけで防ぐ。
+    second_gateway, _, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=True,
+        session=session,
+        lock_path=lock_path,
+        fill_state_name="fills_b.json",
+    )
+    second_result = second_gateway.place_first_test_order()
+
+    assert second_result.sent is False
+    assert second_result.status == "BLOCKED_ALREADY_SENT"
+    # placeOrderは1回目の1件だけのまま増えていないこと。
+    assert len(session.client.calls) == 1
+
+
+def test_lock_is_released_when_underlying_send_is_not_actually_sent(
+    monkeypatch, tmp_path
+):
+    """内部ガード等でsent=Falseが確定した場合は、正当な再試行を妨げないよう
+    永続ロックを解放することを検証する。
+    """
+    lock_path = tmp_path / "send.lock"
+    session = FakeSession()
+
+    def blocked_guard(*args, **kwargs):
+        return IbkrPaperOrderGuardResult(
+            status="WAITING",
+            allowed=False,
+            symbol=args[0],
+            quantity=args[1],
+            message="waiting",
+        )
+
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
         lambda config, **kwargs: session,
     )
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr_paper_transmitter.validate_ibkr_paper_test_order",
-        _ready_guard,
+        blocked_guard,
     )
 
     gateway = IbkrFirstPaperTestGateway(
         enable_transmission=True,
         fill_state_path=tmp_path / "fills.json",
+        lock_path=lock_path,
     )
     assert gateway.connect() is True
+
+    result = gateway.place_first_test_order()
+
+    assert result.sent is False
+    assert session.client.calls == []
+    # 実際には送信されなかったため、永続ロックは解放され残らない。
+    assert lock_path.exists() is False
+
+
+def test_concurrent_attempts_only_one_process_can_send(monkeypatch, tmp_path):
+    """2プロセスが同時に送信を試みても、永続ロックのアトミックな排他作成により
+    片方だけがplaceOrderへ到達できることを検証する(スレッドで同時実行を模擬)。
+    os.open(O_CREAT|O_EXCL)のアトミック性はカーネルが保証するため、
+    プロセス境界に関わらず有効な検証となる。
+    """
+    lock_path = tmp_path / "send.lock"
+    session = FakeSession()
+
+    gateway_a, _, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=True,
+        session=session,
+        lock_path=lock_path,
+        fill_state_name="fills_a.json",
+    )
+    gateway_b, _, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=True,
+        session=session,
+        lock_path=lock_path,
+        fill_state_name="fills_b.json",
+    )
+
+    barrier = threading.Barrier(2)
+    results: dict[str, object] = {}
+
+    def run(name, gateway):
+        barrier.wait()
+        results[name] = gateway.place_first_test_order()
+
+    t1 = threading.Thread(target=run, args=("a", gateway_a))
+    t2 = threading.Thread(target=run, args=("b", gateway_b))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    sent_flags = [results["a"].sent, results["b"].sent]
+    assert sent_flags.count(True) == 1
+    assert sent_flags.count(False) == 1
+    assert len(session.client.calls) == 1
+
+
+# --- 要件10-11: nextValidId取得 / orderStatus確認 ---
+
+
+def test_order_id_comes_from_real_ibkr_next_valid_id(monkeypatch, tmp_path):
+    gateway, session, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=True,
+        session=FakeSession(next_order_id=987),
+    )
 
     result = gateway.place_first_test_order()
 

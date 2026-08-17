@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
-from ai_asset_platform.brokers.ibkr_config import (
-    IbkrConnectionConfig,
-    create_ibkr_paper_config,
-)
+from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide, OrderStatus
 
 REQUIRED_HOST = "127.0.0.1"
@@ -15,6 +15,14 @@ REQUIRED_PORT = 4002
 REQUIRED_SYMBOL = "AAPL"
 REQUIRED_SIDE = OrderSide.BUY
 REQUIRED_QUANTITY = 1
+
+# 汎用システムが既定で使うclient_id=0とは別のIDを固定する。
+# こうすることで、他のIBKR APIクライアント(汎用トレーディングシステム等)が
+# 同時にclient_id=0で接続していても、初回Paperテスト専用の接続が
+# 同一client_idの競合(接続拒否/強制切断)に巻き込まれない。
+REQUIRED_CLIENT_ID = 501
+
+DEFAULT_SEND_LOCK_PATH = "data/ibkr_first_paper_test_send.lock"
 
 
 @dataclass(frozen=True)
@@ -93,11 +101,13 @@ class IbkrFirstPaperTestGateway:
     新しい発注ロジックは実装しない。このクラスが追加するのは、
     初回実機テストのためだけの固定・使い捨て制約のみ:
 
-    - 接続先はIB Gateway Paper(127.0.0.1:4002)固定
+    - 接続先はIB Gateway Paper(127.0.0.1:4002)固定、client_idも専用に固定
     - 注文はAAPL/BUY/1株固定(呼び出し側は変更できない)
     - 初期状態では送信禁止(enable_transmission=False)
     - 明示的にenable_transmission=Trueにした場合だけplaceOrderへ進む可能性がある
-    - このインスタンスの生涯でplaceOrderは最大1回だけ
+    - このインスタンスの生涯でplaceOrderは最大1回だけ(プロセス内one-shot)
+    - enable_transmission=Trueの送信試行だけ、プロセスを跨いでも有効な
+      永続one-shotロック(ファイルの排他作成)で1回だけに制限する
     """
 
     def __init__(
@@ -106,12 +116,21 @@ class IbkrFirstPaperTestGateway:
         enable_transmission: bool = False,
         fill_state_path: str
         | Path = "data/ibkr_first_paper_test_fill_state.json",
+        lock_path: str | Path = DEFAULT_SEND_LOCK_PATH,
     ) -> None:
         self._broker = IbkrBrokerAdapter(
-            create_ibkr_paper_config(use_gateway=True),
+            IbkrConnectionConfig(
+                host=REQUIRED_HOST,
+                port=REQUIRED_PORT,
+                client_id=REQUIRED_CLIENT_ID,
+                paper_trading=True,
+                allow_live_trading=False,
+            ),
             enable_paper_order_transmission=enable_transmission,
             fill_state_path=fill_state_path,
         )
+        self._enable_transmission = enable_transmission
+        self._lock_path = Path(lock_path)
         self._attempted = False
 
     @property
@@ -133,6 +152,12 @@ class IbkrFirstPaperTestGateway:
 
         1インスタンスにつき1回しか試行できない
         (2回目以降は接続状態に関わらず常にBLOCKED_ALREADY_ATTEMPTEDを返す)。
+
+        enable_transmission=Trueで実際に送信を試みる直前だけ、
+        プロセスを跨いで有効な永続one-shotロックを安全に確保する。
+        ロック取得に失敗した場合(=既に他の実行が送信済み/送信中)は
+        placeOrderへ一切進まない。
+        Dry Run(enable_transmission=False)ではこのロックを一切消費しない。
         """
         if self._attempted:
             return IbkrFirstPaperTestResult(
@@ -159,8 +184,37 @@ class IbkrFirstPaperTestGateway:
         if blocked is not None:
             return blocked
 
-        result = self._broker.place_order(order)
+        if not self._enable_transmission:
+            # Dry Run: 永続ロックには一切触れず、既存の安全ロック
+            # (enable_transmission=False)にそのまま任せる。
+            result = self._broker.place_order(order)
+            return self._to_first_test_result(result)
 
+        # ここから先はenable_transmission=Trueかつ、このテスト入口専用の
+        # 固定条件(Gateway/AAPL/BUY/1株/Paper/Live禁止)をすべて満たした場合のみ。
+        # 実際にplaceOrderへ進む(=既存の汎用送信経路に処理を委ねる)直前で、
+        # プロセスを跨いだ永続one-shotロックを安全に確保する。
+        lock_blocked = self._acquire_persistent_send_lock()
+        if lock_blocked is not None:
+            return lock_blocked
+
+        result = self._broker.place_order(order)
+        first_result = self._to_first_test_result(result)
+
+        if not first_result.sent:
+            # 実際にはIBKRへ送信されなかったことが確定した場合だけ、
+            # 将来の正当な再試行を妨げないよう永続ロックを解放する。
+            # (placeOrder呼び出し中に例外が発生した場合はここに到達せず、
+            #  送信結果が不明なため安全側に倒してロックを保持したままにする)
+            self._release_persistent_send_lock()
+
+        return first_result
+
+    def order_status_snapshot(self, order_id: int) -> float:
+        """orderStatus由来の、指定order_idの処理済み累積約定数量を返す。"""
+        return self._broker.processed_filled(order_id)
+
+    def _to_first_test_result(self, result) -> IbkrFirstPaperTestResult:
         return IbkrFirstPaperTestResult(
             status=result.status.value,
             sent=result.status is OrderStatus.ACCEPTED,
@@ -168,9 +222,45 @@ class IbkrFirstPaperTestGateway:
             message=result.message,
         )
 
-    def order_status_snapshot(self, order_id: int) -> float:
-        """orderStatus由来の、指定order_idの処理済み累積約定数量を返す。"""
-        return self._broker.processed_filled(order_id)
+    def _acquire_persistent_send_lock(self) -> IbkrFirstPaperTestResult | None:
+        """
+        プロセスを跨いで有効な、排他的なone-shot送信ロックを確保する。
+
+        os.O_CREAT | os.O_EXCLによるファイル作成はOSレベルでアトミックなため、
+        複数プロセス(またはスレッド)が同時に呼んでも、ロックファイルを
+        実際に作成できるのは1者だけであることが保証される。
+        """
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            fd = os.open(
+                str(self._lock_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+        except FileExistsError:
+            return IbkrFirstPaperTestResult(
+                status="BLOCKED_ALREADY_SENT",
+                sent=False,
+                order_id=None,
+                message=(
+                    "初回Paperテストは既に送信を試行済みです"
+                    f"(永続ロック: {self._lock_path})。"
+                    "別プロセスからの重複送信をブロックしました。"
+                ),
+            )
+
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {"pid": os.getpid(), "acquired_at": time.time()},
+                    ensure_ascii=False,
+                )
+            )
+
+        return None
+
+    def _release_persistent_send_lock(self) -> None:
+        self._lock_path.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -185,11 +275,13 @@ def main() -> None:
 
     print("===== IBKR FIRST PAPER TEST (SAFE ENTRY) =====")
     print(f"ENDPOINT   : {gateway.config.host}:{gateway.config.port}")
+    print(f"CLIENT ID  : {gateway.config.client_id}")
     print(f"PAPER      : {gateway.config.paper_trading}")
     print(f"LIVE ALLOW : {gateway.config.allow_live_trading}")
     print(f"SYMBOL     : {REQUIRED_SYMBOL}")
     print(f"SIDE       : {REQUIRED_SIDE.value}")
     print(f"QUANTITY   : {REQUIRED_QUANTITY}")
+    print(f"SEND LOCK  : {gateway._lock_path}")
     print("TRANSMISSION: disabled (this entry point never sends by itself)")
 
 
