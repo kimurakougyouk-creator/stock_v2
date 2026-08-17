@@ -58,6 +58,7 @@ class _IbkrPaperClient(EWrapper, EClient):
     def error(
         self,
         reqId,
+        errorTime,
         errorCode,
         errorString,
         advancedOrderRejectJson="",

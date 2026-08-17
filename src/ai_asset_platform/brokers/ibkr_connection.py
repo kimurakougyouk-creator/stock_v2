@@ -27,7 +27,14 @@ class _ConnectionProbe(EWrapper, EClient):
         self.next_valid_order_id = orderId
         self.ready.set()
 
-    def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
+    def error(
+        self,
+        reqId,
+        errorTime,
+        errorCode,
+        errorString,
+        advancedOrderRejectJson="",
+    ):
         if errorCode in {502, 503, 504, 1100}:
             self.ready.set()
 
