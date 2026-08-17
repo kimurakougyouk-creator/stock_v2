@@ -50,9 +50,12 @@ def transmit_ibkr_paper_order(
             message="Paper Trading専用のため送信を停止しました。",
         )
 
+    # configがGateway(4002)ならガードの自動preflightもGatewayを確認する。
+    # そうしないとGateway接続時でもTWS(7497)を誤って待ち受けてしまう。
     guard = guard or validate_ibkr_paper_test_order(
         request.symbol,
         request.quantity,
+        use_gateway=config.port == 4002,
     )
     if not guard.allowed:
         return IbkrPaperTransmissionResult(

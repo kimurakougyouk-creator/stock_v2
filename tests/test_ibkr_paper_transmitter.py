@@ -114,6 +114,72 @@ def test_live_configuration_is_blocked():
     assert client.calls == []
 
 
+def test_default_guard_uses_tws_port_when_config_is_tws(monkeypatch):
+    """guard未指定時、TWS(7497)設定ならuse_gateway=Falseで自動ガードすること。"""
+    import ai_asset_platform.brokers.ibkr_paper_transmitter as transmitter
+
+    seen_kwargs = []
+
+    def fake_validate(symbol, quantity, **kwargs):
+        seen_kwargs.append(kwargs)
+        return ready_guard(symbol, quantity)
+
+    monkeypatch.setattr(
+        transmitter,
+        "validate_ibkr_paper_test_order",
+        fake_validate,
+    )
+
+    client = FakeClient()
+    request = OrderRequest("AAPL", OrderSide.BUY, 1)
+
+    result = transmit_ibkr_paper_order(
+        request,
+        create_ibkr_paper_config(),
+        client=client,
+        next_order_id=100,
+    )
+
+    assert seen_kwargs == [{"use_gateway": False}]
+    assert result.status == "READY_NOT_SENT"
+    assert client.calls == []
+
+
+def test_default_guard_uses_gateway_port_when_config_is_gateway(monkeypatch):
+    """guard未指定時、Gateway(4002)設定ならuse_gateway=Trueが伝播すること。
+
+    IbkrBrokerAdapter.place_order()はguardを明示せずこの関数を呼ぶため、
+    Gateway接続時にTWS(7497)を誤って確認しないことが送信前の安全確認上重要。
+    """
+    import ai_asset_platform.brokers.ibkr_paper_transmitter as transmitter
+
+    seen_kwargs = []
+
+    def fake_validate(symbol, quantity, **kwargs):
+        seen_kwargs.append(kwargs)
+        return ready_guard(symbol, quantity)
+
+    monkeypatch.setattr(
+        transmitter,
+        "validate_ibkr_paper_test_order",
+        fake_validate,
+    )
+
+    client = FakeClient()
+    request = OrderRequest("AAPL", OrderSide.BUY, 1)
+
+    result = transmit_ibkr_paper_order(
+        request,
+        create_ibkr_paper_config(use_gateway=True),
+        client=client,
+        next_order_id=100,
+    )
+
+    assert seen_kwargs == [{"use_gateway": True}]
+    assert result.status == "READY_NOT_SENT"
+    assert client.calls == []
+
+
 def test_explicit_enable_sends_one_paper_order():
     client = FakeClient()
     request = OrderRequest("AAPL", OrderSide.BUY, 1)

@@ -127,7 +127,7 @@ def test_ibkr_connected_order_is_ready_but_not_sent_by_default(monkeypatch):
     )
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr_paper_transmitter.validate_ibkr_paper_test_order",
-        lambda symbol, quantity: _ready_guard(symbol, quantity),
+        lambda symbol, quantity, **kwargs: _ready_guard(symbol, quantity),
     )
 
     broker = IbkrBrokerAdapter()
@@ -152,7 +152,7 @@ def test_ibkr_connected_order_keeps_transmission_disabled(monkeypatch):
     )
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr_paper_transmitter.validate_ibkr_paper_test_order",
-        lambda symbol, quantity: _ready_guard(symbol, quantity),
+        lambda symbol, quantity, **kwargs: _ready_guard(symbol, quantity),
     )
 
     broker = IbkrBrokerAdapter()
@@ -162,5 +162,41 @@ def test_ibkr_connected_order_keeps_transmission_disabled(monkeypatch):
         OrderRequest(symbol="AAPL", side=OrderSide.BUY, quantity=1)
     )
 
+    assert result.status is OrderStatus.REJECTED
+    assert session.client.calls == []
+
+
+def test_ibkr_gateway_broker_order_guard_checks_gateway_port(monkeypatch):
+    """IB Gateway設定のbrokerがplace_orderするとき、
+    自動ガードがGateway(4002)をuse_gateway=Trueで確認すること。
+    TWS(7497)を誤って確認しないことを保証する回帰テスト。
+    """
+    session = _paper_session()
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        lambda config, **kwargs: session,
+    )
+
+    seen_kwargs = []
+
+    def fake_validate(symbol, quantity, **kwargs):
+        seen_kwargs.append(kwargs)
+        return _ready_guard(symbol, quantity)
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr_paper_transmitter.validate_ibkr_paper_test_order",
+        fake_validate,
+    )
+
+    from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
+
+    broker = IbkrBrokerAdapter(create_ibkr_paper_config(use_gateway=True))
+    assert broker.connect() is True
+
+    result = broker.place_order(
+        OrderRequest(symbol="AAPL", side=OrderSide.BUY, quantity=1)
+    )
+
+    assert seen_kwargs == [{"use_gateway": True}]
     assert result.status is OrderStatus.REJECTED
     assert session.client.calls == []
