@@ -1,0 +1,41 @@
+name: pytest
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    # 実IBKR接続やPaper/Live注文送信は行わない。
+    # このジョブはpytest経由でユニットテストのみを実行し、
+    # IBKR TWS/Gatewayへのソケット接続を必要とするテストは
+    # すべてモック化されている(socket.create_connection等はmonkeypatch済み)。
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 開発環境(.venv)で動作確認済みのバージョンに合わせる。
+          # pyproject.tomlのrequires-python(>=3.11)も満たす。
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # ibapi (Interactive Brokers TWS API) はIB公式配布物のため
+          # requirements.txtには含まれていないが、ソースコードが
+          # import ibapi.* に依存しているためテスト収集に必要。
+          # PyPI公開ミラーのバージョンをCI専用に固定インストールする。
+          # 実際のIBKR接続やAPI通信には使用しない。
+          pip install ibapi==9.81.1.post1
+
+      - name: Run pytest
+        run: pytest -q
