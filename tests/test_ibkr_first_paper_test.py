@@ -6,6 +6,7 @@ from ai_asset_platform.brokers.ibkr_config import (
     create_ibkr_paper_config,
 )
 from ai_asset_platform.brokers.ibkr_first_paper_test import (
+    REQUIRED_ACCOUNT_ID,
     REQUIRED_CLIENT_ID,
     REQUIRED_QUANTITY,
     REQUIRED_SIDE,
@@ -22,6 +23,7 @@ from ai_asset_platform.brokers.orders import OrderRequest, OrderSide, OrderStatu
 @dataclass
 class FakeClient:
     calls: list = field(default_factory=list)
+    accounts: list = field(default_factory=lambda: [REQUIRED_ACCOUNT_ID])
 
     def placeOrder(self, order_id, contract, order):  # noqa: N802
         self.calls.append((order_id, contract, order))
@@ -61,6 +63,7 @@ def _connected_gateway(
     session=None,
     lock_path=None,
     fill_state_name="fills.json",
+    account_verification_timeout=0.05,
 ):
     session = session or FakeSession()
     captured = {}
@@ -84,6 +87,8 @@ def _connected_gateway(
         # 実運用ロック(data/ibkr_first_paper_test_send.lock)を汚さないよう、
         # テストでは必ず一時ディレクトリ配下のロックパスを使う。
         lock_path=lock_path or (tmp_path / "send.lock"),
+        # 口座確認の待機で実時間を消費しないよう、テストでは短縮する。
+        account_verification_timeout=account_verification_timeout,
     )
     assert gateway.connect() is True
     return gateway, session, captured
@@ -345,6 +350,88 @@ def test_concurrent_attempts_only_one_process_can_send(monkeypatch, tmp_path):
     assert sent_flags.count(True) == 1
     assert sent_flags.count(False) == 1
     assert len(session.client.calls) == 1
+
+
+# --- 送信直前の口座確認 ---
+
+
+def test_account_mismatch_blocks_send_without_consuming_lock(monkeypatch, tmp_path):
+    lock_path = tmp_path / "send.lock"
+    session = FakeSession(client=FakeClient(accounts=["OTHER_ACCOUNT"]))
+
+    gateway, _, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=True,
+        session=session,
+        lock_path=lock_path,
+    )
+
+    result = gateway.place_first_test_order()
+
+    assert result.sent is False
+    assert result.status == "BLOCKED_ACCOUNT_MISMATCH"
+    assert session.client.calls == []
+    assert lock_path.exists() is False
+
+
+def test_account_unverified_when_no_accounts_received_blocks_send(
+    monkeypatch, tmp_path
+):
+    lock_path = tmp_path / "send.lock"
+    session = FakeSession(client=FakeClient(accounts=[]))
+
+    gateway, _, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=True,
+        session=session,
+        lock_path=lock_path,
+        account_verification_timeout=0.05,
+    )
+
+    result = gateway.place_first_test_order()
+
+    assert result.sent is False
+    assert result.status == "BLOCKED_ACCOUNT_MISMATCH"
+    assert session.client.calls == []
+    assert lock_path.exists() is False
+
+
+def test_account_match_allows_send_to_proceed(monkeypatch, tmp_path):
+    lock_path = tmp_path / "send.lock"
+    session = FakeSession(client=FakeClient(accounts=[REQUIRED_ACCOUNT_ID]))
+
+    gateway, _, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=True,
+        session=session,
+        lock_path=lock_path,
+    )
+
+    result = gateway.place_first_test_order()
+
+    assert result.sent is True
+    assert len(session.client.calls) == 1
+
+
+def test_dry_run_does_not_require_account_verification(monkeypatch, tmp_path):
+    """Dry Run(enable_transmission=False)は口座未確認でも安全に未送信のまま完了する
+    (この分岐はplaceOrderへ進まないため、口座確認の対象外)。
+    """
+    session = FakeSession(client=FakeClient(accounts=[]))
+    gateway, _, _ = _connected_gateway(
+        monkeypatch,
+        tmp_path,
+        enable_transmission=False,
+        session=session,
+    )
+
+    result = gateway.place_first_test_order()
+
+    assert result.sent is False
+    assert session.client.calls == []
 
 
 # --- 要件10-11: nextValidId取得 / orderStatus確認 ---

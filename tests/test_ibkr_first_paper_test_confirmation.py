@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Callable
 
+from ai_asset_platform.brokers.ibkr_first_paper_test import REQUIRED_ACCOUNT_ID
 from ai_asset_platform.brokers.ibkr_first_paper_test_confirmation import (
     reconcile_order_via_readonly_query,
     send_and_confirm_first_paper_order,
@@ -53,6 +54,7 @@ class FakeOrderState:
 class FakeClient:
     calls: list = field(default_factory=list)
     connected: bool = True
+    accounts: list = field(default_factory=lambda: [REQUIRED_ACCOUNT_ID])
     order_status_handler: Callable | None = None
     exec_details_handler: Callable | None = None
     exec_calls: list = field(default_factory=list)
@@ -338,6 +340,25 @@ def test_connection_failure_never_sends(monkeypatch, tmp_path):
 
     assert result.status == "CONNECTION_FAILED"
     assert result.send_result.sent is False
+
+
+# --- 送信直前の口座確認: 不一致なら送信しない ---
+
+
+def test_account_mismatch_never_sends(monkeypatch, tmp_path):
+    session = FakeSession(client=FakeClient(accounts=["OTHER_ACCOUNT"]))
+    _patch_send_path(monkeypatch, session)
+
+    result = send_and_confirm_first_paper_order(
+        fill_state_path=tmp_path / "fills.json",
+        lock_path=tmp_path / "send.lock",
+        account_verification_timeout=0.05,
+    )
+
+    assert result.status == "NOT_SENT"
+    assert result.send_result.sent is False
+    assert result.send_result.status == "BLOCKED_ACCOUNT_MISMATCH"
+    assert session.client.calls == []
 
 
 # --- 永続one-shotロック: 2回目はBLOCKED、placeOrderは増えない ---

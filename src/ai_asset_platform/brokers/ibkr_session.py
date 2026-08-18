@@ -26,12 +26,18 @@ class _IbkrPaperClient(EWrapper, EClient):
 
         self.ready = Event()
         self.next_order_id: int | None = None
+        self.accounts: list[str] = []
         self._order_status_handler = order_status_handler
         self._exec_details_handler = exec_details_handler
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.next_order_id = orderId
         self.ready.set()
+
+    def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
+        self.accounts = [
+            account.strip() for account in accountsList.split(",") if account.strip()
+        ]
 
     def orderStatus(  # noqa: N802
         self,

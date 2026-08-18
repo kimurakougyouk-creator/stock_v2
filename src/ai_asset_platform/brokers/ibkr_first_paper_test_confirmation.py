@@ -10,6 +10,7 @@ from ibapi.execution import ExecutionFilter
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
 from ai_asset_platform.brokers.ibkr_first_paper_test import (
+    DEFAULT_ACCOUNT_VERIFICATION_TIMEOUT_SECONDS,
     REQUIRED_CLIENT_ID,
     REQUIRED_HOST,
     REQUIRED_PORT,
@@ -74,6 +75,9 @@ def send_and_confirm_first_paper_order(
     fill_state_path: str
     | Path = "data/ibkr_first_paper_test_fill_state.json",
     lock_path: str | Path = "data/ibkr_first_paper_test_send.lock",
+    account_verification_timeout: float = (
+        DEFAULT_ACCOUNT_VERIFICATION_TIMEOUT_SECONDS
+    ),
     now_fn: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> IbkrFirstPaperConfirmationResult:
@@ -97,6 +101,7 @@ def send_and_confirm_first_paper_order(
         enable_transmission=True,
         fill_state_path=fill_state_path,
         lock_path=lock_path,
+        account_verification_timeout=account_verification_timeout,
     )
 
     if not gateway.connect():

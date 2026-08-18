@@ -22,7 +22,14 @@ REQUIRED_QUANTITY = 1
 # 同一client_idの競合(接続拒否/強制切断)に巻き込まれない。
 REQUIRED_CLIENT_ID = 501
 
+# 送信直前に確認する、初回Paperテスト専用の固定Paper口座ID。
+# 誤って別の口座(将来別のPaper/Live口座が同一client_id体系に
+# 追加された場合等)へ送信することを防ぐための最終確認に使う。
+REQUIRED_ACCOUNT_ID = "DUR570982"
+
 DEFAULT_SEND_LOCK_PATH = "data/ibkr_first_paper_test_send.lock"
+
+DEFAULT_ACCOUNT_VERIFICATION_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -117,6 +124,9 @@ class IbkrFirstPaperTestGateway:
         fill_state_path: str
         | Path = "data/ibkr_first_paper_test_fill_state.json",
         lock_path: str | Path = DEFAULT_SEND_LOCK_PATH,
+        account_verification_timeout: float = (
+            DEFAULT_ACCOUNT_VERIFICATION_TIMEOUT_SECONDS
+        ),
     ) -> None:
         self._broker = IbkrBrokerAdapter(
             IbkrConnectionConfig(
@@ -131,6 +141,7 @@ class IbkrFirstPaperTestGateway:
         )
         self._enable_transmission = enable_transmission
         self._lock_path = Path(lock_path)
+        self._account_verification_timeout = account_verification_timeout
         self._attempted = False
 
     @property
@@ -192,6 +203,12 @@ class IbkrFirstPaperTestGateway:
 
         # ここから先はenable_transmission=Trueかつ、このテスト入口専用の
         # 固定条件(Gateway/AAPL/BUY/1株/Paper/Live禁止)をすべて満たした場合のみ。
+        # 実際にplaceOrderへ進む前に、接続先が想定Paper口座であることを
+        # 送信直前に確認する(誤口座への送信を防ぐ最終確認)。
+        account_blocked = self._verify_required_account()
+        if account_blocked is not None:
+            return account_blocked
+
         # 実際にplaceOrderへ進む(=既存の汎用送信経路に処理を委ねる)直前で、
         # プロセスを跨いだ永続one-shotロックを安全に確保する。
         lock_blocked = self._acquire_persistent_send_lock()
@@ -221,6 +238,44 @@ class IbkrFirstPaperTestGateway:
             order_id=result.order_id,
             message=result.message,
         )
+
+    def _verify_required_account(self) -> IbkrFirstPaperTestResult | None:
+        """
+        送信直前に、接続先がPaper口座REQUIRED_ACCOUNT_IDであることを確認する。
+
+        IBKR APIは接続確立後にmanagedAccountsを自動送信するが、到着タイミングは
+        保証されないため、account_verification_timeout秒までは短い間隔で待つ。
+        確認できない(未受信/口座不一致)場合はplaceOrderへ一切進まない。
+        この関数自身は注文を一切送信しない。
+        """
+        session = self._broker._session
+        if session is None:
+            return IbkrFirstPaperTestResult(
+                status="BLOCKED_ACCOUNT_UNVERIFIED",
+                sent=False,
+                order_id=None,
+                message="IBKRセッションが存在しないため口座を確認できませんでした。",
+            )
+
+        client = session.client
+        deadline = time.monotonic() + self._account_verification_timeout
+        accounts = list(getattr(client, "accounts", []))
+        while not accounts and time.monotonic() < deadline:
+            time.sleep(0.1)
+            accounts = list(getattr(client, "accounts", []))
+
+        if REQUIRED_ACCOUNT_ID not in accounts:
+            return IbkrFirstPaperTestResult(
+                status="BLOCKED_ACCOUNT_MISMATCH",
+                sent=False,
+                order_id=None,
+                message=(
+                    f"接続先がPaper口座{REQUIRED_ACCOUNT_ID}であることを"
+                    f"確認できなかったため停止しました(受信済み口座: {accounts})。"
+                ),
+            )
+
+        return None
 
     def _acquire_persistent_send_lock(self) -> IbkrFirstPaperTestResult | None:
         """
