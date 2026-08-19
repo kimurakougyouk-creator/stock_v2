@@ -29,6 +29,9 @@ class PlatformSettings:
     trailing_stop_percent = 5.0
     enable_paper_trading: bool = True
     enable_live_trading: bool = False
+    # IBKRは明示的opt-in時のみBrokerManagerから生成可能にする。
+    # supported_brokersには追加せず、既定Brokerにはしない。
+    enable_ibkr_paper: bool = False
     supported_markets: tuple[str, ...] = field(
         default_factory=lambda: ("JP_STOCK",)
     )
@@ -71,6 +74,7 @@ if __name__ == "__main__":
     print("Max Lose:", SETTINGS.max_consecutive_losses)
     print("Hold Days:", SETTINGS.max_holding_days)
     print("Paper   :", SETTINGS.enable_paper_trading)
+    print("IBKR Paper:", SETTINGS.enable_ibkr_paper)
     print("Markets :", ", ".join(SETTINGS.supported_markets))
     print("Brokers :", ", ".join(SETTINGS.supported_brokers))
     print("=" * 40)
