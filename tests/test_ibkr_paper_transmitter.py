@@ -115,7 +115,7 @@ def test_live_configuration_is_blocked():
 
 
 def test_default_guard_uses_tws_port_when_config_is_tws(monkeypatch):
-    """guard未指定時、TWS(7497)設定ならuse_gateway=Falseで自動ガードすること。"""
+    """明示的なTWS(7497)設定ならuse_gateway=Falseで自動ガードすること。"""
     import ai_asset_platform.brokers.ibkr_paper_transmitter as transmitter
 
     seen_kwargs = []
@@ -135,7 +135,7 @@ def test_default_guard_uses_tws_port_when_config_is_tws(monkeypatch):
 
     result = transmit_ibkr_paper_order(
         request,
-        create_ibkr_paper_config(),
+        create_ibkr_paper_config(use_gateway=False),
         client=client,
         next_order_id=100,
     )
