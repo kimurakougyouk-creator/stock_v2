@@ -194,7 +194,13 @@ class FakeClock:
 
 
 def _patch_send_path(monkeypatch, session):
-    def fake_open(config, *, order_status_handler=None, exec_details_handler=None):
+    def fake_open(
+        config,
+        *,
+        order_status_handler=None,
+        exec_details_handler=None,
+        **kwargs,
+    ):
         session.client.order_status_handler = order_status_handler
         session.client.exec_details_handler = exec_details_handler
         return session
@@ -776,6 +782,120 @@ def test_reconciliation_connection_failure(monkeypatch, tmp_path):
     )
 
     assert result.status == "CONNECTION_FAILED"
+
+
+# --- reconcile再接続安定化: connect_timeout転送 / 失敗時の観測データ保持 ---
+
+
+def test_reconciliation_forwards_connect_timeout_and_tries_only_once(
+    monkeypatch, tmp_path
+):
+    from ai_asset_platform.brokers.ibkr_first_paper_test_confirmation import (
+        DEFAULT_RECONCILE_CONNECT_TIMEOUT_SECONDS,
+    )
+
+    calls = []
+
+    def fake_open(config, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        return None
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+
+    result = reconcile_order_via_readonly_query(
+        1,
+        fill_state_path=tmp_path / "fills.json",
+    )
+
+    # 接続試行はちょうど1回だけ(自動リトライ・自動再接続は行わない)。
+    assert len(calls) == 1
+    assert calls[0] == DEFAULT_RECONCILE_CONNECT_TIMEOUT_SECONDS
+    assert result.status == "CONNECTION_FAILED"
+
+
+def test_reconciliation_respects_explicit_connect_timeout_override(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_open(config, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        return None
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+
+    reconcile_order_via_readonly_query(
+        1,
+        fill_state_path=tmp_path / "fills.json",
+        connect_timeout=1.5,
+    )
+
+    assert calls == [1.5]
+
+
+def test_reconciliation_preserves_diagnostics_and_errors_on_connection_failure(
+    monkeypatch, tmp_path
+):
+    """以前はCONNECTION_FAILED時にerrors/diagnosticsが完全に失われていた。
+    このテストはE2E5で実際に観測した状況(client_id再利用直後の接続失敗)を
+    模しており、失敗理由の手がかりが結果に残ることを検証する。
+    """
+    from ai_asset_platform.brokers.ibkr_session import _IbkrPaperClient
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+    def fake_open(config, *, on_failed_connect=None, **kwargs):
+        client = _IbkrPaperClient()
+        client.serverVersion_ = 223
+        if on_failed_connect is not None:
+            on_failed_connect(client, FakeThread())
+        return None
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+
+    result = reconcile_order_via_readonly_query(
+        1,
+        fill_state_path=tmp_path / "fills.json",
+    )
+
+    assert result.status == "CONNECTION_FAILED"
+    assert result.diagnostics is not None
+    assert result.diagnostics.is_connected is False
+    assert result.diagnostics.message_loop_alive is True
+    assert result.error_events == []  # このケースではエラーコールバックなし
+
+
+def test_reconciliation_connection_failure_never_calls_place_order(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_open(config, *, on_failed_connect=None, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+
+    result = reconcile_order_via_readonly_query(
+        1,
+        fill_state_path=tmp_path / "fills.json",
+    )
+
+    assert result.status == "CONNECTION_FAILED"
+    assert calls == []
 
 
 def test_reconciliation_place_order_guard_raises_if_triggered(monkeypatch, tmp_path):

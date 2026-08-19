@@ -220,6 +220,70 @@ def test_ibkr_paper_session_message_loop_alive_false_without_thread():
     assert session.message_loop_alive is False
 
 
+# --- 接続失敗時の観測フック(on_failed_connect): 1回だけ・リトライなし ---
+
+
+def test_on_failed_connect_is_invoked_once_before_client_is_discarded(monkeypatch):
+    """接続がタイムアウトした場合、破棄する直前にon_failed_connectへ
+    (client, thread)が1回だけ渡ること。再接続やリトライは一切しないこと。
+    """
+    from ai_asset_platform.brokers import ibkr_session
+
+    monkeypatch.setattr(
+        ibkr_session._IbkrPaperClient,
+        "connect",
+        lambda self, host, port, client_id: None,
+    )
+
+    captured = []
+
+    def on_failed_connect(client, thread):
+        captured.append((client, thread))
+
+    config = IbkrConnectionConfig(
+        host="127.0.0.1",
+        port=4002,
+        client_id=999,
+        paper_trading=True,
+        allow_live_trading=False,
+    )
+
+    result = open_ibkr_paper_session(
+        config,
+        timeout=0.05,
+        on_failed_connect=on_failed_connect,
+    )
+
+    assert result is None
+    assert len(captured) == 1
+    client, thread = captured[0]
+    assert isinstance(client, _IbkrPaperClient)
+    assert client.next_order_id is None
+
+
+def test_on_failed_connect_not_invoked_when_default(monkeypatch):
+    """on_failed_connectを渡さない既存呼び出し側の挙動は変わらないこと。"""
+    from ai_asset_platform.brokers import ibkr_session
+
+    monkeypatch.setattr(
+        ibkr_session._IbkrPaperClient,
+        "connect",
+        lambda self, host, port, client_id: None,
+    )
+
+    config = IbkrConnectionConfig(
+        host="127.0.0.1",
+        port=4002,
+        client_id=999,
+        paper_trading=True,
+        allow_live_trading=False,
+    )
+
+    result = open_ibkr_paper_session(config, timeout=0.05)
+
+    assert result is None
+
+
 def test_session_module_does_not_send_orders():
     from pathlib import Path
 

@@ -196,12 +196,16 @@ def _run_message_loop(client: _IbkrPaperClient) -> None:
         client.message_loop_finished.set()
 
 
+FailedConnectObserver = Callable[[_IbkrPaperClient, Thread], None]
+
+
 def open_ibkr_paper_session(
     config: IbkrConnectionConfig,
     *,
     timeout: float = 5.0,
     order_status_handler: OrderStatusHandler | None = None,
     exec_details_handler: ExecutionHandler | None = None,
+    on_failed_connect: FailedConnectObserver | None = None,
 ) -> IbkrPaperSession | None:
     """
     IBKR Paper APIへの持続接続を安全に開始する。
@@ -209,6 +213,11 @@ def open_ibkr_paper_session(
     注文は送信しない。
     Live Tradingは許可しない。
     orderStatus/execDetailsは指定された安全なハンドラへ渡す。
+
+    接続に失敗した場合、内部のclient/threadはそのまま破棄され戻り値はNoneに
+    なるため、失敗直前に観測したerrors/diagnosticsは通常失われる。
+    on_failed_connectを渡すと、破棄する直前に一度だけ(client, thread)を渡す。
+    これは観測専用のフックであり、再接続やリトライは一切行わない。
     """
     config.validate()
 
@@ -247,6 +256,8 @@ def open_ibkr_paper_session(
             client.next_order_id is None
             or not client.isConnected()
         ):
+            if on_failed_connect is not None:
+                on_failed_connect(client, thread)
             if client.isConnected():
                 client.disconnect()
             return None

@@ -53,6 +53,25 @@ DEFAULT_POLL_INTERVAL_SECONDS = 0.5
 # 応答終了(execDetailsEnd/completedOrdersEnd)を待つか、この秒数で打ち切る。
 DEFAULT_RECONCILIATION_TIMEOUT_SECONDS = 15.0
 
+# reconcile専用の接続待機秒数(nextValidId受信を待つ最大秒数)。
+#
+# 選定理由(実測結果に基づく。固定の待機時間を新たに推測しない):
+# - main session切断の直後、同一client_id(REQUIRED_CLIENT_ID)で即座に
+#   再接続すると、既定の接続タイムアウト(open_ibkr_paper_sessionの5.0秒)
+#   では3回連続でnextValidIdを受信できず、いずれも実測でちょうど5.0秒
+#   前後でタイムアウトしていた(拒否エラーは一切観測されなかった)。
+# - 一方、同じclient_idのまま数分空けて再接続した場合は0.8秒程度で
+#   即座に成功した。
+# - この関数は"待ってから接続する"のではなく、
+#   client.ready.wait(timeout)自体をより長く保つことで対応する。
+#   成功すればEventが即座に解除されて早く返るため、固定sleepより効率的で、
+#   かつ接続試行は1回のみ(リトライ・自動再接続は行わない)。
+# - 具体的な秒数は新たに推測せず、この関数がreqExecutions/
+#   reqCompletedOrders応答待ちに既に使っているDEFAULT_RECONCILIATION_
+#   TIMEOUT_SECONDS(15.0秒、実測で不十分だった5.0秒の3倍)をそのまま
+#   再利用する。この値が必要十分な最小値であることは未検証。
+DEFAULT_RECONCILE_CONNECT_TIMEOUT_SECONDS = DEFAULT_RECONCILIATION_TIMEOUT_SECONDS
+
 # IBKRが接続確立時などに定型的に送る情報メッセージ(エラーではない)。
 BENIGN_INFO_ERROR_CODES = frozenset({2104, 2106, 2107, 2108, 2158})
 
@@ -259,6 +278,7 @@ def reconcile_order_via_readonly_query(
     *,
     fill_state_path: str | Path = "data/ibkr_first_paper_test_fill_state.json",
     timeout_seconds: float = DEFAULT_RECONCILIATION_TIMEOUT_SECONDS,
+    connect_timeout: float = DEFAULT_RECONCILE_CONNECT_TIMEOUT_SECONDS,
     now_fn: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> IbkrOrderReconciliationResult:
@@ -272,6 +292,10 @@ def reconcile_order_via_readonly_query(
 
     見つかった約定は、既存のIbkrFillRuntime(fill_state_pathで指定される
     永続状態)へexecId単位で冪等に反映し、実行を跨いだ取りこぼしを補完する。
+
+    connect_timeoutはnextValidId受信を待つ最大秒数(DEFAULT_RECONCILE_
+    CONNECT_TIMEOUT_SECONDS参照)。接続試行は常に1回だけであり、
+    タイムアウトしても自動的な再接続・リトライは行わない。
     """
     config = IbkrConnectionConfig(
         host=REQUIRED_HOST,
@@ -286,7 +310,9 @@ def reconcile_order_via_readonly_query(
         fill_state_path=fill_state_path,
     )
 
-    if not broker.connect():
+    if not broker.connect(connect_timeout=connect_timeout):
+        # 接続失敗直前までに観測できたerrors/diagnosticsを
+        # 破棄せず結果へ残す(以前は完全に失われていた)。
         return IbkrOrderReconciliationResult(
             status="CONNECTION_FAILED",
             order_id=order_id,
@@ -295,6 +321,8 @@ def reconcile_order_via_readonly_query(
             error_codes=[],
             timed_out=False,
             message="IBKR Paperへの接続に失敗しました。",
+            diagnostics=broker.last_failed_diagnostics,
+            error_events=broker.last_failed_errors,
         )
 
     client = broker._session.client

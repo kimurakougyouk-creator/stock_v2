@@ -13,6 +13,7 @@ from ai_asset_platform.brokers.ibkr_paper_transmitter import (
     transmit_ibkr_paper_order,
 )
 from ai_asset_platform.brokers.ibkr_session import (
+    IbkrConnectionDiagnostics,
     IbkrPaperSession,
     open_ibkr_paper_session,
 )
@@ -46,21 +47,46 @@ class IbkrBrokerAdapter(BrokerAdapter):
             fill_state_path,
             on_fill=on_fill,
         )
+        # 直近の接続失敗時の観測データ(接続成功時は更新しない・古いまま残る)。
+        self.last_failed_diagnostics: IbkrConnectionDiagnostics | None = None
+        self.last_failed_errors: list[dict] = []
 
     @property
     def name(self) -> str:
         return "IBKR"
 
-    def connect(self) -> bool:
+    def connect(self, *, connect_timeout: float | None = None) -> bool:
+        """IBKR Paperへ接続する。
+
+        connect_timeoutを指定すると、nextValidId受信を待つ最大秒数だけを
+        変更できる(既定値5.0秒は変更しない呼び出し側の挙動を維持するため)。
+        接続に失敗した場合でも、その時点までに観測できたerrors/diagnosticsを
+        last_failed_errors/last_failed_diagnosticsへ保存する。
+        リトライや自動再接続は一切行わない(1回の接続試行のみ)。
+        """
         self.config.validate()
 
         if self.is_connected():
             return True
 
+        def _capture_failed_diagnostics(client, thread) -> None:
+            exc = client.message_loop_exception
+            self.last_failed_diagnostics = IbkrConnectionDiagnostics(
+                server_version=client.server_version,
+                next_valid_id=client.next_order_id,
+                is_connected=client.isConnected(),
+                message_loop_alive=thread.is_alive(),
+                message_loop_exception=repr(exc) if exc is not None else None,
+            )
+            self.last_failed_errors = list(client.errors)
+
+        kwargs = {} if connect_timeout is None else {"timeout": connect_timeout}
         self._session = open_ibkr_paper_session(
             self.config,
             order_status_handler=self._fill_runtime.process_order_status,
             exec_details_handler=self._fill_runtime.process_execution,
+            on_failed_connect=_capture_failed_diagnostics,
+            **kwargs,
         )
         return self.is_connected()
 

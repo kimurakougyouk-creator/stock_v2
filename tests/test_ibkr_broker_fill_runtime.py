@@ -34,7 +34,13 @@ def test_connect_wires_exec_details_handler(monkeypatch, tmp_path):
         next_order_id=123,
     )
 
-    def fake_open(config, *, order_status_handler=None, exec_details_handler=None):
+    def fake_open(
+        config,
+        *,
+        order_status_handler=None,
+        exec_details_handler=None,
+        **kwargs,
+    ):
         captured["order_status_handler"] = order_status_handler
         captured["exec_details_handler"] = exec_details_handler
         return session
@@ -65,7 +71,13 @@ def test_exec_details_handler_registers_fill_without_order_status(
         next_order_id=123,
     )
 
-    def fake_open(config, *, order_status_handler=None, exec_details_handler=None):
+    def fake_open(
+        config,
+        *,
+        order_status_handler=None,
+        exec_details_handler=None,
+        **kwargs,
+    ):
         captured["exec_details_handler"] = exec_details_handler
         return session
 

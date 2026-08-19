@@ -200,3 +200,87 @@ def test_ibkr_gateway_broker_order_guard_checks_gateway_port(monkeypatch):
     assert seen_kwargs == [{"use_gateway": True}]
     assert result.status is OrderStatus.REJECTED
     assert session.client.calls == []
+
+
+# --- connect_timeout転送 / 接続失敗時の観測データ保存(reconcile安定化) ---
+
+
+def test_connect_forwards_connect_timeout_to_session(monkeypatch):
+    seen = {}
+
+    def fake_open(config, **kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+
+    broker = IbkrBrokerAdapter()
+    broker.connect(connect_timeout=15.0)
+
+    assert seen.get("timeout") == 15.0
+
+
+def test_connect_without_connect_timeout_does_not_override_default(monkeypatch):
+    seen = {}
+
+    def fake_open(config, **kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+
+    broker = IbkrBrokerAdapter()
+    broker.connect()
+
+    assert "timeout" not in seen
+
+
+def test_connect_preserves_diagnostics_and_errors_on_failure(monkeypatch):
+    """接続失敗時、破棄される前のerrors/diagnosticsがlast_failed_*へ残ること。
+    以前はこの情報が完全に失われていた(reconcileのCONNECTION_FAILED問題)。
+    """
+    from ai_asset_platform.brokers.ibkr_session import _IbkrPaperClient
+
+    class FakeThread:
+        def is_alive(self):
+            return False
+
+    def fake_open(config, *, on_failed_connect=None, **kwargs):
+        client = _IbkrPaperClient()
+        client.error(1, 0, 10052, "無効な有効期限:空白", "")
+        if on_failed_connect is not None:
+            on_failed_connect(client, FakeThread())
+        return None
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        fake_open,
+    )
+
+    broker = IbkrBrokerAdapter()
+    assert broker.connect() is False
+
+    assert broker.last_failed_diagnostics is not None
+    assert broker.last_failed_diagnostics.is_connected is False
+    assert broker.last_failed_diagnostics.message_loop_alive is False
+    assert any(e["code"] == 10052 for e in broker.last_failed_errors)
+
+
+def test_connect_does_not_touch_last_failed_state_on_success(monkeypatch):
+    session = _paper_session()
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
+        lambda config, **kwargs: session,
+    )
+
+    broker = IbkrBrokerAdapter()
+    assert broker.connect() is True
+
+    assert broker.last_failed_diagnostics is None
+    assert broker.last_failed_errors == []
