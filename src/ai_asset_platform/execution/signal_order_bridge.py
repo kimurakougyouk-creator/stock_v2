@@ -21,6 +21,7 @@ def execute_signal_via_ibkr_paper(
     signal: str,
     shares: int,
     order_intent_id: str,
+    apply_account_fill: bool = True,
 ) -> SignalExecutionResult:
     """確定済みBUY/SELLをIBKR Paper経路へ渡す。
 
@@ -52,5 +53,6 @@ def execute_signal_via_ibkr_paper(
     result = service.execute_ibkr_paper_order(
         order,
         order_intent_id=order_intent_id,
+        apply_account_fill=apply_account_fill,
     )
     return SignalExecutionResult(True, "submitted to IBKR Paper execution service", result)
