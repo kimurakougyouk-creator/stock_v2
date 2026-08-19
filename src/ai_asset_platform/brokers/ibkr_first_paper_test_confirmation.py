@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -24,6 +24,7 @@ from ai_asset_platform.brokers.ibkr_order_events import (
     IbkrOrderState,
     normalize_ibkr_order_state,
 )
+from ai_asset_platform.brokers.ibkr_session import IbkrConnectionDiagnostics
 from ai_asset_platform.brokers.orders import OrderRequest
 
 TERMINAL_ORDER_STATES = frozenset(
@@ -66,6 +67,11 @@ class IbkrFirstPaperConfirmationResult:
     last_known_status: str | None
     filled_quantity: float
     message: str
+    # ===== 観測専用フィールド。注文送信・再送信の判断には使わない =====
+    diagnostics: IbkrConnectionDiagnostics | None = None
+    errors: list[dict] = field(default_factory=list)
+    open_orders: dict[int, dict] = field(default_factory=dict)
+    executions: list[dict] = field(default_factory=list)
 
 
 def send_and_confirm_first_paper_order(
@@ -160,6 +166,10 @@ def send_and_confirm_first_paper_order(
     send_result = gateway.place_first_test_order()
 
     if not send_result.sent or send_result.order_id is None:
+        diagnostics = gateway._broker._session.diagnostics()
+        errors = list(client.errors)
+        open_orders = dict(client.open_orders)
+        executions = list(client.executions)
         gateway.disconnect()
         return IbkrFirstPaperConfirmationResult(
             status="NOT_SENT",
@@ -170,6 +180,10 @@ def send_and_confirm_first_paper_order(
             last_known_status=None,
             filled_quantity=0.0,
             message=send_result.message,
+            diagnostics=diagnostics,
+            errors=errors,
+            open_orders=open_orders,
+            executions=executions,
         )
 
     order_id = int(send_result.order_id)
@@ -194,6 +208,12 @@ def send_and_confirm_first_paper_order(
         sleep_fn(poll_interval_seconds)
 
     filled_quantity = gateway.order_status_snapshot(order_id)
+    # 切断前に観測データのスナップショットを取る(切断後はメッセージループが
+    # 終了しうるため、diagnosticsの意味が変わってしまう)。
+    diagnostics = gateway._broker._session.diagnostics()
+    errors = list(client.errors)
+    open_orders = dict(client.open_orders)
+    executions = list(client.executions)
     gateway.disconnect()
 
     return IbkrFirstPaperConfirmationResult(
@@ -213,6 +233,10 @@ def send_and_confirm_first_paper_order(
                 "再接続照合を検討してください。"
             )
         ),
+        diagnostics=diagnostics,
+        errors=errors,
+        open_orders=open_orders,
+        executions=executions,
     )
 
 
@@ -225,6 +249,9 @@ class IbkrOrderReconciliationResult:
     error_codes: list[int]
     timed_out: bool
     message: str
+    # ===== 観測専用フィールド =====
+    diagnostics: IbkrConnectionDiagnostics | None = None
+    error_events: list[dict] = field(default_factory=list)
 
 
 def reconcile_order_via_readonly_query(
@@ -271,6 +298,7 @@ def reconcile_order_via_readonly_query(
         )
 
     client = broker._session.client
+    diagnostics = broker._session.diagnostics()
 
     def guarded_place_order(*args, **kwargs):
         raise RuntimeError(
@@ -366,6 +394,7 @@ def reconcile_order_via_readonly_query(
             execution["price"],
         )
 
+    error_events = list(client.errors)
     broker.disconnect()
 
     blocking_errors = [
@@ -400,4 +429,6 @@ def reconcile_order_via_readonly_query(
         error_codes=error_codes,
         timed_out=timed_out,
         message=message,
+        diagnostics=diagnostics,
+        error_events=error_events,
     )

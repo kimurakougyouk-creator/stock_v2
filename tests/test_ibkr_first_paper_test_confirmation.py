@@ -10,6 +10,7 @@ from ai_asset_platform.brokers.ibkr_fill_state import IbkrFillStateStore
 from ai_asset_platform.brokers.ibkr_paper_order_guard import (
     IbkrPaperOrderGuardResult,
 )
+from ai_asset_platform.brokers.ibkr_session import IbkrConnectionDiagnostics
 
 
 def _emit_order_status(client, order_id, status, filled, remaining, avg_price):
@@ -55,11 +56,16 @@ class FakeClient:
     calls: list = field(default_factory=list)
     connected: bool = True
     accounts: list = field(default_factory=lambda: [REQUIRED_ACCOUNT_ID])
+    server_version: int | None = 178
     order_status_handler: Callable | None = None
     exec_details_handler: Callable | None = None
     exec_calls: list = field(default_factory=list)
     completed_calls: list = field(default_factory=list)
     error_calls: list = field(default_factory=list)
+    # ===== 観測専用バッファ(実_IbkrPaperClientと同じ役割を模倣する) =====
+    errors: list = field(default_factory=list)
+    open_orders: dict = field(default_factory=dict)
+    executions: list = field(default_factory=list)
 
     def placeOrder(self, order_id, contract, order):  # noqa: N802
         self.calls.append((order_id, contract, order))
@@ -97,6 +103,15 @@ class FakeClient:
 
     def execDetails(self, reqId, contract, execution):  # noqa: N802
         self.exec_calls.append((reqId, contract, execution))
+        self.executions.append(
+            {
+                "req_id": reqId,
+                "order_id": int(execution.orderId),
+                "exec_id": str(execution.execId),
+                "shares": float(execution.shares),
+                "price": float(execution.price),
+            }
+        )
         if self.exec_details_handler is not None:
             self.exec_details_handler(
                 int(execution.orderId),
@@ -108,6 +123,16 @@ class FakeClient:
     def execDetailsEnd(self, reqId):  # noqa: N802
         pass
 
+    def openOrder(self, orderId, contract, order, orderState):  # noqa: N802
+        self.open_orders[int(orderId)] = {
+            "order_id": int(orderId),
+            "symbol": getattr(contract, "symbol", None),
+            "action": getattr(order, "action", None),
+            "quantity": float(getattr(order, "totalQuantity", 0) or 0),
+            "order_type": getattr(order, "orderType", None),
+            "status": getattr(orderState, "status", None),
+        }
+
     def completedOrder(self, contract, order, orderState):  # noqa: N802
         self.completed_calls.append((contract, order, orderState))
 
@@ -118,6 +143,15 @@ class FakeClient:
         self, reqId, errorTime, errorCode, errorString, advancedOrderRejectJson=""
     ):
         self.error_calls.append(errorCode)
+        self.errors.append(
+            {
+                "req_id": reqId,
+                "error_time": errorTime,
+                "code": int(errorCode),
+                "message": str(errorString),
+                "advanced_order_reject_json": advancedOrderRejectJson,
+            }
+        )
 
     def reqExecutions(self, reqId, execFilter):  # noqa: N802
         pass
@@ -131,9 +165,21 @@ class FakeSession:
     client: FakeClient = field(default_factory=FakeClient)
     next_order_id: int = 700
     connected: bool = True
+    message_loop_alive: bool = True
 
     def disconnect(self):
         self.connected = False
+
+    def diagnostics(self) -> IbkrConnectionDiagnostics:
+        return IbkrConnectionDiagnostics(
+            server_version=self.client.server_version,
+            next_valid_id=self.client.next_order_id
+            if hasattr(self.client, "next_order_id")
+            else self.next_order_id,
+            is_connected=self.client.isConnected(),
+            message_loop_alive=self.message_loop_alive,
+            message_loop_exception=None,
+        )
 
 
 class FakeClock:
@@ -324,6 +370,113 @@ def test_timeout_when_never_reaching_terminal_state(monkeypatch, tmp_path):
     assert result.last_known_status == "PreSubmitted"
 
 
+# --- 観測機能: error/openOrder/execDetails/診断情報を握りつぶさず報告する ---
+
+
+def test_uncommon_error_code_is_captured_not_swallowed(monkeypatch, tmp_path):
+    """以前は502/503/504/1100以外のエラーコードが完全に握りつぶされていた。
+    観測機能追加後は、監視ウィンドウ中に届いた任意のエラーコードが
+    result.errorsへ残ること、かつplaceOrderの回数には影響しないことを検証する。
+    """
+    session = FakeSession()
+    _patch_send_path(monkeypatch, session)
+    clock = FakeClock()
+
+    def fake_place_order(order_id, contract, order):
+        session.client.calls.append((order_id, contract, order))
+        # 200 = No security definition has been found (以前は完全に不可視だった)
+        session.client.error(order_id, 0, 200, "No security definition found", "")
+        _emit_order_status(session.client, order_id, "Filled", 1.0, 0.0, 150.0)
+
+    session.client.placeOrder = fake_place_order
+
+    result = send_and_confirm_first_paper_order(
+        fill_state_path=tmp_path / "fills.json",
+        lock_path=tmp_path / "send.lock",
+        now_fn=clock.now,
+        sleep_fn=lambda dt: clock.advance(dt),
+    )
+
+    assert result.status == "TERMINAL"
+    assert len(session.client.calls) == 1
+    assert any(e["code"] == 200 for e in result.errors)
+    assert result.errors[0]["message"] == "No security definition found"
+
+
+def test_open_order_seen_during_monitoring_is_surfaced(monkeypatch, tmp_path):
+    class FakeOrderState:
+        status = "PreSubmitted"
+
+    session = FakeSession()
+    _patch_send_path(monkeypatch, session)
+    clock = FakeClock()
+
+    def fake_place_order(order_id, contract, order):
+        session.client.calls.append((order_id, contract, order))
+        session.client.openOrder(order_id, contract, order, FakeOrderState())
+        _emit_order_status(session.client, order_id, "Filled", 1.0, 0.0, 150.0)
+
+    session.client.placeOrder = fake_place_order
+
+    result = send_and_confirm_first_paper_order(
+        fill_state_path=tmp_path / "fills.json",
+        lock_path=tmp_path / "send.lock",
+        now_fn=clock.now,
+        sleep_fn=lambda dt: clock.advance(dt),
+    )
+
+    assert len(session.client.calls) == 1
+    assert result.order_id in result.open_orders
+    assert result.open_orders[result.order_id]["status"] == "PreSubmitted"
+
+
+def test_diagnostics_reports_server_version_and_next_valid_id(monkeypatch, tmp_path):
+    session = FakeSession(client=FakeClient(server_version=178), next_order_id=42)
+    _patch_send_path(monkeypatch, session)
+    clock = FakeClock()
+
+    def fake_place_order(order_id, contract, order):
+        session.client.calls.append((order_id, contract, order))
+        _emit_order_status(session.client, order_id, "Filled", 1.0, 0.0, 150.0)
+
+    session.client.placeOrder = fake_place_order
+
+    result = send_and_confirm_first_paper_order(
+        fill_state_path=tmp_path / "fills.json",
+        lock_path=tmp_path / "send.lock",
+        now_fn=clock.now,
+        sleep_fn=lambda dt: clock.advance(dt),
+    )
+
+    assert result.diagnostics is not None
+    assert result.diagnostics.server_version == 178
+    assert result.diagnostics.is_connected is True
+
+
+def test_observability_does_not_trigger_place_order_when_blocked(monkeypatch, tmp_path):
+    """口座不一致でBLOCKEDになるケースでも、観測データは収集されるが
+    placeOrderは1回も呼ばれないこと(観測機能追加が安全装置を弱めていない)。
+    """
+    session = FakeSession(client=FakeClient(accounts=["OTHER_ACCOUNT"]))
+    _patch_send_path(monkeypatch, session)
+
+    def fake_place_order(order_id, contract, order):
+        session.client.calls.append((order_id, contract, order))
+
+    session.client.placeOrder = fake_place_order
+
+    result = send_and_confirm_first_paper_order(
+        fill_state_path=tmp_path / "fills.json",
+        lock_path=tmp_path / "send.lock",
+        account_verification_timeout=0.05,
+    )
+
+    assert result.status == "NOT_SENT"
+    assert result.send_result.status == "BLOCKED_ACCOUNT_MISMATCH"
+    assert session.client.calls == []
+    assert result.diagnostics is not None
+
+
 # --- 接続失敗時は送信しない ---
 
 
@@ -410,6 +563,38 @@ def _patch_reconciliation_path(monkeypatch, session):
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr.open_ibkr_paper_session",
         lambda config, **kwargs: session,
+    )
+
+
+def test_reconciliation_reports_diagnostics_and_full_error_events(
+    monkeypatch, tmp_path
+):
+    session = FakeSession(client=FakeClient(server_version=178))
+
+    def fake_req_executions(reqId, execFilter):
+        session.client.error(reqId, 0, 321, "read-only API")
+        session.client.execDetailsEnd(reqId)
+
+    def fake_req_completed(apiOnly):
+        session.client.completedOrdersEnd()
+
+    session.client.reqExecutions = fake_req_executions
+    session.client.reqCompletedOrders = fake_req_completed
+    _patch_reconciliation_path(monkeypatch, session)
+
+    result = reconcile_order_via_readonly_query(
+        1,
+        fill_state_path=tmp_path / "fills.json",
+        now_fn=lambda: 0.0,
+        sleep_fn=lambda dt: None,
+    )
+
+    assert result.diagnostics is not None
+    assert result.diagnostics.server_version == 178
+    assert result.diagnostics.is_connected is True
+    assert any(
+        e["code"] == 321 and e["message"] == "read-only API"
+        for e in result.error_events
     )
 
 
