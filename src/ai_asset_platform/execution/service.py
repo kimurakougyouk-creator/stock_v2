@@ -2,6 +2,9 @@
 注文、約定、口座反映をまとめて安全に実行するサービス
 """
 
+from dataclasses import dataclass
+from typing import Callable
+
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.orders import (
     FillResult,
@@ -12,14 +15,25 @@ from ai_asset_platform.brokers.orders import (
 from ai_asset_platform.brokers.base import BrokerAdapter
 
 
+@dataclass(frozen=True)
+class RiskGateResult:
+    allowed: bool
+    reason: str = ""
+
+
+RiskGate = Callable[[OrderRequest], RiskGateResult]
+
+
 class ExecutionService:
     def __init__(
         self,
         broker: BrokerAdapter,
         account: Account,
+        risk_gate: RiskGate | None = None,
     ) -> None:
         self._broker = broker
         self._account = account
+        self._risk_gate = risk_gate
 
     @property
     def broker(self) -> BrokerAdapter:
@@ -79,12 +93,9 @@ class ExecutionService:
     ):
         """IBKR Paper専用の非同期注文経路。
 
-        BrokerAdapterの共通同期fill_order()は使わず、Phase 1で実装済みの
-        place_order_and_await_fill()を1回だけ呼ぶ。タイムアウト、拒否、
-        UNKNOWN、取消などを成功扱いせず、Filledを直接観測できた場合だけ
-        Accountへ約定を反映する。
-
-        Live用経路ではない。IBKR以外の既存同期経路は変更しない。
+        共有Risk Gateを送信前に必ず評価する。ブロック時はbrokerの
+        place_order_and_await_fill()へ到達しない。Risk Gate未注入時は
+        Phase 2までの後方互換挙動を維持する。
         """
         from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 
@@ -93,6 +104,8 @@ class ExecutionService:
 
         if not self._broker.is_connected():
             raise RuntimeError("IBKRへ接続されていません")
+
+        self._check_risk_gate(order)
 
         result = self._broker.place_order_and_await_fill(
             order,
@@ -125,6 +138,18 @@ class ExecutionService:
         )
         self._account.apply_fill(fill)
         return result
+
+    def _check_risk_gate(self, order: OrderRequest) -> None:
+        if self._risk_gate is None:
+            return
+
+        decision = self._risk_gate(order)
+        if not isinstance(decision, RiskGateResult):
+            raise TypeError("risk_gateはRiskGateResultを返してください")
+
+        if not decision.allowed:
+            reason = decision.reason or "Risk Gateにより注文が拒否されました"
+            raise RuntimeError(reason)
 
     def _validate_account(
         self,
