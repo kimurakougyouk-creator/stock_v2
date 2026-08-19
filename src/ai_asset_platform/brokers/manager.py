@@ -3,6 +3,7 @@
 """
 
 from ai_asset_platform.brokers.base import BrokerAdapter
+from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.sbi_paper import SbiPaperAdapter
 from ai_asset_platform.core.settings import SETTINGS
 
@@ -23,6 +24,14 @@ class BrokerManager:
         if selected in {"SBI", "SBI_PAPER"}:
             return SbiPaperAdapter()
 
+        # IBKRは「IBKR_PAPER」の明示指定かつ設定opt-in時だけ生成する。
+        # available/defaultには追加しないため、暗黙に選択されることはない。
+        if selected == "IBKR_PAPER":
+            if not SETTINGS.enable_ibkr_paper:
+                raise ValueError("IBKR Paper Tradingは明示的に有効化されていません。")
+            return IbkrBrokerAdapter()
+
+        # "IBKR" / "IBKR_LIVE" 等は意図的に未対応のまま拒否する。
         raise ValueError(f"未対応の証券会社です: {selected}")
 
 
