@@ -6,7 +6,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class IbkrConnectionConfig:
     host: str = "127.0.0.1"
-    port: int = 7497
+    port: int = 4002
     client_id: int = 0
     paper_trading: bool = True
     allow_live_trading: bool = False
@@ -29,7 +29,7 @@ class IbkrConnectionConfig:
 
 def create_ibkr_paper_config(
     *,
-    use_gateway: bool = False,
+    use_gateway: bool = True,
 ) -> IbkrConnectionConfig:
     return IbkrConnectionConfig(
         host="127.0.0.1",
