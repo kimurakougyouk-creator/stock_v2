@@ -28,13 +28,12 @@ def _is_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
 def run_ibkr_paper_preflight(
     timeout: float = 1.0,
     *,
-    use_gateway: bool = False,
+    use_gateway: bool = True,
 ) -> IbkrPreflightResult:
     """IBKR Paper接続前の安全な自動診断。注文は一切送信しない。
 
-    use_gateway=False (デフォルト) はTWS Paper Trading (127.0.0.1:7497)、
-    use_gateway=True はIB Gateway Paper Trading (127.0.0.1:4002) を確認する。
-    既存呼び出し側の動作(TWS/7497)はデフォルト値により変わらない。
+    use_gateway=True (デフォルト) はIB Gateway Paper Trading (127.0.0.1:4002)、
+    use_gateway=False はTWS Paper Trading (127.0.0.1:7497) を確認する。
     """
     config = create_ibkr_paper_config(use_gateway=use_gateway)
     diagnostic = diagnose_ibkr_environment()
@@ -55,7 +54,7 @@ def run_ibkr_paper_preflight(
 
     if not tws_port_open:
         return IbkrPreflightResult(
-            status="WAITING_FOR_TWS",
+            status="WAITING_FOR_GATEWAY" if use_gateway else "WAITING_FOR_TWS",
             api_ready=True,
             tws_port_open=False,
             host=config.host,
@@ -86,7 +85,7 @@ def main() -> None:
     print("===== IBKR PAPER PREFLIGHT =====")
     print(f"STATUS       : {result.status}")
     print(f"API READY    : {result.api_ready}")
-    print(f"TWS PORT OPEN: {result.tws_port_open}")
+    print(f"IBKR PORT OPEN: {result.tws_port_open}")
     print(f"HOST         : {result.host}")
     print(f"PORT         : {result.port}")
     print(f"MESSAGE      : {result.message}")
