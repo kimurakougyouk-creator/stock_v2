@@ -6,12 +6,24 @@ from ai_asset_platform.brokers.ibkr_config import (
 )
 
 
-def test_tws_paper_config_is_safe():
+def test_default_paper_config_uses_gateway_safely():
     config = create_ibkr_paper_config()
 
     assert config.host == "127.0.0.1"
-    assert config.port == 7497
+    assert config.port == 4002
     assert config.client_id == 0
+    assert config.paper_trading is True
+    assert config.allow_live_trading is False
+
+    config.validate()
+
+
+def test_tws_paper_can_be_selected_explicitly():
+    config = create_ibkr_paper_config(
+        use_gateway=False,
+    )
+
+    assert config.port == 7497
     assert config.paper_trading is True
     assert config.allow_live_trading is False
 
