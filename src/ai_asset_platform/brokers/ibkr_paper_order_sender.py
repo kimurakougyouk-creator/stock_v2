@@ -56,6 +56,9 @@ def prepare_ibkr_paper_order(
         "BUY" if request.side is OrderSide.BUY else "SELL"
     )
     ib_order.totalQuantity = request.quantity
+    # ibapiのOrder既定値は空文字列("Time in Force"未設定)であり、
+    # IBKRはこれをエラー10052「無効な有効期限:空白」として拒否する。
+    ib_order.tif = "DAY"
 
     if request.order_type is OrderType.MARKET:
         ib_order.orderType = "MKT"

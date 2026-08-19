@@ -32,6 +32,7 @@ def test_prepares_safe_market_buy_without_transmission():
     assert prepared.order.action == "BUY"
     assert prepared.order.totalQuantity == 1
     assert prepared.order.orderType == "MKT"
+    assert prepared.order.tif == "DAY"
     assert prepared.order.transmit is False
 
 
@@ -50,7 +51,25 @@ def test_prepares_safe_limit_sell_without_transmission():
     assert prepared.order.action == "SELL"
     assert prepared.order.orderType == "LMT"
     assert prepared.order.lmtPrice == 250.0
+    assert prepared.order.tif == "DAY"
     assert prepared.order.transmit is False
+
+
+def test_tif_is_always_set_to_day_not_left_blank():
+    """IBKRはtif未設定(空文字列)の注文をエラー10052
+    「無効な有効期限:空白」として拒否する。この回帰を防ぐための専用テスト。
+    """
+    prepared = prepare_ibkr_paper_order(
+        OrderRequest(
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            quantity=1,
+        ),
+        create_ibkr_paper_config(),
+    )
+
+    assert prepared.order.tif == "DAY"
+    assert prepared.order.tif != ""
 
 
 def test_blocks_quantity_greater_than_one():
