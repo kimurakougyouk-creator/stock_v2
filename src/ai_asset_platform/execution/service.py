@@ -90,12 +90,16 @@ class ExecutionService:
         order_intent_id: str,
         timeout_seconds: float = 30.0,
         poll_interval_seconds: float = 0.5,
+        apply_account_fill: bool = True,
     ):
         """IBKR Paper専用の非同期注文経路。
 
         共有Risk Gateを送信前に必ず評価する。ブロック時はbrokerの
-        place_order_and_await_fill()へ到達しない。Risk Gate未注入時は
-        Phase 2までの後方互換挙動を維持する。
+        place_order_and_await_fill()へ到達しない。
+
+        ``apply_account_fill=False`` は、移行期間中に legacy の永続取引履歴を
+        唯一の会計状態として使う呼び出し側専用。IBKRの送信・Filled判定には
+        影響せず、メモリAccountへの二重反映だけを止める。
         """
         from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 
@@ -129,14 +133,15 @@ class ExecutionService:
         if float(filled_quantity) != result.filled_quantity:
             raise RuntimeError("端数株の約定は現在のAccountモデルへ反映できません")
 
-        fill = FillResult(
-            order_id=str(result.order_id),
-            symbol=order.symbol,
-            side=order.side,
-            quantity=filled_quantity,
-            fill_price=result.avg_fill_price,
-        )
-        self._account.apply_fill(fill)
+        if apply_account_fill:
+            fill = FillResult(
+                order_id=str(result.order_id),
+                symbol=order.symbol,
+                side=order.side,
+                quantity=filled_quantity,
+                fill_price=result.avg_fill_price,
+            )
+            self._account.apply_fill(fill)
         return result
 
     def _check_risk_gate(self, order: OrderRequest) -> None:
