@@ -13,17 +13,18 @@ def test_paper_runner_enables_orders_only_for_paper(monkeypatch):
         "SETTINGS",
         SimpleNamespace(
             enable_paper_trading=True,
+            enable_ibkr_paper=True,
             enable_live_trading=False,
             live_trading_unlocked=False,
         ),
     )
     monkeypatch.setattr(
-        paper_trading_runner,
+        paper_trading_runner.signal_runner,
         "_create_configured_ai_provider",
         lambda: "TEST_AI",
     )
     monkeypatch.setattr(
-        paper_trading_runner,
+        paper_trading_runner.signal_runner,
         "run_signal_scan",
         lambda **kwargs: calls.append(kwargs)
         or {
@@ -54,11 +55,29 @@ def test_paper_runner_rejects_disabled_paper(monkeypatch):
         "SETTINGS",
         SimpleNamespace(
             enable_paper_trading=False,
+            enable_ibkr_paper=True,
+            enable_live_trading=False,
             live_trading_unlocked=False,
         ),
     )
 
     with pytest.raises(RuntimeError, match="Paper Tradingが無効"):
+        paper_trading_runner.run_paper_trading()
+
+
+def test_paper_runner_rejects_disabled_ibkr_paper(monkeypatch):
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "SETTINGS",
+        SimpleNamespace(
+            enable_paper_trading=True,
+            enable_ibkr_paper=False,
+            enable_live_trading=False,
+            live_trading_unlocked=False,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="IBKR Paperが無効"):
         paper_trading_runner.run_paper_trading()
 
 
@@ -68,6 +87,7 @@ def test_paper_runner_rejects_live_unlocked(monkeypatch):
         "SETTINGS",
         SimpleNamespace(
             enable_paper_trading=True,
+            enable_ibkr_paper=True,
             enable_live_trading=False,
             live_trading_unlocked=True,
         ),
@@ -123,6 +143,7 @@ def test_paper_runner_rejects_live_trading_enabled(monkeypatch):
         "SETTINGS",
         SimpleNamespace(
             enable_paper_trading=True,
+            enable_ibkr_paper=True,
             enable_live_trading=True,
             live_trading_unlocked=False,
         ),
