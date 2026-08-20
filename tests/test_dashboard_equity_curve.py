@@ -1,4 +1,5 @@
 import json
+from config import TRADING_CAPITAL
 from dashboard import build_dashboard_html, write_dashboard_html
 
 
@@ -9,8 +10,9 @@ def test_dashboard_renders_total_asset_equity_and_drawdown(tmp_path):
     ]
     (tmp_path / "paper_orders.jsonl").write_text("".join(json.dumps(x) + "\n" for x in orders), encoding="utf-8")
     html = build_dashboard_html(tmp_path)
+    expected_total_assets = float(TRADING_CAPITAL) + 40.0
     assert "総資産（Equity）" in html
-    assert "1,040円" in html
+    assert f"{expected_total_assets:,.0f}円" in html
     assert "総資産ベース最大Drawdown" in html
     assert "Equity Curve" in html
 
