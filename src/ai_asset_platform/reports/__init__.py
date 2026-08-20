@@ -1,4 +1,5 @@
 from ai_asset_platform.reports.equity_chart import save_equity_chart
+from ai_asset_platform.reports.equity_dashboard import build_equity_summary_html
 from ai_asset_platform.reports.equity_history import (
     EquityPoint,
     append_equity_history,
@@ -34,6 +35,7 @@ __all__ = [
     "append_equity_history",
     "append_performance_history",
     "build_equity_point",
+    "build_equity_summary_html",
     "calculate_equity_curve",
     "calculate_maximum_drawdown",
     "calculate_performance",
