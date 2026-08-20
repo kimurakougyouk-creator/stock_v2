@@ -1,81 +1,21 @@
-"""
-Paper Trading専用ランナー。
-
-安全方針:
-- Paper Tradingが有効な場合だけ実行する
-- IBKR Paperが明示的に有効な場合だけIBKRへ送信する
-- Live Tradingが有効/解除されている場合は実行しない
-- signal_runnerの既存リスク判定を通過した注文だけをIBKR Paperへ渡す
-- IBKRでFilled確認できた注文だけを既存取引履歴へ反映する
-"""
-
-import json
-from pathlib import Path
-
+"""Paper Trading専用ランナー。"""
 from config import TRADING_CAPITAL
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.ibkr_signal_runtime import execute_approved_signal_via_ibkr_paper
-from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.paper_trading_loop import run_paper_trading_loop
-from ai_asset_platform.reports import append_equity_history, legacy_orders_to_equity
+from ai_asset_platform.reports.equity_history import append_equity_history, calculate_equity_curve
 from ai_asset_platform.reports.paper_trading_health import evaluate_paper_trading_health
+import order_manager
 import signal_runner
 
 
-def _read_legacy_orders(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(item, dict):
-                rows.append(item)
-    return rows
-
-
-def _latest_order_prices(orders: list[dict]) -> dict[str, float]:
-    prices: dict[str, float] = {}
-    for item in orders:
-        ticker = str(item.get("ticker") or "").strip()
-        if not ticker:
-            continue
-        try:
-            price = float(item.get("reference_price"))
-        except (TypeError, ValueError):
-            continue
-        if price > 0:
-            prices[ticker] = price
-    return prices
-
-
-def _sync_confirmed_fill_to_reporting(order: dict) -> None:
-    """Persist one confirmed fill to legacy accounting and total-asset equity.
-
-    This function never sends an order. Duplicate ``order_intent_id`` values are
-    idempotent in both the legacy ledger and equity history.
-    """
-    order_log_path = Path("results") / "paper_orders.jsonl"
-    equity_path = Path("results") / "equity_history.csv"
-    record_confirmed_fill(
-        ticker=str(order["ticker"]),
-        side=str(order["side"]),
-        filled_quantity=float(order["shares"]),
-        avg_fill_price=float(order["reference_price"]),
-        order_intent_id=str(order["order_intent_id"]),
-        order_log_path=order_log_path,
-    )
-    orders = _read_legacy_orders(order_log_path)
-    points = legacy_orders_to_equity(
-        orders,
-        initial_cash=float(TRADING_CAPITAL),
-        market_prices=_latest_order_prices(orders),
-    )
-    for point in points:
-        append_equity_history(equity_path, point)
+def _sync_confirmed_fill_to_reporting() -> None:
+    """確定約定から実現損益と総資産履歴を冪等に再生成する。注文は送信しない。"""
+    order_manager.save_realized_trade_pnls()
+    orders = order_manager.load_paper_orders()
+    equity_points = calculate_equity_curve(orders, initial_capital=float(TRADING_CAPITAL))
+    if equity_points:
+        append_equity_history(equity_points[-1], order_manager.ORDER_LOG_DIR / "equity_history.csv")
 
 
 def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, reference_price: float) -> dict:
@@ -88,11 +28,17 @@ def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, r
         f"{normalized_price:.8f}"
     )
     execution = execute_approved_signal_via_ibkr_paper(
-        ticker=str(ticker), signal=normalized_signal, shares=normalized_shares, order_intent_id=order_intent_id,
+        ticker=str(ticker),
+        signal=normalized_signal,
+        shares=normalized_shares,
+        order_intent_id=order_intent_id,
+        order_log_path=order_manager.ORDER_LOG_PATH,
     )
     result = execution.broker_result
     filled = (
-        execution.attempted and result is not None and getattr(result, "sent", False)
+        execution.attempted
+        and result is not None
+        and getattr(result, "sent", False)
         and getattr(result, "reached_terminal", False)
         and getattr(result, "last_known_status", None) == "Filled"
         and float(getattr(result, "filled_quantity", 0.0)) > 0
@@ -101,13 +47,16 @@ def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, r
     )
     if not filled:
         raise RuntimeError("IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。")
-    order = {
-        "mode": "IBKR_PAPER", "ticker": str(ticker), "side": normalized_signal,
-        "shares": int(float(result.filled_quantity)), "reference_price": float(result.avg_fill_price),
-        "status": "FILLED", "order_intent_id": order_intent_id,
+    _sync_confirmed_fill_to_reporting()
+    return {
+        "mode": "IBKR_PAPER",
+        "ticker": str(ticker),
+        "side": normalized_signal,
+        "shares": int(float(result.filled_quantity)),
+        "reference_price": float(result.avg_fill_price),
+        "status": "FILLED",
+        "order_intent_id": order_intent_id,
     }
-    _sync_confirmed_fill_to_reporting(order)
-    return order
 
 
 def run_paper_trading() -> dict:
