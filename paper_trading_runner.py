@@ -9,13 +9,50 @@ Paper Trading専用ランナー。
 - IBKRでFilled確認できた注文だけを既存取引履歴へ反映する
 """
 
+from pathlib import Path
+
+from config import TRADING_CAPITAL
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.ibkr_signal_runtime import (
     execute_approved_signal_via_ibkr_paper,
 )
+from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.paper_trading_loop import run_paper_trading_loop
+from ai_asset_platform.reports import append_equity_history, legacy_orders_to_equity
 from ai_asset_platform.reports.paper_trading_health import evaluate_paper_trading_health
 import signal_runner
+
+
+def _sync_confirmed_fill_to_reporting(order: dict) -> None:
+    """Persist one confirmed fill to legacy accounting and total-asset equity.
+
+    This function never sends an order. Duplicate ``order_intent_id`` values are
+    idempotent in both the legacy ledger and equity history.
+    """
+    order_log_path = Path("results") / "paper_orders.jsonl"
+    equity_path = Path("results") / "equity_history.csv"
+    record_confirmed_fill(
+        ticker=str(order["ticker"]),
+        side=str(order["side"]),
+        filled_quantity=float(order["shares"]),
+        avg_fill_price=float(order["reference_price"]),
+        order_intent_id=str(order["order_intent_id"]),
+        order_log_path=order_log_path,
+    )
+
+    orders = signal_runner.load_paper_orders()
+    latest_prices = {
+        str(item.get("ticker")): float(item.get("reference_price"))
+        for item in orders
+        if item.get("ticker") and item.get("reference_price") is not None
+    }
+    points = legacy_orders_to_equity(
+        orders,
+        initial_cash=float(TRADING_CAPITAL),
+        market_prices=latest_prices,
+    )
+    for point in points:
+        append_equity_history(equity_path, point)
 
 
 def _execute_confirmed_ibkr_paper_order(
@@ -29,7 +66,6 @@ def _execute_confirmed_ibkr_paper_order(
     normalized_shares = int(shares)
     normalized_price = float(reference_price)
 
-    # 同じ確定シグナルの再実行で二重送信しないため、入力から安定IDを作る。
     order_intent_id = (
         "signal-runner:"
         f"{ticker}:{normalized_signal}:{normalized_shares}:"
@@ -60,7 +96,7 @@ def _execute_confirmed_ibkr_paper_order(
             "注文済みとして記録しません。"
         )
 
-    return {
+    order = {
         "mode": "IBKR_PAPER",
         "ticker": str(ticker),
         "side": normalized_signal,
@@ -69,35 +105,21 @@ def _execute_confirmed_ibkr_paper_order(
         "status": "FILLED",
         "order_intent_id": order_intent_id,
     }
+    _sync_confirmed_fill_to_reporting(order)
+    return order
 
 
 def run_paper_trading() -> dict:
     if not SETTINGS.enable_paper_trading:
-        raise RuntimeError(
-            "Paper Tradingが無効です。実行を中止しました。"
-        )
-
+        raise RuntimeError("Paper Tradingが無効です。実行を中止しました。")
     if not SETTINGS.enable_ibkr_paper:
-        raise RuntimeError(
-            "IBKR Paperが無効です。実行を中止しました。"
-        )
-
+        raise RuntimeError("IBKR Paperが無効です。実行を中止しました。")
     if SETTINGS.enable_live_trading:
-        raise RuntimeError(
-            "Live Tradingが有効なため、"
-            "安全のためPaper試運転を中止しました。"
-        )
-
+        raise RuntimeError("Live Tradingが有効なため、安全のためPaper試運転を中止しました。")
     if SETTINGS.live_trading_unlocked:
-        raise RuntimeError(
-            "Live Tradingが解除されているため、"
-            "安全のためPaper試運転を中止しました。"
-        )
+        raise RuntimeError("Live Tradingが解除されているため、安全のためPaper試運転を中止しました。")
 
     ai_provider = signal_runner._create_configured_ai_provider()
-
-    # signal_runner本体の全リスク判定は維持し、最終発注関数だけを
-    # この実行中にIBKR Paperの確定約定アダプタへ差し替える。
     original_create_paper_order = signal_runner.create_paper_order
     signal_runner.create_paper_order = _execute_confirmed_ibkr_paper_order
     try:
@@ -110,15 +132,8 @@ def run_paper_trading() -> dict:
         signal_runner.create_paper_order = original_create_paper_order
 
 
-def run_continuous_paper_trading(
-    *,
-    max_runs: int = 3,
-):
-    """Paper Tradingを安全に複数回実行し、ERROR時は自動停止する。"""
-    return run_paper_trading_loop(
-        run_once=run_paper_trading,
-        max_runs=max_runs,
-    )
+def run_continuous_paper_trading(*, max_runs: int = 3):
+    return run_paper_trading_loop(run_once=run_paper_trading, max_runs=max_runs)
 
 
 def main() -> None:
@@ -127,17 +142,10 @@ def main() -> None:
     print("Live Trading : OFF")
     print("IBKR Paper   : ON")
     print("=" * 50)
-
     result = run_paper_trading()
-
     signal_count = len(result["records"])
     error_count = len(result["errors"])
-
-    health = evaluate_paper_trading_health(
-        signal_count=signal_count,
-        error_count=error_count,
-    )
-
+    health = evaluate_paper_trading_health(signal_count=signal_count, error_count=error_count)
     print("=" * 50)
     print("IBKR Paper Trading実行結果")
     print(f"診断結果    : {health.status}")
