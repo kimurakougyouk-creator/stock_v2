@@ -51,7 +51,7 @@ def build_equity_point(
         timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
         order_intent_id=order_intent_id,
         cash=float(summary["cash"]),
-        market_value=float(summary["market_value"]),
+        market_value=float(summary["holdings"]),
         total_assets=float(summary["total_assets"]),
     )
 
