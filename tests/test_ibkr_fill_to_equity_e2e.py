@@ -16,7 +16,7 @@ def _filled_result():
     return SimpleNamespace(attempted=True, broker_result=broker_result)
 
 
-def test_confirmed_ibkr_fill_updates_trade_and_equity_reporting(monkeypatch, tmp_path):
+def test_confirmed_ibkr_fill_updates_trade_equity_and_drawdown_reporting(monkeypatch, tmp_path):
     monkeypatch.setattr(order_manager, "ORDER_LOG_DIR", tmp_path)
     monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", tmp_path / "paper_orders.jsonl")
     monkeypatch.setattr(order_manager, "TRADE_PNL_PATH", tmp_path / "paper_trade_pnls.json")
@@ -34,6 +34,10 @@ def test_confirmed_ibkr_fill_updates_trade_and_equity_reporting(monkeypatch, tmp
     paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
     assert (tmp_path / "paper_trade_pnls.json").exists()
     assert (tmp_path / "equity_history.csv").exists()
+    drawdown_path = tmp_path / "paper_drawdown.json"
+    assert drawdown_path.exists()
+    drawdown = json.loads(drawdown_path.read_text(encoding="utf-8"))
+    assert drawdown == {"maximum_drawdown": 0.0, "equity_points": 1}
 
 
 def test_reexecution_same_intent_does_not_double_count(monkeypatch, tmp_path):
@@ -59,3 +63,6 @@ def test_reexecution_same_intent_does_not_double_count(monkeypatch, tmp_path):
     assert len(equity_lines) == 2
     payload = json.loads((tmp_path / "paper_trade_pnls.json").read_text())
     assert payload["realized_trade_pnls"] == []
+    drawdown = json.loads((tmp_path / "paper_drawdown.json").read_text(encoding="utf-8"))
+    assert drawdown["equity_points"] == 1
+    assert drawdown["maximum_drawdown"] == 0.0
