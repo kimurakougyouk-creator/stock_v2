@@ -34,7 +34,8 @@ def legacy_orders_to_equity(
             seen_without_intent += 1
             intent = f"legacy:{seen_without_intent}:{ticker}:{side.value}:{shares}:{price:.8f}"
 
-        latest_prices.setdefault(ticker, price)
+        if ticker not in latest_prices:
+            latest_prices[ticker] = price
         normalized.append(
             (
                 intent,
