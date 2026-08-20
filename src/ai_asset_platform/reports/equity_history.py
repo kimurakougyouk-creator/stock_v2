@@ -65,17 +65,20 @@ def replay_fills_to_equity(
     account = Account(initial_cash=initial_cash)
     points: list[EquityPoint] = []
     seen: set[str] = set()
-    prices: dict[str, float] = dict(market_prices or {})
+    explicit_prices = dict(market_prices or {})
+    replay_prices: dict[str, float] = {}
     for order_intent_id, fill in fills:
         if order_intent_id in seen:
             continue
         account.apply_fill(fill)
         seen.add(order_intent_id)
-        prices[fill.symbol] = float(fill.fill_price)
+        replay_prices[fill.symbol] = float(fill.fill_price)
+        valuation_prices = dict(replay_prices)
+        valuation_prices.update(explicit_prices)
         points.append(
             build_equity_point(
                 account,
-                market_prices=prices,
+                market_prices=valuation_prices,
                 order_intent_id=order_intent_id,
             )
         )
