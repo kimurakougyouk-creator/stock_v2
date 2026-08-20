@@ -37,6 +37,21 @@ def _read_legacy_orders(path: Path) -> list[dict]:
     return rows
 
 
+def _latest_order_prices(orders: list[dict]) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    for item in orders:
+        ticker = str(item.get("ticker") or "").strip()
+        if not ticker:
+            continue
+        try:
+            price = float(item.get("reference_price"))
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            prices[ticker] = price
+    return prices
+
+
 def _sync_confirmed_fill_to_reporting(order: dict) -> None:
     """Persist one confirmed fill to legacy accounting and total-asset equity.
 
@@ -53,17 +68,11 @@ def _sync_confirmed_fill_to_reporting(order: dict) -> None:
         order_intent_id=str(order["order_intent_id"]),
         order_log_path=order_log_path,
     )
-
     orders = _read_legacy_orders(order_log_path)
-    latest_prices = {
-        str(item.get("ticker")): float(item.get("reference_price"))
-        for item in orders
-        if item.get("ticker") and item.get("reference_price") is not None
-    }
     points = legacy_orders_to_equity(
         orders,
         initial_cash=float(TRADING_CAPITAL),
-        market_prices=latest_prices,
+        market_prices=_latest_order_prices(orders),
     )
     for point in points:
         append_equity_history(equity_path, point)
@@ -73,7 +82,11 @@ def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, r
     normalized_signal = str(signal).upper()
     normalized_shares = int(shares)
     normalized_price = float(reference_price)
-    order_intent_id = "signal-runner:" f"{ticker}:{normalized_signal}:{normalized_shares}:" f"{normalized_price:.8f}"
+    order_intent_id = (
+        "signal-runner:"
+        f"{ticker}:{normalized_signal}:{normalized_shares}:"
+        f"{normalized_price:.8f}"
+    )
     execution = execute_approved_signal_via_ibkr_paper(
         ticker=str(ticker), signal=normalized_signal, shares=normalized_shares, order_intent_id=order_intent_id,
     )
