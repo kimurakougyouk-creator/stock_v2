@@ -3,7 +3,25 @@ AI資産運用プラットフォーム 共通設定
 Version 3.1 development
 """
 
+import os
 from dataclasses import dataclass, field
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """Read an explicit boolean opt-in from the environment.
+
+    Only well-known true/false spellings are accepted. Invalid values fail
+    closed instead of accidentally enabling a trading capability.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 @dataclass(frozen=True)
@@ -29,9 +47,11 @@ class PlatformSettings:
     trailing_stop_percent = 5.0
     enable_paper_trading: bool = True
     enable_live_trading: bool = False
-    # IBKRは明示的opt-in時のみBrokerManagerから生成可能にする。
-    # supported_brokersには追加せず、既定Brokerにはしない。
-    enable_ibkr_paper: bool = False
+    # Fail closed by default. Paper transmission is enabled only for a process
+    # explicitly started with AI_ASSET_ENABLE_IBKR_PAPER=true.
+    enable_ibkr_paper: bool = field(
+        default_factory=lambda: _env_flag("AI_ASSET_ENABLE_IBKR_PAPER", default=False)
+    )
     supported_markets: tuple[str, ...] = field(
         default_factory=lambda: ("JP_STOCK",)
     )
