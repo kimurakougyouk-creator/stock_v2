@@ -1,39 +1,61 @@
 import json
+from types import SimpleNamespace
 
-from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
-from ai_asset_platform.reports import append_equity_history, legacy_orders_to_equity
+import order_manager
+import paper_trading_runner
 
 
-def test_confirmed_fill_to_equity_is_idempotent_without_sending_order(tmp_path):
-    order_log = tmp_path / "paper_orders.jsonl"
-    equity_path = tmp_path / "equity_history.csv"
-
-    first = record_confirmed_fill(
-        ticker="AAPL",
-        side="BUY",
-        filled_quantity=1,
+def _filled_result():
+    broker_result = SimpleNamespace(
+        sent=True,
+        reached_terminal=True,
+        last_known_status="Filled",
+        filled_quantity=1.0,
         avg_fill_price=100.0,
-        order_intent_id="intent-1",
-        order_log_path=order_log,
     )
-    second = record_confirmed_fill(
-        ticker="AAPL",
-        side="BUY",
-        filled_quantity=1,
-        avg_fill_price=100.0,
-        order_intent_id="intent-1",
-        order_log_path=order_log,
-    )
-    assert first == second
+    return SimpleNamespace(attempted=True, broker_result=broker_result)
 
-    rows = [json.loads(line) for line in order_log.read_text().splitlines()]
-    assert len(rows) == 1
-    points = legacy_orders_to_equity(
-        rows,
-        initial_cash=1000.0,
-        market_prices={"AAPL": 110.0},
-    )
-    assert len(points) == 1
-    assert points[0].total_assets == 1010.0
-    assert append_equity_history(equity_path, points[0]) is True
-    assert append_equity_history(equity_path, points[0]) is False
+
+def test_confirmed_ibkr_fill_updates_trade_and_equity_reporting(monkeypatch, tmp_path):
+    monkeypatch.setattr(order_manager, "ORDER_LOG_DIR", tmp_path)
+    monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", tmp_path / "paper_orders.jsonl")
+    monkeypatch.setattr(order_manager, "TRADE_PNL_PATH", tmp_path / "paper_trade_pnls.json")
+
+    def fake_execute(**kwargs):
+        from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
+        record_confirmed_fill(
+            ticker=kwargs["ticker"], side=kwargs["signal"], filled_quantity=1,
+            avg_fill_price=100.0, order_intent_id=kwargs["order_intent_id"],
+            order_log_path=kwargs["order_log_path"],
+        )
+        return _filled_result()
+
+    monkeypatch.setattr(paper_trading_runner, "execute_approved_signal_via_ibkr_paper", fake_execute)
+    paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
+    assert (tmp_path / "paper_trade_pnls.json").exists()
+    assert (tmp_path / "equity_history.csv").exists()
+
+
+def test_reexecution_same_intent_does_not_double_count(monkeypatch, tmp_path):
+    monkeypatch.setattr(order_manager, "ORDER_LOG_DIR", tmp_path)
+    monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", tmp_path / "paper_orders.jsonl")
+    monkeypatch.setattr(order_manager, "TRADE_PNL_PATH", tmp_path / "paper_trade_pnls.json")
+
+    def fake_execute(**kwargs):
+        from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
+        record_confirmed_fill(
+            ticker=kwargs["ticker"], side=kwargs["signal"], filled_quantity=1,
+            avg_fill_price=100.0, order_intent_id=kwargs["order_intent_id"],
+            order_log_path=kwargs["order_log_path"],
+        )
+        return _filled_result()
+
+    monkeypatch.setattr(paper_trading_runner, "execute_approved_signal_via_ibkr_paper", fake_execute)
+    paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
+    paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
+    lines = (tmp_path / "paper_orders.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1
+    equity_lines = (tmp_path / "equity_history.csv").read_text(encoding="utf-8-sig").strip().splitlines()
+    assert len(equity_lines) == 2
+    payload = json.loads((tmp_path / "paper_trade_pnls.json").read_text())
+    assert payload["realized_trade_pnls"] == []
