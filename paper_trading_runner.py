@@ -18,25 +18,27 @@ def _sync_confirmed_fill_to_reporting() -> None:
         append_equity_history(equity_points[-1], order_manager.ORDER_LOG_DIR / "equity_history.csv")
 
 
-def _execute_confirmed_ibkr_paper_order(
-    ticker: str,
-    signal: str,
-    shares: int,
-    reference_price: float,
-    *,
-    order_intent_id: str | None = None,
-) -> dict:
+def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, reference_price: float) -> dict:
     normalized_signal = str(signal).upper()
     normalized_shares = int(shares)
-    if not order_intent_id:
-        raise RuntimeError("IBKR Paper注文には一意なorder_intent_idが必要です。")
+    normalized_price = float(reference_price)
+    order_intent_id = (
+        "signal-runner:"
+        f"{ticker}:{normalized_signal}:{normalized_shares}:"
+        f"{normalized_price:.8f}"
+    )
     execution = execute_approved_signal_via_ibkr_paper(
-        ticker=str(ticker), signal=normalized_signal, shares=normalized_shares,
-        order_intent_id=str(order_intent_id), order_log_path=order_manager.ORDER_LOG_PATH,
+        ticker=str(ticker),
+        signal=normalized_signal,
+        shares=normalized_shares,
+        order_intent_id=order_intent_id,
+        order_log_path=order_manager.ORDER_LOG_PATH,
     )
     result = execution.broker_result
     filled = (
-        execution.attempted and result is not None and getattr(result, "sent", False)
+        execution.attempted
+        and result is not None
+        and getattr(result, "sent", False)
         and getattr(result, "reached_terminal", False)
         and getattr(result, "last_known_status", None) == "Filled"
         and float(getattr(result, "filled_quantity", 0.0)) > 0
@@ -47,9 +49,13 @@ def _execute_confirmed_ibkr_paper_order(
         raise RuntimeError("IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。")
     _sync_confirmed_fill_to_reporting()
     return {
-        "mode": "IBKR_PAPER", "ticker": str(ticker), "side": normalized_signal,
-        "shares": int(float(result.filled_quantity)), "reference_price": float(result.avg_fill_price),
-        "status": "FILLED", "order_intent_id": str(order_intent_id),
+        "mode": "IBKR_PAPER",
+        "ticker": str(ticker),
+        "side": normalized_signal,
+        "shares": int(float(result.filled_quantity)),
+        "reference_price": float(result.avg_fill_price),
+        "status": "FILLED",
+        "order_intent_id": order_intent_id,
     }
 
 
