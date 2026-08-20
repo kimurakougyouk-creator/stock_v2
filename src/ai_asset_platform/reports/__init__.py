@@ -8,6 +8,7 @@ from ai_asset_platform.reports.equity_history import (
     load_equity_history,
     replay_fills_to_equity,
 )
+from ai_asset_platform.reports.equity_legacy import legacy_orders_to_equity
 from ai_asset_platform.reports.performance import (
     PerformanceHealth,
     PerformanceSummary,
@@ -37,6 +38,7 @@ __all__ = [
     "calculate_maximum_drawdown",
     "calculate_performance",
     "calculate_performance_health",
+    "legacy_orders_to_equity",
     "load_equity_history",
     "performance_summary_to_record",
     "read_performance_trend",
