@@ -2,7 +2,9 @@
 
 from dataclasses import dataclass
 
+from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide, OrderType
+from ai_asset_platform.core.asset_classes import AssetClass
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.service import ExecutionService
 
@@ -12,6 +14,36 @@ class SignalExecutionResult:
     attempted: bool
     reason: str
     broker_result: object | None = None
+
+
+def _instrument_for_ticker(ticker: str) -> InstrumentSpec:
+    """Legacy ticker notation -> explicit broker-neutral instrument metadata.
+
+    Yahoo Finance's `.T` suffix denotes a Tokyo-listed instrument.  The legacy
+    strategy currently trades Japanese equities with this notation, while IBKR
+    Contract.symbol expects the numeric code and the Tokyo exchange/currency.
+    Unknown suffixes remain fail-closed instead of silently being treated as US
+    stocks.
+    """
+    normalized = str(ticker).strip().upper()
+    if normalized.endswith(".T"):
+        symbol = normalized[:-2]
+        if not symbol:
+            raise ValueError("Tokyo ticker symbol is empty")
+        return InstrumentSpec(
+            symbol=symbol,
+            asset_class=AssetClass.STOCK,
+            exchange="TSEJ",
+            currency="JPY",
+        )
+    if "." in normalized:
+        raise ValueError(f"IBKR instrument mapping is not verified for ticker: {ticker}")
+    return InstrumentSpec(
+        symbol=normalized,
+        asset_class=AssetClass.STOCK,
+        exchange="SMART",
+        currency="USD",
+    )
 
 
 def execute_signal_via_ibkr_paper(
@@ -42,9 +74,10 @@ def execute_signal_via_ibkr_paper(
     if int(shares) <= 0:
         return SignalExecutionResult(False, "invalid shares")
 
+    instrument = _instrument_for_ticker(ticker)
     side = OrderSide.BUY if normalized == "BUY" else OrderSide.SELL
     order = OrderRequest(
-        symbol=ticker,
+        symbol=instrument.symbol,
         side=side,
         quantity=int(shares),
         order_type=OrderType.MARKET,
@@ -53,6 +86,7 @@ def execute_signal_via_ibkr_paper(
     result = service.execute_ibkr_paper_order(
         order,
         order_intent_id=order_intent_id,
+        instrument=instrument,
         apply_account_fill=apply_account_fill,
     )
     return SignalExecutionResult(True, "submitted to IBKR Paper execution service", result)

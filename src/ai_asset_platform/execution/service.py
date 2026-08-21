@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 from typing import Callable
-
+from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.orders import (
     FillResult,
@@ -88,6 +88,7 @@ class ExecutionService:
         order: OrderRequest,
         *,
         order_intent_id: str,
+        instrument: InstrumentSpec | None = None,
         timeout_seconds: float = 30.0,
         poll_interval_seconds: float = 0.5,
         apply_account_fill: bool = True,
@@ -96,6 +97,9 @@ class ExecutionService:
 
         共有Risk Gateを送信前に必ず評価する。ブロック時はbrokerの
         place_order_and_await_fill()へ到達しない。
+
+        ``instrument`` は市場・通貨を含む明示的なContract情報。省略時は
+        既存のUS STOCK既定値を維持するが、移行済みsignal経路は必ず渡す。
 
         ``apply_account_fill=False`` は、移行期間中に legacy の永続取引履歴を
         唯一の会計状態として使う呼び出し側専用。IBKRの送信・Filled判定には
@@ -114,6 +118,7 @@ class ExecutionService:
         result = self._broker.place_order_and_await_fill(
             order,
             order_intent_id=order_intent_id,
+            instrument=instrument,
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
         )
