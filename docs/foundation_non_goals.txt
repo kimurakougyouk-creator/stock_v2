@@ -1,0 +1,1 @@
+Non-goals: enabling Live Trading; transmitting ETF/FX/FUT/OPT/CRYPTO orders; changing VERIFIED_CAPABILITIES; weakening quantity/risk guards; replacing the existing AAPL Paper path before regression proof.
