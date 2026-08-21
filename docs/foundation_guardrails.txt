@@ -1,0 +1,1 @@
+Guardrails: fail closed on unsupported asset classes; do not infer broker permissions; do not promote capabilities without Paper evidence; preserve existing Paper-only order transmission controls.
