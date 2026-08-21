@@ -1,8 +1,12 @@
 """Explicit IBKR Paper E2E audit for broker-verified 9432/TSEJ lot size.
 
-This module intentionally bypasses strategy/AI signal generation.  It exercises
+This module intentionally bypasses strategy/AI signal generation. It exercises
 only the already-audited Paper execution path for 9432 with 100 shares.
 Live trading remains prohibited by the underlying configuration and service.
+
+The v1 E2E attempt was confirmed NOT_SENT before the lower-level sender guard
+was corrected.  v2 is therefore a distinct, deliberate retry intent.  The ID
+remains stable so accidental re-runs of v2 are blocked after a real send.
 """
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ from ai_asset_platform.core.asset_classes import AssetClass
 
 SYMBOL = "9432"
 QUANTITY = 100
-ORDER_INTENT_ID = "9432-paper-e2e-verified-lot-v1"
+ORDER_INTENT_ID = "9432-paper-e2e-verified-lot-v2"
 FILL_STATE_PATH = Path("data/ibkr_9432_paper_e2e_fill_state.json")
 
 
@@ -35,6 +39,7 @@ def main() -> None:
     print("SYMBOL   : 9432.T")
     print("SIDE     : BUY")
     print(f"QUANTITY : {QUANTITY}")
+    print("INTENT   :", ORDER_INTENT_ID)
     print("LIVE     : DISABLED")
 
     broker = IbkrBrokerAdapter(
