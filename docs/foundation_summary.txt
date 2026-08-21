@@ -1,0 +1,1 @@
+This branch introduces broker-independent InstrumentSpec validation and a no-transmit IBKR Contract factory. It intentionally leaves the proven AAPL order path untouched until CI/regression evidence is available.
