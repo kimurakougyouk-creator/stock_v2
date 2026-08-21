@@ -23,25 +23,20 @@ class IbkrPaperTransmissionResult:
 
 
 def transmit_ibkr_paper_order(request: OrderRequest, config: IbkrConnectionConfig, *, client: IbkrOrderClient, next_order_id: int | None, enable_transmission: bool = False, guard: IbkrPaperOrderGuardResult | None = None, instrument: InstrumentSpec | None = None) -> IbkrPaperTransmissionResult:
-    """Send only Paper orders with an explicitly verified instrument quantity.
-
-    The legacy no-instrument path keeps its historical one-share guard.  Once an
-    InstrumentSpec is supplied, missing verified quantity fails closed.
-    """
+    """Send only Paper orders whose pilot quantity is explicitly permitted."""
     config.validate()
     if not config.paper_trading or config.allow_live_trading:
         return IbkrPaperTransmissionResult("BLOCKED", False, None, "Paper Trading専用のため送信を停止しました。")
 
     if guard is None:
-        verified_quantity = 1 if instrument is None else instrument.verified_paper_test_quantity
-        if verified_quantity is None:
-            return IbkrPaperTransmissionResult("BLOCKED", False, None, "この銘柄のIBKR Paper検証済み注文数量が未登録のため送信しません。")
-        guard = validate_ibkr_paper_test_order(
-            request.symbol,
-            request.quantity,
-            verified_test_quantity=verified_quantity,
-            use_gateway=config.port == 4002,
-        )
+        if instrument is None:
+            # Preserve the audited legacy behavior and call signature: one share.
+            guard = validate_ibkr_paper_test_order(request.symbol, request.quantity, use_gateway=config.port == 4002)
+        else:
+            verified_quantity = instrument.verified_paper_test_quantity
+            if verified_quantity is None:
+                return IbkrPaperTransmissionResult("BLOCKED", False, None, "この銘柄のIBKR Paper検証済み注文数量が未登録のため送信しません。")
+            guard = validate_ibkr_paper_test_order(request.symbol, request.quantity, verified_test_quantity=verified_quantity, use_gateway=config.port == 4002)
     if not guard.allowed:
         return IbkrPaperTransmissionResult(guard.status, False, None, guard.message)
     if next_order_id is None or next_order_id < 0:
