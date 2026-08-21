@@ -151,3 +151,34 @@ def test_paper_runner_rejects_live_trading_enabled(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Live Tradingが有効"):
         paper_trading_runner.run_paper_trading()
+
+
+def test_unconfirmed_ibkr_result_exposes_observed_details():
+    result = SimpleNamespace(
+        status="NOT_SENT",
+        sent=False,
+        order_id=None,
+        reached_terminal=False,
+        timed_out=False,
+        last_known_status=None,
+        filled_quantity=0.0,
+        avg_fill_price=None,
+        message="contract rejected",
+        errors=[{"code": 200, "message": "No security definition"}],
+    )
+    execution = SimpleNamespace(attempted=True, reason="submitted", broker_result=result)
+
+    message = paper_trading_runner._describe_unconfirmed_ibkr_result(execution)
+
+    assert "status=NOT_SENT" in message
+    assert "sent=False" in message
+    assert "message=contract rejected" in message
+    assert "No security definition" in message
+
+
+def test_unconfirmed_ibkr_result_exposes_pre_send_stop_reason():
+    execution = SimpleNamespace(attempted=False, reason="risk blocked", broker_result=None)
+
+    message = paper_trading_runner._describe_unconfirmed_ibkr_result(execution)
+
+    assert message == "IBKR Paper注文は送信前に停止しました: risk blocked"
