@@ -34,6 +34,35 @@ def _sync_confirmed_fill_to_reporting() -> None:
     )
 
 
+def _describe_unconfirmed_ibkr_result(execution) -> str:
+    """未約定/未送信を推測せず、観測済みBroker情報だけで説明する。"""
+    if not execution.attempted:
+        return f"IBKR Paper注文は送信前に停止しました: {execution.reason}"
+
+    result = execution.broker_result
+    if result is None:
+        return "IBKR Paper注文結果を取得できませんでした。注文済みとして記録しません。"
+
+    details = [
+        f"status={getattr(result, 'status', None)}",
+        f"sent={getattr(result, 'sent', None)}",
+        f"order_id={getattr(result, 'order_id', None)}",
+        f"terminal={getattr(result, 'reached_terminal', None)}",
+        f"timeout={getattr(result, 'timed_out', None)}",
+        f"ib_status={getattr(result, 'last_known_status', None)}",
+        f"filled={getattr(result, 'filled_quantity', None)}",
+        f"avg_price={getattr(result, 'avg_fill_price', None)}",
+        f"message={getattr(result, 'message', None)}",
+    ]
+    errors = getattr(result, "errors", None)
+    if errors:
+        details.append(f"errors={errors}")
+    return (
+        "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。"
+        + " / ".join(details)
+    )
+
+
 def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, reference_price: float) -> dict:
     normalized_signal = str(signal).upper()
     normalized_shares = int(shares)
@@ -62,7 +91,7 @@ def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, r
         and float(result.avg_fill_price) > 0
     )
     if not filled:
-        raise RuntimeError("IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。")
+        raise RuntimeError(_describe_unconfirmed_ibkr_result(execution))
     _sync_confirmed_fill_to_reporting()
     return {
         "mode": "IBKR_PAPER",
