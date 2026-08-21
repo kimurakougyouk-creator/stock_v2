@@ -4,14 +4,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
-from ai_asset_platform.brokers.ibkr_paper_order_guard import (
-    IbkrPaperOrderGuardResult,
-    validate_ibkr_paper_test_order,
-)
-from ai_asset_platform.brokers.ibkr_paper_order_sender import (
-    prepare_ibkr_paper_order,
-    prepare_ibkr_paper_order_for_instrument,
-)
+from ai_asset_platform.brokers.ibkr_paper_order_guard import IbkrPaperOrderGuardResult, validate_ibkr_paper_test_order
+from ai_asset_platform.brokers.ibkr_paper_order_sender import prepare_ibkr_paper_order, prepare_ibkr_paper_order_for_instrument
 from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import OrderRequest
 
@@ -28,79 +22,30 @@ class IbkrPaperTransmissionResult:
     message: str
 
 
-def transmit_ibkr_paper_order(
-    request: OrderRequest,
-    config: IbkrConnectionConfig,
-    *,
-    client: IbkrOrderClient,
-    next_order_id: int | None,
-    enable_transmission: bool = False,
-    guard: IbkrPaperOrderGuardResult | None = None,
-    instrument: InstrumentSpec | None = None,
-) -> IbkrPaperTransmissionResult:
-    """IBKR Paper注文を安全条件成立時だけ送信する。
-
-    デフォルトは enable_transmission=False なので、明示的に有効化しない限り
-    placeOrder は呼ばれない。Live Trading は常に拒否する。
-
-    instrumentを明示した場合は、その資産クラス/取引所/通貨をContract生成まで
-    保持する。省略時は従来どおりUS株の後方互換経路を使う。
-    """
+def transmit_ibkr_paper_order(request: OrderRequest, config: IbkrConnectionConfig, *, client: IbkrOrderClient, next_order_id: int | None, enable_transmission: bool = False, guard: IbkrPaperOrderGuardResult | None = None, instrument: InstrumentSpec | None = None) -> IbkrPaperTransmissionResult:
+    """Send only Paper orders whose pilot quantity is explicitly permitted."""
     config.validate()
-
     if not config.paper_trading or config.allow_live_trading:
-        return IbkrPaperTransmissionResult(
-            status="BLOCKED",
-            sent=False,
-            order_id=None,
-            message="Paper Trading専用のため送信を停止しました。",
-        )
+        return IbkrPaperTransmissionResult("BLOCKED", False, None, "Paper Trading専用のため送信を停止しました。")
 
-    # configがGateway(4002)ならガードの自動preflightもGatewayを確認する。
-    # そうしないとGateway接続時でもTWS(7497)を誤って待ち受けてしまう。
-    guard = guard or validate_ibkr_paper_test_order(
-        request.symbol,
-        request.quantity,
-        use_gateway=config.port == 4002,
-    )
+    if guard is None:
+        if instrument is None:
+            # Preserve the audited legacy behavior and call signature: one share.
+            guard = validate_ibkr_paper_test_order(request.symbol, request.quantity, use_gateway=config.port == 4002)
+        else:
+            verified_quantity = instrument.verified_paper_test_quantity
+            if verified_quantity is None:
+                return IbkrPaperTransmissionResult("BLOCKED", False, None, "この銘柄のIBKR Paper検証済み注文数量が未登録のため送信しません。")
+            guard = validate_ibkr_paper_test_order(request.symbol, request.quantity, verified_test_quantity=verified_quantity, use_gateway=config.port == 4002)
     if not guard.allowed:
-        return IbkrPaperTransmissionResult(
-            status=guard.status,
-            sent=False,
-            order_id=None,
-            message=guard.message,
-        )
-
+        return IbkrPaperTransmissionResult(guard.status, False, None, guard.message)
     if next_order_id is None or next_order_id < 0:
-        return IbkrPaperTransmissionResult(
-            status="WAITING",
-            sent=False,
-            order_id=None,
-            message="IBKRから有効なnextValidIdを取得できていないため送信しません。",
-        )
+        return IbkrPaperTransmissionResult("WAITING", False, None, "IBKRから有効なnextValidIdを取得できていないため送信しません。")
 
-    prepared = (
-        prepare_ibkr_paper_order_for_instrument(request, instrument, config)
-        if instrument is not None
-        else prepare_ibkr_paper_order(request, config)
-    )
-
+    prepared = prepare_ibkr_paper_order_for_instrument(request, instrument, config) if instrument is not None else prepare_ibkr_paper_order(request, config)
     if not enable_transmission:
-        return IbkrPaperTransmissionResult(
-            status="READY_NOT_SENT",
-            sent=False,
-            order_id=next_order_id,
-            message="Paper注文は送信可能ですが、安全ロックにより未送信です。",
-        )
+        return IbkrPaperTransmissionResult("READY_NOT_SENT", False, next_order_id, "Paper注文は送信可能ですが、安全ロックにより未送信です。")
 
-    # ここに到達するのはPaper限定・数量1・事前ガード成功・nextValidId取得済み、
-    # かつ呼び出し側が明示的に送信を許可した場合だけ。
     prepared.order.transmit = True
     client.placeOrder(next_order_id, prepared.contract, prepared.order)
-
-    return IbkrPaperTransmissionResult(
-        status="SENT",
-        sent=True,
-        order_id=next_order_id,
-        message="IBKR Paper APIへテスト注文を送信しました。",
-    )
+    return IbkrPaperTransmissionResult("SENT", True, next_order_id, "IBKR Paper APIへテスト注文を送信しました。")
