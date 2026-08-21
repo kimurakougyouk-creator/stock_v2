@@ -19,8 +19,7 @@ def provider(value):
 
 def test_allows_safe_buy():
     gate = build_shared_risk_gate(snapshot_provider=provider(snapshot()))
-    result = gate(OrderRequest("SPY", OrderSide.BUY, 1))
-    assert result.allowed is True
+    assert gate(OrderRequest("SPY", OrderSide.BUY, 1)).allowed is True
 
 
 def test_emergency_stop_blocks_before_state_read():
@@ -35,8 +34,7 @@ def test_emergency_stop_blocks_before_state_read():
         settings=replace(SETTINGS, emergency_stop=True),
         snapshot_provider=should_not_run,
     )
-    result = gate(OrderRequest("SPY", OrderSide.BUY, 1))
-    assert result.allowed is False
+    assert gate(OrderRequest("SPY", OrderSide.BUY, 1)).allowed is False
     assert called is False
 
 
@@ -72,20 +70,46 @@ def test_daily_sell_limit_blocks():
     assert gate(OrderRequest("SPY", OrderSide.SELL, 1)).allowed is False
 
 
-def test_daily_loss_limit_blocks():
+def test_daily_loss_limit_blocks_buy_but_not_protective_sell():
+    state = snapshot(daily_realized_pnl=-10_000.0)
     gate = build_shared_risk_gate(
         settings=replace(SETTINGS, daily_loss_limit_yen=10_000.0),
-        snapshot_provider=provider(snapshot(daily_realized_pnl=-10_000.0)),
+        snapshot_provider=provider(state),
     )
     assert gate(OrderRequest("SPY", OrderSide.BUY, 1)).allowed is False
+    assert gate(OrderRequest("SPY", OrderSide.SELL, 1)).allowed is True
 
 
-def test_consecutive_loss_limit_blocks():
+def test_consecutive_loss_limit_blocks_buy_but_not_protective_sell():
+    state = snapshot(consecutive_losses=3)
     gate = build_shared_risk_gate(
         settings=replace(SETTINGS, max_consecutive_losses=3),
-        snapshot_provider=provider(snapshot(consecutive_losses=3)),
+        snapshot_provider=provider(state),
     )
     assert gate(OrderRequest("SPY", OrderSide.BUY, 1)).allowed is False
+    assert gate(OrderRequest("SPY", OrderSide.SELL, 1)).allowed is True
+
+
+def test_disabled_numeric_limits_do_not_block_safe_order():
+    gate = build_shared_risk_gate(
+        settings=replace(
+            SETTINGS,
+            daily_loss_limit_yen=0.0,
+            max_consecutive_losses=0,
+            max_daily_buy_orders=0,
+            max_daily_sell_orders=0,
+        ),
+        snapshot_provider=provider(
+            snapshot(
+                daily_buy_orders=999,
+                daily_sell_orders=999,
+                daily_realized_pnl=-999_999.0,
+                consecutive_losses=999,
+            )
+        ),
+    )
+    assert gate(OrderRequest("SPY", OrderSide.BUY, 1)).allowed is True
+    assert gate(OrderRequest("SPY", OrderSide.SELL, 1)).allowed is True
 
 
 def test_repurchase_cooldown_blocks_buy():
