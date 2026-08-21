@@ -14,9 +14,10 @@ import order_manager
 import signal_runner
 
 
-# IBKR側の初回Paper安全ガードと統合Runnerを一致させる。
-# 戦略が100株等を算出しても、実IBKR Paperへ渡すパイロット数量は1株だけ。
-PAPER_PILOT_SHARES = 1
+# IBKR ContractDetailsの実機監査で9432/TSEJは
+# minSize=100, sizeIncrement=100, suggestedSizeIncrement=100を確認済み。
+# 初回PaperパイロットもIBKRが受理可能な最小数量100株に合わせる。
+PAPER_PILOT_SHARES = 100
 
 
 def _sync_confirmed_fill_to_reporting() -> None:
@@ -141,7 +142,7 @@ def main() -> None:
     print("AI Asset Platform - IBKR PAPER TRADING")
     print("Live Trading : OFF")
     print("IBKR Paper   : ON")
-    print(f"IBKR Pilot Qty: {PAPER_PILOT_SHARES} share")
+    print(f"IBKR Pilot Qty: {PAPER_PILOT_SHARES} shares")
     print("=" * 50)
     result = run_paper_trading()
     health = evaluate_paper_trading_health(signal_count=len(result["records"]), error_count=len(result["errors"]))
