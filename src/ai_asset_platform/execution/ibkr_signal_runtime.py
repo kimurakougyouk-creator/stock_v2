@@ -1,8 +1,9 @@
 """Final safe runtime for one already-approved signal -> IBKR Paper fill.
 
 The caller remains responsible for the existing signal_runner safety checks.
-This module adds the IBKR-only gates, single-send async execution, confirmed-fill
-persistence, and guaranteed disconnect.  It contains no Live Trading path.
+This module also enforces the shared pre-send risk gate so migrated execution
+cannot bypass emergency-stop/daily-limit/cooldown controls. It contains no Live
+Trading path.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.service import ExecutionService
+from ai_asset_platform.execution.shared_risk_gate import build_shared_risk_gate
 from ai_asset_platform.execution.signal_order_bridge import (
     SignalExecutionResult,
     execute_signal_via_ibkr_paper,
@@ -30,9 +32,10 @@ def execute_approved_signal_via_ibkr_paper(
 ) -> SignalExecutionResult:
     """Execute one pre-approved signal and persist only a confirmed Filled result.
 
-    Paper transmission requires both existing settings gates.  The temporary
-    Account is deliberately not used as accounting authority during migration;
-    the durable legacy order log remains the single state read by signal_runner.
+    Paper transmission requires both existing settings gates plus the shared
+    risk gate. The temporary Account is deliberately not used as accounting
+    authority during migration; the durable legacy order log remains the single
+    state read by signal_runner.
     """
     if not SETTINGS.enable_paper_trading:
         return SignalExecutionResult(False, "paper trading disabled")
@@ -43,6 +46,7 @@ def execute_approved_signal_via_ibkr_paper(
     service = ExecutionService(
         broker=broker,
         account=Account(initial_cash=0.0),
+        risk_gate=build_shared_risk_gate(),
     )
 
     if not broker.connect():
