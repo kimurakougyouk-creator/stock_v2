@@ -64,8 +64,15 @@ def test_etf_audit_uses_distinct_client_id_for_contract_session(monkeypatch):
         observed["client_id"] = client_id
         self.connected_ready.set()
 
+    def fake_req_contract_details(self, req_id, contract):
+        # Keep this regression test focused on client-id selection, not ibapi's
+        # real socket state. Signal completion with no details so the audit
+        # returns safely with order_sent=False.
+        self.ready.set()
+
     monkeypatch.setattr(_ContractDetailsProbe, "connect", fake_connect)
     monkeypatch.setattr(_ContractDetailsProbe, "run", lambda self: None)
+    monkeypatch.setattr(_ContractDetailsProbe, "reqContractDetails", fake_req_contract_details)
     monkeypatch.setattr(_ContractDetailsProbe, "isConnected", lambda self: False)
 
     cfg = IbkrConnectionConfig(client_id=41)
