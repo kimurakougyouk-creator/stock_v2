@@ -9,10 +9,9 @@ from ai_asset_platform.core.asset_classes import AssetClass
 class InstrumentSpec:
     """Broker-neutral description of a tradable instrument.
 
-    This keeps IBKR-specific Contract fields out of strategy code.  Product
-    specific requirements are validated here; broker support remains
-    fail-closed in the contract factory until that asset class is explicitly
-    implemented and tested.
+    verified_paper_test_quantity is deliberately optional.  None means that no
+    broker-verified pilot quantity is known and transmission must remain
+    fail-closed.  It is execution-safety metadata, not a strategy position size.
     """
 
     symbol: str
@@ -23,6 +22,7 @@ class InstrumentSpec:
     strike: float | None = None
     right: str | None = None
     multiplier: str | None = None
+    verified_paper_test_quantity: int | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
@@ -31,10 +31,10 @@ class InstrumentSpec:
             raise ValueError("exchange must not be empty")
         if not self.currency.strip():
             raise ValueError("currency must not be empty")
-
+        if self.verified_paper_test_quantity is not None and self.verified_paper_test_quantity <= 0:
+            raise ValueError("verified_paper_test_quantity must be positive when provided")
         if self.asset_class is AssetClass.FUTURE and not self.expiry:
             raise ValueError("future requires expiry")
-
         if self.asset_class is AssetClass.OPTION:
             if not self.expiry:
                 raise ValueError("option requires expiry")
