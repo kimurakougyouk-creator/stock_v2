@@ -6,11 +6,17 @@ from ibapi.contract import Contract
 from ibapi.order import Order
 
 from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
+from ai_asset_platform.brokers.ibkr_contracts import (
+    build_ibkr_contract_spec,
+    to_ibapi_contract,
+)
+from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import (
     OrderRequest,
     OrderSide,
     OrderType,
 )
+from ai_asset_platform.core.asset_classes import AssetClass
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,10 @@ def prepare_ibkr_paper_order(
     共通OrderRequestをIBKR API形式へ安全に変換する。
 
     この関数は注文を送信しない。
+
+    既存OrderRequestにはまだasset_classがないため、この既存入口は
+    従来どおりUS stockとして扱う。ETF等はInstrumentSpecを受け取る
+    専用入口を追加するまで暗黙に有効化しない。
     """
     config.validate()
 
@@ -45,11 +55,11 @@ def prepare_ibkr_paper_order(
             "初回IBKR Paperテスト注文は数量1だけ許可します。"
         )
 
-    contract = Contract()
-    contract.symbol = request.symbol.strip().upper()
-    contract.secType = "STK"
-    contract.exchange = "SMART"
-    contract.currency = "USD"
+    instrument = InstrumentSpec(
+        symbol=request.symbol.strip().upper(),
+        asset_class=AssetClass.STOCK,
+    )
+    contract = to_ibapi_contract(build_ibkr_contract_spec(instrument))
 
     ib_order = Order()
     ib_order.action = (
