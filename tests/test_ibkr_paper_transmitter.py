@@ -8,6 +8,7 @@ from ai_asset_platform.brokers.ibkr_paper_order_guard import (
 from ai_asset_platform.brokers.ibkr_paper_transmitter import (
     transmit_ibkr_paper_order,
 )
+from ai_asset_platform.brokers.instruments import AssetClass, InstrumentSpec
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
 
 
@@ -204,3 +205,28 @@ def test_explicit_enable_sends_one_paper_order():
     assert order.totalQuantity == 1
     assert order.orderType == "MKT"
     assert order.transmit is True
+
+
+def test_explicit_etf_instrument_reaches_contract_and_remains_unsent_by_default():
+    client = FakeClient()
+    request = OrderRequest("SPY", OrderSide.BUY, 1)
+    instrument = InstrumentSpec(
+        "SPY",
+        AssetClass.ETF,
+        exchange="SMART",
+        currency="USD",
+    )
+
+    result = transmit_ibkr_paper_order(
+        request,
+        create_ibkr_paper_config(),
+        client=client,
+        next_order_id=777,
+        guard=ready_guard("SPY", 1),
+        instrument=instrument,
+    )
+
+    assert result.status == "READY_NOT_SENT"
+    assert result.sent is False
+    assert result.order_id == 777
+    assert client.calls == []

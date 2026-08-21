@@ -6,11 +6,17 @@ from ibapi.contract import Contract
 from ibapi.order import Order
 
 from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
+from ai_asset_platform.brokers.ibkr_contracts import (
+    build_ibkr_contract_spec,
+    to_ibapi_contract,
+)
+from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import (
     OrderRequest,
     OrderSide,
     OrderType,
 )
+from ai_asset_platform.core.asset_classes import AssetClass
 
 
 @dataclass(frozen=True)
@@ -19,12 +25,13 @@ class IbkrPreparedOrder:
     order: Order
 
 
-def prepare_ibkr_paper_order(
+def prepare_ibkr_paper_order_for_instrument(
     request: OrderRequest,
+    instrument: InstrumentSpec,
     config: IbkrConnectionConfig,
 ) -> IbkrPreparedOrder:
     """
-    共通OrderRequestをIBKR API形式へ安全に変換する。
+    共通OrderRequestと明示的InstrumentSpecをIBKR API形式へ安全に変換する。
 
     この関数は注文を送信しない。
     """
@@ -45,11 +52,12 @@ def prepare_ibkr_paper_order(
             "初回IBKR Paperテスト注文は数量1だけ許可します。"
         )
 
-    contract = Contract()
-    contract.symbol = request.symbol.strip().upper()
-    contract.secType = "STK"
-    contract.exchange = "SMART"
-    contract.currency = "USD"
+    request_symbol = request.symbol.strip().upper()
+    instrument_symbol = instrument.symbol.strip().upper()
+    if request_symbol != instrument_symbol:
+        raise ValueError("OrderRequestとInstrumentSpecのsymbolが一致しません。")
+
+    contract = to_ibapi_contract(build_ibkr_contract_spec(instrument))
 
     ib_order = Order()
     ib_order.action = (
@@ -77,3 +85,15 @@ def prepare_ibkr_paper_order(
         contract=contract,
         order=ib_order,
     )
+
+
+def prepare_ibkr_paper_order(
+    request: OrderRequest,
+    config: IbkrConnectionConfig,
+) -> IbkrPreparedOrder:
+    """既存US株向けの後方互換Paper注文準備入口。"""
+    instrument = InstrumentSpec(
+        symbol=request.symbol.strip().upper(),
+        asset_class=AssetClass.STOCK,
+    )
+    return prepare_ibkr_paper_order_for_instrument(request, instrument, config)

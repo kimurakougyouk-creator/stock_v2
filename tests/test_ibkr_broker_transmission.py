@@ -4,6 +4,7 @@ from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_paper_order_guard import (
     IbkrPaperOrderGuardResult,
 )
+from ai_asset_platform.brokers.instruments import AssetClass, InstrumentSpec
 from ai_asset_platform.brokers.orders import (
     OrderRequest,
     OrderSide,
@@ -92,6 +93,33 @@ def test_broker_can_send_paper_order_only_when_explicitly_enabled(monkeypatch):
     assert len(session.client.orders) == 1
     assert session.client.orders[0][0] == 123
     assert session.next_order_id == 124
+
+
+def test_broker_preserves_etf_instrument_to_contract(monkeypatch):
+    broker, session = _connect_broker(
+        monkeypatch,
+        enable_transmission=True,
+    )
+    instrument = InstrumentSpec(
+        "SPY",
+        AssetClass.ETF,
+        exchange="SMART",
+        currency="USD",
+    )
+
+    result = broker.place_order(
+        OrderRequest("SPY", OrderSide.BUY, 1),
+        instrument=instrument,
+    )
+
+    assert result.status is OrderStatus.ACCEPTED
+    assert len(session.client.orders) == 1
+    _, contract, order = session.client.orders[0]
+    assert contract.symbol == "SPY"
+    assert contract.secType == "STK"
+    assert contract.exchange == "SMART"
+    assert contract.currency == "USD"
+    assert order.transmit is True
 
 
 def test_broker_does_not_consume_order_id_when_order_is_not_sent(monkeypatch):

@@ -26,6 +26,7 @@ from ai_asset_platform.brokers.ibkr_session import (
     IbkrPaperSession,
     open_ibkr_paper_session,
 )
+from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import (
     FillResult,
     OrderRequest,
@@ -179,7 +180,12 @@ class IbkrBrokerAdapter(BrokerAdapter):
             self._session.disconnect()
         self._session = None
 
-    def place_order(self, order: OrderRequest) -> OrderResult:
+    def place_order(
+        self,
+        order: OrderRequest,
+        *,
+        instrument: InstrumentSpec | None = None,
+    ) -> OrderResult:
         if not self.is_connected() or self._session is None:
             return OrderResult(
                 order_id="IBKR-NOT-CONNECTED",
@@ -193,6 +199,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
             client=self._session.client,
             next_order_id=self._session.next_order_id,
             enable_transmission=self._enable_paper_order_transmission,
+            instrument=instrument,
         )
 
         if not result.sent:
@@ -230,6 +237,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
         order: OrderRequest,
         *,
         order_intent_id: str,
+        instrument: InstrumentSpec | None = None,
         timeout_seconds: float = DEFAULT_ASYNC_ORDER_TIMEOUT_SECONDS,
         poll_interval_seconds: float = DEFAULT_ASYNC_ORDER_POLL_INTERVAL_SECONDS,
         intent_lock_dir: str | Path = DEFAULT_INTENT_LOCK_DIR,
@@ -298,7 +306,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
             )
 
         # ===== 送信はここで1回だけ =====
-        result = self.place_order(order)
+        result = self.place_order(order, instrument=instrument)
 
         if result.status is not OrderStatus.ACCEPTED:
             # 実際には送信されなかったことが確定したため、正当な再試行

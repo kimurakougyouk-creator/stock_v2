@@ -10,7 +10,9 @@ from ai_asset_platform.brokers.ibkr_paper_order_guard import (
 )
 from ai_asset_platform.brokers.ibkr_paper_order_sender import (
     prepare_ibkr_paper_order,
+    prepare_ibkr_paper_order_for_instrument,
 )
+from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import OrderRequest
 
 
@@ -34,11 +36,15 @@ def transmit_ibkr_paper_order(
     next_order_id: int | None,
     enable_transmission: bool = False,
     guard: IbkrPaperOrderGuardResult | None = None,
+    instrument: InstrumentSpec | None = None,
 ) -> IbkrPaperTransmissionResult:
     """IBKR Paper注文を安全条件成立時だけ送信する。
 
     デフォルトは enable_transmission=False なので、明示的に有効化しない限り
     placeOrder は呼ばれない。Live Trading は常に拒否する。
+
+    instrumentを明示した場合は、その資産クラス/取引所/通貨をContract生成まで
+    保持する。省略時は従来どおりUS株の後方互換経路を使う。
     """
     config.validate()
 
@@ -73,7 +79,11 @@ def transmit_ibkr_paper_order(
             message="IBKRから有効なnextValidIdを取得できていないため送信しません。",
         )
 
-    prepared = prepare_ibkr_paper_order(request, config)
+    prepared = (
+        prepare_ibkr_paper_order_for_instrument(request, instrument, config)
+        if instrument is not None
+        else prepare_ibkr_paper_order(request, config)
+    )
 
     if not enable_transmission:
         return IbkrPaperTransmissionResult(
