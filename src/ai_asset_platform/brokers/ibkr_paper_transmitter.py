@@ -56,6 +56,8 @@ def transmit_ibkr_paper_order(
             message="Paper Trading専用のため送信を停止しました。",
         )
 
+    # configがGateway(4002)ならガードの自動preflightもGatewayを確認する。
+    # そうしないとGateway接続時でもTWS(7497)を誤って待ち受けてしまう。
     guard = guard or validate_ibkr_paper_test_order(
         request.symbol,
         request.quantity,
@@ -91,6 +93,8 @@ def transmit_ibkr_paper_order(
             message="Paper注文は送信可能ですが、安全ロックにより未送信です。",
         )
 
+    # ここに到達するのはPaper限定・数量1・事前ガード成功・nextValidId取得済み、
+    # かつ呼び出し側が明示的に送信を許可した場合だけ。
     prepared.order.transmit = True
     client.placeOrder(next_order_id, prepared.contract, prepared.order)
 
