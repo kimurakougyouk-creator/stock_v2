@@ -1,0 +1,1 @@
+The added unit tests cover stock, ETF, FX, future, option, crypto fail-closed behavior, and invalid instrument fields.
