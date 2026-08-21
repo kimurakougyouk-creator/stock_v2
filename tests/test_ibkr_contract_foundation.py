@@ -1,7 +1,12 @@
 import pytest
 
+from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
 from ai_asset_platform.brokers.ibkr_contracts import build_ibkr_contract_spec
+from ai_asset_platform.brokers.ibkr_paper_order_sender import (
+    prepare_ibkr_paper_order_for_instrument,
+)
 from ai_asset_platform.brokers.instruments import InstrumentSpec
+from ai_asset_platform.brokers.orders import OrderRequest, OrderSide, OrderType
 from ai_asset_platform.core.asset_classes import AssetClass
 
 
@@ -21,10 +26,43 @@ def test_etf_uses_ibkr_stock_security_type():
     assert spec.currency == "USD"
 
 
-@pytest.mark.parametrize(
-    "asset_class",
-    [AssetClass.FX, AssetClass.CRYPTO],
-)
+def test_explicit_etf_paper_preparation_is_no_transmit():
+    request = OrderRequest(
+        symbol="SPY",
+        side=OrderSide.BUY,
+        quantity=1,
+        order_type=OrderType.MARKET,
+    )
+    prepared = prepare_ibkr_paper_order_for_instrument(
+        request,
+        InstrumentSpec("SPY", AssetClass.ETF),
+        IbkrConnectionConfig(),
+    )
+    assert prepared.contract.symbol == "SPY"
+    assert prepared.contract.secType == "STK"
+    assert prepared.contract.exchange == "SMART"
+    assert prepared.contract.currency == "USD"
+    assert prepared.order.totalQuantity == 1
+    assert prepared.order.tif == "DAY"
+    assert prepared.order.transmit is False
+
+
+def test_explicit_instrument_rejects_symbol_mismatch():
+    request = OrderRequest(
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        quantity=1,
+        order_type=OrderType.MARKET,
+    )
+    with pytest.raises(ValueError, match="symbol"):
+        prepare_ibkr_paper_order_for_instrument(
+            request,
+            InstrumentSpec("SPY", AssetClass.ETF),
+            IbkrConnectionConfig(),
+        )
+
+
+@pytest.mark.parametrize("asset_class", [AssetClass.FX, AssetClass.CRYPTO])
 def test_unverified_simple_asset_classes_fail_closed(asset_class):
     with pytest.raises(ValueError, match="not verified"):
         build_ibkr_contract_spec(InstrumentSpec("TEST", asset_class))
