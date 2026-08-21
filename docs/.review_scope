@@ -1,0 +1,1 @@
+Review scope: InstrumentSpec, IBKR Contract factory, fail-closed validation, tests, documentation. Existing order transmission path is intentionally untouched in this PR.
