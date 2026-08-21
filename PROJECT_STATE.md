@@ -1,49 +1,55 @@
 # Project State
 
-Last updated: 2026-08-20
+Last updated: 2026-08-22
 
 This file is the concise, evidence-based handoff ledger for AI agents. Update it after meaningful verified progress. Do not replace verified facts with guesses.
 
 ## Current phase
-Post-recovery main audit — Equity/Reporting recovery is merged. Continue from the new main baseline; do not repeat the recovery work or previously verified real-broker validation.
+Final IBKR Paper integration validation. Do not repeat verified contract/fill/equity recovery work. The next required evidence is the integrated `paper_trading_runner.py` path on the user's local TWS Paper session.
 
 ## Verified repository state
 - Repository: `kimurakougyouk-creator/stock_v2`
 - Branch: `main`
-- Current recovery merge commit: `9a4a0a272da635583ec3d7ef8b8f518f34607d85` — `Restore equity history, curve, drawdown, and IBKR fill reporting`.
-- Parent baseline: `0831cb57ae53f4843f63c9c9b94414feef4aca61` — `Align preflight tests with Gateway default`.
-- PR #42 was reviewed as mergeable, marked ready, and squash-merged to main.
-- The PR merge candidate passed the complete repository pytest suite: 718 passed / 0 failed.
-- Phases 1–8 of the IBKR Paper migration were already present before the Equity recovery; do not repeat their real broker validation merely to re-prove historical evidence.
+- PR #57 squash-merged as `e242ecd66e6df3b082d96a4684dc6a4095f72309`: broker-neutral instrument foundation, fail-closed ETF/STOCK IBKR contract mapping, confirmed-fill reconciliation into reporting, duplicate-intent coverage.
+- PR #58 squash-merged as `b5c6dcbf2a87b5cbbd4b1668455559a40cd15704`: shared pre-send risk gate attached to the IBKR approved-signal runtime.
+- PR #58 merge candidate passed secret scan and the complete suite: 773 passed / 0 failed.
 
-## Equity/Reporting recovery now merged
-- `maximum_drawdown` persistence to `performance_history.csv`, including legacy-CSV migration and unknown-column fail-safe behavior.
+## Verified real IBKR Paper evidence (2026-08-22)
+- User's Chromebook/TWS Paper session resolved SPY as `STK / SMART / USD` with `CONNECTED=True`, `CONTRACT RESOLVED=True`, `ORDER SENT=False` before transmission.
+- Controlled SPY Paper BUY: quantity 1, `SENT=True`, order id `3`, terminal status `Filled`, filled quantity `1.0`, average fill price `765.45`, timeout `False`.
+- Local fill-state evidence persisted order id `3`, execution id `00012ec5.6ab91096.01.01`, quantity `1.0`, price `765.45`, and `processed_filled[3] = 1.0`.
+- Do not send another order merely to re-prove this already verified direct broker fill.
+
+## Equity/Reporting status
 - Total-asset Equity History with CSV persistence.
-- Equity Curve based on `total_assets`, not realized PnL.
-- Total-asset maximum drawdown calculation.
+- Equity Curve based on `total_assets`.
+- Total-asset maximum drawdown calculation and persistence.
 - Browser-native HTML/SVG Equity chart generation.
-- Legacy paper-order ledger -> existing Account/Portfolio fill replay -> Equity bridge.
-- `order_intent_id` idempotency prevents duplicate Equity accounting for confirmed IBKR fills.
 - Confirmed IBKR Paper Fill -> durable legacy ledger -> realized-PnL regeneration -> Equity reporting sync in `paper_trading_runner.py`.
-- Dashboard Equity summary, Equity Curve, and total-asset Drawdown integration.
-- Mock/file-only Fill-to-Equity E2E coverage; tests do not connect to IBKR or send an order.
+- `order_intent_id` idempotency prevents duplicate confirmed-fill/Equity accounting.
+- Mock/file E2E coverage exists for Fill -> trade/PnL -> Equity -> Drawdown and restart-safe duplicate prevention.
 
-## Audit findings retained for future work
-- The stable `order_intent_id` formula (`ticker + side + shares + reference_price`) existed in baseline main before the Equity recovery. It is not an Equity-recovery regression. Any future redesign must be a separate safety change spanning signal creation through broker execution and must preserve retry idempotency.
-- Dashboard recovery uses `dashboard_core.py` to preserve the existing Dashboard body while `dashboard.py` adds Equity integration. This structure was retained because the complete merge candidate was green and re-collapsing the files would add unnecessary recovery risk.
-- `performance_history.py` changes are required for `maximum_drawdown` persistence while preserving legacy CSV compatibility; unknown columns fail safely rather than being silently discarded.
+## Shared safety gate now merged
+- Emergency stop and Paper-enabled checks.
+- Maximum shares per order.
+- Daily BUY/SELL count limits.
+- Daily realized-loss and consecutive-loss limits block new BUY exposure only so protective SELL exits remain possible.
+- Repurchase cooldown.
+- Legacy durable paper ledger is the state source during migration.
+- State-read failure fails closed.
+- Price-dependent cash/allocation/portfolio-risk/daily-notional controls remain in the existing `signal_runner.py` priced path; they were not guessed into an unpriced `OrderRequest` gate.
+- Live Trading remains forbidden/unimplemented.
 
-## Safety status
-- No Live Trading enablement was added by the recovery.
-- No IBKR/TWS/Gateway connection was made during the GitHub recovery work.
-- No new Paper order was sent during the recovery.
-- Runtime `data/`, send-locks, and runtime fill-state files were not recreated or modified by the GitHub recovery work.
-- Do not fabricate deleted runtime evidence. Historical evidence and runtime files are different things.
+## Audit findings retained
+- `paper_trading_runner.py` is the integrated Paper entry point. It requires both Paper opt-ins, rejects Live-enabled state, replaces the legacy paper recorder only for the run, sends through the approved IBKR Paper runtime, persists only confirmed Filled results, then synchronizes realized PnL/Equity/Drawdown.
+- The stable `order_intent_id` formula currently uses ticker + side + shares + reference price. Any redesign must preserve retry idempotency and be a separate safety change.
+- The user's local working tree previously showed `M results/decision_log_report.csv` and untracked `data/`; do not delete or overwrite those runtime/local artifacts automatically.
 
-## Verification status
-- PR #42 merge candidate: VERIFIED GREEN — 718 passed / 0 failed.
-- Recovery is merged to main; do not reopen or repeat it unless a new failing test or concrete defect is observed.
-- A future change must be verified independently on its own head before merge.
+## Verification boundary
+- GitHub CI cannot access the user's local TWS/Gateway.
+- Direct SPY contract resolution, one controlled Paper fill, and fill-state persistence are verified from the user's local runtime evidence.
+- The integrated end-to-end `paper_trading_runner.py` path with the newly merged shared risk gate has not yet been observed against the user's local TWS Paper session.
+- No Live Trading completion claim is permitted.
 
 ## Single next action
-Audit the new main baseline for the remaining unfinished auto-trading milestones only, then implement the highest-priority missing milestone without repeating completed Equity recovery or real-broker validation.
+On the user's Chromebook with TWS Paper logged in, sync `main` and run one controlled integrated Paper runner validation with explicit IBKR Paper opt-in, then inspect its output and generated reporting state. Do not repeat the standalone SPY test order.
