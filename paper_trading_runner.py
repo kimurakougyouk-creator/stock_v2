@@ -14,6 +14,11 @@ import order_manager
 import signal_runner
 
 
+# IBKR側の初回Paper安全ガードと統合Runnerを一致させる。
+# 戦略が100株等を算出しても、実IBKR Paperへ渡すパイロット数量は1株だけ。
+PAPER_PILOT_SHARES = 1
+
+
 def _sync_confirmed_fill_to_reporting() -> None:
     """確定約定から実現損益・総資産履歴・最大DDを冪等に再生成する。注文は送信しない。"""
     order_manager.save_realized_trade_pnls()
@@ -65,10 +70,13 @@ def _describe_unconfirmed_ibkr_result(execution) -> str:
 
 def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, reference_price: float) -> dict:
     normalized_signal = str(signal).upper()
-    normalized_shares = int(shares)
+    requested_shares = int(shares)
+    if requested_shares <= 0:
+        raise RuntimeError("IBKR Paperパイロット注文数量は1以上である必要があります。")
+    normalized_shares = PAPER_PILOT_SHARES
     normalized_price = float(reference_price)
     order_intent_id = (
-        "signal-runner:"
+        "signal-runner:paper-pilot:"
         f"{ticker}:{normalized_signal}:{normalized_shares}:"
         f"{normalized_price:.8f}"
     )
@@ -101,6 +109,8 @@ def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, r
         "reference_price": float(result.avg_fill_price),
         "status": "FILLED",
         "order_intent_id": order_intent_id,
+        "strategy_requested_shares": requested_shares,
+        "paper_pilot_shares": normalized_shares,
     }
 
 
@@ -131,6 +141,7 @@ def main() -> None:
     print("AI Asset Platform - IBKR PAPER TRADING")
     print("Live Trading : OFF")
     print("IBKR Paper   : ON")
+    print(f"IBKR Pilot Qty: {PAPER_PILOT_SHARES} share")
     print("=" * 50)
     result = run_paper_trading()
     health = evaluate_paper_trading_health(signal_count=len(result["records"]), error_count=len(result["errors"]))
