@@ -1,0 +1,1 @@
+release_gate=no-promotion-before-paper-e2e
