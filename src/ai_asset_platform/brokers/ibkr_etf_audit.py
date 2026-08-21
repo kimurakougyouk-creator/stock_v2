@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event, Thread
 
 from ibapi.client import EClient
@@ -33,9 +33,13 @@ class _ContractDetailsProbe(EWrapper, EClient):
     def __init__(self) -> None:
         EWrapper.__init__(self)
         EClient.__init__(self, self)
+        self.connected_ready = Event()
         self.ready = Event()
         self.details: list[ContractDetails] = []
         self.fatal_error: str | None = None
+
+    def nextValidId(self, orderId: int) -> None:  # noqa: N802
+        self.connected_ready.set()
 
     def contractDetails(self, reqId: int, contractDetails: ContractDetails) -> None:  # noqa: N802
         self.details.append(contractDetails)
@@ -51,8 +55,9 @@ class _ContractDetailsProbe(EWrapper, EClient):
         errorString,
         advancedOrderRejectJson="",
     ):
-        if errorCode in {200, 502, 503, 504, 1100}:
+        if errorCode in {200, 326, 502, 503, 504, 1100}:
             self.fatal_error = f"{errorCode}: {errorString}"
+            self.connected_ready.set()
             self.ready.set()
 
 
@@ -86,11 +91,26 @@ def audit_ibkr_paper_etf(
             False, False, normalized, None, None, None, False, connection.message
         )
 
+    # The connection probe above uses cfg.client_id and disconnects before returning.
+    # Use a distinct client id for the contract-details session to avoid an IBKR
+    # duplicate-client-id race while the first socket is being torn down.
+    contract_cfg = replace(cfg, client_id=cfg.client_id + 1)
     probe = _ContractDetailsProbe()
     try:
-        probe.connect(cfg.host, cfg.port, cfg.client_id)
+        probe.connect(contract_cfg.host, contract_cfg.port, contract_cfg.client_id)
         thread = Thread(target=probe.run, daemon=True)
         thread.start()
+
+        if not probe.connected_ready.wait(timeout):
+            return IbkrEtfAuditResult(
+                True, False, normalized, None, None, None, False,
+                "IBKR Paper API contract-details session did not become ready before timeout.",
+            )
+        if probe.fatal_error:
+            return IbkrEtfAuditResult(
+                True, False, normalized, None, None, None, False, probe.fatal_error
+            )
+
         probe.reqContractDetails(1, prepared.contract)
         probe.ready.wait(timeout)
 
