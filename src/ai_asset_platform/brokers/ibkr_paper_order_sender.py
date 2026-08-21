@@ -30,10 +30,10 @@ def prepare_ibkr_paper_order_for_instrument(
     instrument: InstrumentSpec,
     config: IbkrConnectionConfig,
 ) -> IbkrPreparedOrder:
-    """
-    共通OrderRequestと明示的InstrumentSpecをIBKR API形式へ安全に変換する。
+    """共通OrderRequestと明示的InstrumentSpecをIBKR API形式へ安全に変換する。
 
-    この関数は注文を送信しない。
+    この関数は注文を送信しない。数量はInstrumentSpecに明示された
+    broker-verified Paperテスト数量と完全一致する場合だけ許可する。
     """
     config.validate()
 
@@ -47,9 +47,14 @@ def prepare_ibkr_paper_order_for_instrument(
             "Live Trading許可中のためIBKR注文準備を中止しました。"
         )
 
-    if request.quantity != 1:
+    verified_quantity = instrument.verified_paper_test_quantity
+    if verified_quantity is None:
         raise RuntimeError(
-            "初回IBKR Paperテスト注文は数量1だけ許可します。"
+            "この銘柄のIBKR Paper検証済み注文数量が未登録のため停止しました。"
+        )
+    if request.quantity != verified_quantity:
+        raise RuntimeError(
+            f"IBKR Paperテスト注文は検証済み数量{verified_quantity}だけ許可します。"
         )
 
     request_symbol = request.symbol.strip().upper()
