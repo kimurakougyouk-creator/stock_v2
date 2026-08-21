@@ -25,49 +25,37 @@ class IbkrPreparedOrder:
     order: Order
 
 
-def prepare_ibkr_paper_order(
+def prepare_ibkr_paper_order_for_instrument(
     request: OrderRequest,
+    instrument: InstrumentSpec,
     config: IbkrConnectionConfig,
 ) -> IbkrPreparedOrder:
-    """
-    共通OrderRequestをIBKR API形式へ安全に変換する。
-
-    この関数は注文を送信しない。
-
-    既存OrderRequestにはまだasset_classがないため、この既存入口は
-    従来どおりUS stockとして扱う。ETF等はInstrumentSpecを受け取る
-    専用入口を追加するまで暗黙に有効化しない。
-    """
+    """Prepare, but never transmit, an IBKR Paper order for an explicit instrument."""
     config.validate()
 
     if not config.paper_trading:
         raise RuntimeError(
             "Paper Trading設定ではないためIBKR注文準備を中止しました。"
         )
-
     if config.allow_live_trading:
         raise RuntimeError(
             "Live Trading許可中のためIBKR注文準備を中止しました。"
         )
-
     if request.quantity != 1:
         raise RuntimeError(
             "初回IBKR Paperテスト注文は数量1だけ許可します。"
         )
 
-    instrument = InstrumentSpec(
-        symbol=request.symbol.strip().upper(),
-        asset_class=AssetClass.STOCK,
-    )
+    request_symbol = request.symbol.strip().upper()
+    instrument_symbol = instrument.symbol.strip().upper()
+    if request_symbol != instrument_symbol:
+        raise ValueError("OrderRequestとInstrumentSpecのsymbolが一致しません。")
+
     contract = to_ibapi_contract(build_ibkr_contract_spec(instrument))
 
     ib_order = Order()
-    ib_order.action = (
-        "BUY" if request.side is OrderSide.BUY else "SELL"
-    )
+    ib_order.action = "BUY" if request.side is OrderSide.BUY else "SELL"
     ib_order.totalQuantity = request.quantity
-    # ibapiのOrder既定値は空文字列("Time in Force"未設定)であり、
-    # IBKRはこれをエラー10052「無効な有効期限:空白」として拒否する。
     ib_order.tif = "DAY"
 
     if request.order_type is OrderType.MARKET:
@@ -76,14 +64,20 @@ def prepare_ibkr_paper_order(
         ib_order.orderType = "LMT"
         ib_order.lmtPrice = request.limit_price
     else:
-        raise ValueError(
-            f"未対応のIBKR注文種別です: {request.order_type}"
-        )
+        raise ValueError(f"未対応のIBKR注文種別です: {request.order_type}")
 
-    # 注文準備段階では安全のため送信を無効化する。
+    # This module only prepares orders. Transmission remains disabled.
     ib_order.transmit = False
+    return IbkrPreparedOrder(contract=contract, order=ib_order)
 
-    return IbkrPreparedOrder(
-        contract=contract,
-        order=ib_order,
+
+def prepare_ibkr_paper_order(
+    request: OrderRequest,
+    config: IbkrConnectionConfig,
+) -> IbkrPreparedOrder:
+    """Backward-compatible US-stock Paper preparation entry point."""
+    instrument = InstrumentSpec(
+        symbol=request.symbol.strip().upper(),
+        asset_class=AssetClass.STOCK,
     )
+    return prepare_ibkr_paper_order_for_instrument(request, instrument, config)
