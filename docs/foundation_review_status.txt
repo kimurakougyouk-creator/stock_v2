@@ -1,0 +1,1 @@
+Instrument/Contract foundation implementation is ready for CI review. Existing order transmission integration remains intentionally unchanged pending regression evidence.
