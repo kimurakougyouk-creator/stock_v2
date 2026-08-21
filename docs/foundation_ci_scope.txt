@@ -1,0 +1,1 @@
+Required before merge: focused InstrumentSpec/Contract tests, full pytest, secret scan, existing US stock no-transmit regression. ETF Paper E2E is a later promotion gate and does not occur in this foundation PR.
