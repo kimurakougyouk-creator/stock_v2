@@ -4,9 +4,11 @@ This module intentionally bypasses strategy/AI signal generation. It exercises
 only the already-audited Paper execution path for 9432 with 100 shares.
 Live trading remains prohibited by the underlying configuration and service.
 
-The v1 E2E attempt was confirmed NOT_SENT before the lower-level sender guard
-was corrected.  v2 is therefore a distinct, deliberate retry intent.  The ID
-remains stable so accidental re-runs of v2 are blocked after a real send.
+v1 was confirmed NOT_SENT before the lower-level sender guard was corrected.
+v2 was SENT but IBKR rejected it with 10311/201 because the stock API redirect
+warning precaution was not bypassed.  v3 is the single deliberate retry after
+that Paper Gateway precaution was explicitly enabled.  The stable v3 intent
+keeps accidental re-runs fail-closed after any real send.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from ai_asset_platform.core.asset_classes import AssetClass
 
 SYMBOL = "9432"
 QUANTITY = 100
-ORDER_INTENT_ID = "9432-paper-e2e-verified-lot-v2"
+ORDER_INTENT_ID = "9432-paper-e2e-verified-lot-v3"
 FILL_STATE_PATH = Path("data/ibkr_9432_paper_e2e_fill_state.json")
 
 

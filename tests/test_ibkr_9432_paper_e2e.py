@@ -17,4 +17,4 @@ def test_9432_e2e_uses_broker_verified_contract_and_quantity():
 
 
 def test_9432_e2e_has_stable_deliberate_retry_idempotency_key():
-    assert ORDER_INTENT_ID == "9432-paper-e2e-verified-lot-v2"
+    assert ORDER_INTENT_ID == "9432-paper-e2e-verified-lot-v3"
