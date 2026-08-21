@@ -63,10 +63,9 @@ def build_shared_risk_gate(
 ):
     """Return a fail-closed RiskGate compatible with ExecutionService.
 
-    The checks here are intentionally limited to controls that can be evaluated
-    from OrderRequest plus durable legacy state without guessing a market price.
-    Price-dependent allocation/notional checks remain outside this gate until a
-    priced order context is introduced.
+    Loss streak/daily-loss controls intentionally block new BUY exposure only,
+    matching the legacy safety behavior so protective SELL exits remain possible.
+    Disabled numeric limits (<= 0) are not treated as already exhausted.
     """
 
     def gate(order: OrderRequest) -> RiskGateResult:
@@ -79,7 +78,7 @@ def build_shared_risk_gate(
         if order.quantity <= 0:
             return RiskGateResult(False, "注文数量は1以上である必要があります")
 
-        if order.quantity > settings.max_order_shares:
+        if settings.max_order_shares <= 0 or order.quantity > settings.max_order_shares:
             return RiskGateResult(False, "1注文の最大株数を超えています")
 
         try:
@@ -87,14 +86,21 @@ def build_shared_risk_gate(
         except Exception as exc:
             return RiskGateResult(False, f"Risk状態を確認できないため注文を拒否しました: {exc}")
 
-        if snapshot.daily_realized_pnl <= -abs(settings.daily_loss_limit_yen):
-            return RiskGateResult(False, "1日の損失上限に到達しています")
-
-        if snapshot.consecutive_losses >= settings.max_consecutive_losses:
-            return RiskGateResult(False, "連続損失上限に到達しています")
-
         if order.side is OrderSide.BUY:
-            if snapshot.daily_buy_orders >= settings.max_daily_buy_orders:
+            if (
+                settings.daily_loss_limit_yen > 0
+                and snapshot.daily_realized_pnl <= -settings.daily_loss_limit_yen
+            ):
+                return RiskGateResult(False, "1日の損失上限に到達しています")
+            if (
+                settings.max_consecutive_losses > 0
+                and snapshot.consecutive_losses >= settings.max_consecutive_losses
+            ):
+                return RiskGateResult(False, "連続損失上限に到達しています")
+            if (
+                settings.max_daily_buy_orders > 0
+                and snapshot.daily_buy_orders >= settings.max_daily_buy_orders
+            ):
                 return RiskGateResult(False, "1日のBUY注文上限に到達しています")
             if snapshot.repurchase_cooldown_minutes > 0:
                 return RiskGateResult(
@@ -102,7 +108,10 @@ def build_shared_risk_gate(
                     f"再購入クールダウン中です（残り{snapshot.repurchase_cooldown_minutes}分）",
                 )
         elif order.side is OrderSide.SELL:
-            if snapshot.daily_sell_orders >= settings.max_daily_sell_orders:
+            if (
+                settings.max_daily_sell_orders > 0
+                and snapshot.daily_sell_orders >= settings.max_daily_sell_orders
+            ):
                 return RiskGateResult(False, "1日のSELL注文上限に到達しています")
         else:
             return RiskGateResult(False, "未対応の注文サイドです")
