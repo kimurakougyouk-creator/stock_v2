@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +34,27 @@ def _parse_tuple(value: Any, default: tuple[int, ...]) -> tuple[int, ...]:
         return default
 
     try:
-        return tuple(int(number) for number in parsed)
-    except (TypeError, ValueError):
+        normalized = tuple(int(number) for number in parsed)
+    except (TypeError, ValueError, OverflowError):
         return default
+
+    if any(number <= 0 for number in normalized):
+        return default
+
+    return normalized
+
+
+def _parse_positive_float(value: Any, default: float) -> float:
+    """NaN/inf/None/0以下を安全な既定値へ戻す。"""
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+    if not math.isfinite(normalized) or normalized <= 0:
+        return default
+
+    return normalized
 
 
 def load_optimized_settings(
@@ -71,10 +90,7 @@ def load_optimized_settings(
         if len(rsi) != 2:
             rsi = DEFAULT_RSI
 
-        try:
-            atr_multiplier = float(row["ATR"])
-        except (TypeError, ValueError):
-            atr_multiplier = DEFAULT_ATR
+        atr_multiplier = _parse_positive_float(row["ATR"], DEFAULT_ATR)
 
         settings[ticker] = {
             "ma_short": ma[0],
