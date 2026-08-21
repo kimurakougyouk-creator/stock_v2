@@ -1,0 +1,1 @@
+Promotion rule: an asset/market/broker tuple may enter VERIFIED_CAPABILITIES only after its contract semantics, order path, fill/PnL/equity/drawdown/recovery path, no-transmit safety, and real Paper E2E are evidenced.
