@@ -1,0 +1,1 @@
+Pre-merge requirements: GitHub Actions green; diff review confirms no placeOrder additions and no VERIFIED_CAPABILITIES changes.
