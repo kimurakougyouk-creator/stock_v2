@@ -54,6 +54,59 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
     raise RuntimeError(f"IBKR Paperへ接続できません: {detail}")
 
 
+def _confirmed_fill_from_broker_result(result, expected_quantity: int) -> tuple[float, float] | None:
+    """Return direct broker-confirmed fill evidence or fail closed.
+
+    A normal Filled orderStatus with positive quantity/average price is accepted.
+    If the open-order row has already disappeared, complete execDetails may also
+    prove the fill directly. exec_id values are deduplicated before quantity and
+    VWAP are calculated, so a repeated execution callback cannot double-count.
+    Absence from open orders alone is never treated as Filled.
+    """
+    if result is None or not getattr(result, "sent", False):
+        return None
+    if not getattr(result, "reached_terminal", False):
+        return None
+
+    filled_quantity = float(getattr(result, "filled_quantity", 0.0) or 0.0)
+    avg_fill_price = getattr(result, "avg_fill_price", None)
+    last_status = str(getattr(result, "last_known_status", "") or "")
+    if (
+        last_status == "Filled"
+        and filled_quantity >= expected_quantity
+        and avg_fill_price is not None
+        and float(avg_fill_price) > 0
+    ):
+        return filled_quantity, float(avg_fill_price)
+
+    executions = getattr(result, "executions", None) or []
+    unique: dict[str, tuple[float, float]] = {}
+    for execution in executions:
+        if not isinstance(execution, dict):
+            continue
+        if int(execution.get("order_id", -1)) != int(getattr(result, "order_id", -2)):
+            continue
+        exec_id = str(execution.get("exec_id", "")).strip()
+        if not exec_id or exec_id in unique:
+            continue
+        try:
+            shares = float(execution.get("shares", 0.0))
+            price = float(execution.get("price", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if shares <= 0 or price <= 0:
+            continue
+        unique[exec_id] = (shares, price)
+
+    execution_quantity = sum(shares for shares, _ in unique.values())
+    if execution_quantity < expected_quantity:
+        return None
+    execution_notional = sum(shares * price for shares, price in unique.values())
+    if execution_notional <= 0:
+        return None
+    return execution_quantity, execution_notional / execution_quantity
+
+
 def execute_approved_signal_via_ibkr_paper(
     *,
     ticker: str,
@@ -90,21 +143,18 @@ def execute_approved_signal_via_ibkr_paper(
             apply_account_fill=False,
         )
         result = execution.broker_result
-        if (
-            execution.attempted
-            and result is not None
-            and getattr(result, "sent", False)
-            and getattr(result, "reached_terminal", False)
-            and getattr(result, "last_known_status", None) == "Filled"
-            and float(getattr(result, "filled_quantity", 0.0)) > 0
-            and getattr(result, "avg_fill_price", None) is not None
-            and float(result.avg_fill_price) > 0
-        ):
+        confirmed = (
+            _confirmed_fill_from_broker_result(result, shares)
+            if execution.attempted
+            else None
+        )
+        if confirmed is not None:
+            confirmed_quantity, confirmed_price = confirmed
             record_confirmed_fill(
                 ticker=ticker,
                 side=signal,
-                filled_quantity=float(result.filled_quantity),
-                avg_fill_price=float(result.avg_fill_price),
+                filled_quantity=confirmed_quantity,
+                avg_fill_price=confirmed_price,
                 order_intent_id=order_intent_id,
                 order_log_path=order_log_path,
             )
