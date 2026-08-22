@@ -69,8 +69,6 @@ def prepare_ibkr_paper_order_for_instrument(
         "BUY" if request.side is OrderSide.BUY else "SELL"
     )
     ib_order.totalQuantity = request.quantity
-    # ibapiのOrder既定値は空文字列("Time in Force"未設定)であり、
-    # IBKRはこれをエラー10052「無効な有効期限:空白」として拒否する。
     ib_order.tif = "DAY"
 
     if request.order_type is OrderType.MARKET:
@@ -86,19 +84,17 @@ def prepare_ibkr_paper_order_for_instrument(
     # 注文準備段階では安全のため送信を無効化する。
     ib_order.transmit = False
 
-    return IbkrPreparedOrder(
-        contract=contract,
-        order=ib_order,
-    )
+    return IbkrPreparedOrder(contract=contract, order=ib_order)
 
 
 def prepare_ibkr_paper_order(
     request: OrderRequest,
     config: IbkrConnectionConfig,
 ) -> IbkrPreparedOrder:
-    """既存US株向けの後方互換Paper注文準備入口。"""
+    """既存の検証済みUS株1株Paper入口。新市場は明示InstrumentSpecを使う。"""
     instrument = InstrumentSpec(
         symbol=request.symbol.strip().upper(),
         asset_class=AssetClass.STOCK,
+        verified_paper_test_quantity=1,
     )
     return prepare_ibkr_paper_order_for_instrument(request, instrument, config)
