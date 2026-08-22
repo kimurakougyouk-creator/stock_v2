@@ -1,13 +1,16 @@
 """Read-only IBKR historical FX fallback for account-currency conversion.
 
-This module requests one short historical MIDPOINT series for a CASH/IDEALPRO
+This module requests a short historical MIDPOINT series for a CASH/IDEALPRO
 pair. It never creates, changes, cancels, or transmits an order. A usable rate
-requires at least one positive close returned by IBKR; otherwise it fails closed.
+requires a positive, timestamped, sufficiently fresh bar returned by IBKR;
+otherwise it fails closed.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from threading import Event, Thread
+from typing import Callable
 
 from ibapi.client import EClient
 from ibapi.contract import Contract
@@ -15,6 +18,9 @@ from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_fx_discovery import build_fx_discovery_contract
+
+DEFAULT_MAX_HISTORICAL_FX_AGE_SECONDS = 30 * 60
+_FUTURE_CLOCK_TOLERANCE_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -25,13 +31,24 @@ class IbkrHistoricalFxResult:
     quote_currency: str
     exchange: str
     rate: float | None
+    bar_timestamp: float | None = None
+    age_seconds: float | None = None
     source: str = "HISTORICAL_MIDPOINT"
     order_sent: bool = False
     errors: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def ready(self) -> bool:
-        return self.connected and self.rate is not None and self.rate > 0 and not self.order_sent
+        return (
+            self.connected
+            and self.rate is not None
+            and self.rate > 0
+            and self.bar_timestamp is not None
+            and self.age_seconds is not None
+            and self.age_seconds >= -_FUTURE_CLOCK_TOLERANCE_SECONDS
+            and self.age_seconds <= DEFAULT_MAX_HISTORICAL_FX_AGE_SECONDS
+            and not self.order_sent
+        )
 
 
 class _HistoricalFxProbe(EWrapper, EClient):
@@ -40,7 +57,7 @@ class _HistoricalFxProbe(EWrapper, EClient):
         EClient.__init__(self, self)
         self.connected_ready = Event()
         self.history_ready = Event()
-        self.closes: list[float] = []
+        self.bars: list[tuple[float, float]] = []
         self.errors: list[str] = []
         self.fatal_error: str | None = None
 
@@ -49,11 +66,12 @@ class _HistoricalFxProbe(EWrapper, EClient):
 
     def historicalData(self, reqId, bar):  # noqa: N802
         try:
+            timestamp = float(bar.date)
             close = float(bar.close)
         except (TypeError, ValueError):
             return
-        if close > 0:
-            self.closes.append(close)
+        if timestamp > 0 and close > 0:
+            self.bars.append((timestamp, close))
 
     def historicalDataEnd(self, reqId, start, end):  # noqa: N802
         self.history_ready.set()
@@ -83,8 +101,13 @@ def preview_ibkr_paper_historical_fx_rate(
     quote_currency: str,
     exchange: str = "IDEALPRO",
     timeout: float = 10.0,
+    max_age_seconds: float = DEFAULT_MAX_HISTORICAL_FX_AGE_SECONDS,
+    now_fn: Callable[[], float] = time.time,
 ) -> IbkrHistoricalFxResult:
-    """Return the most recent broker historical MIDPOINT close, fail closed."""
+    """Return the freshest recent broker historical MIDPOINT close, fail closed."""
+    if max_age_seconds <= 0:
+        raise ValueError("max_age_seconds must be positive")
+
     contract: Contract = build_fx_discovery_contract(
         base_currency=base_currency,
         quote_currency=quote_currency,
@@ -97,7 +120,8 @@ def preview_ibkr_paper_historical_fx_rate(
         probe = _HistoricalFxProbe()
         try:
             try:
-                probe.connect(cfg.host, cfg.port, cfg.client_id + 264)
+                # Unique from live/delayed/delayed-frozen market-data probes.
+                probe.connect(cfg.host, cfg.port, cfg.client_id + 266)
             except OSError as exc:
                 errors.append(f"{cfg.port}: {exc}")
                 continue
@@ -119,20 +143,39 @@ def preview_ibkr_paper_historical_fx_rate(
                 [],
             )
             probe.history_ready.wait(timeout)
-            if probe.closes:
+            if probe.bars:
+                timestamp, close = max(probe.bars, key=lambda item: item[0])
+                age = float(now_fn()) - timestamp
+                if age < -_FUTURE_CLOCK_TOLERANCE_SECONDS:
+                    errors.extend(probe.errors)
+                    errors.append(
+                        f"{cfg.port}: historical FX bar timestamp is unexpectedly in the future"
+                    )
+                    continue
+                if age > float(max_age_seconds):
+                    errors.extend(probe.errors)
+                    errors.append(
+                        f"{cfg.port}: historical FX evidence is stale ({age:.0f}s > {max_age_seconds:.0f}s)"
+                    )
+                    continue
                 return IbkrHistoricalFxResult(
                     connected=True,
                     endpoint_port=cfg.port,
                     base_currency=contract.symbol,
                     quote_currency=contract.currency,
                     exchange=contract.exchange,
-                    rate=probe.closes[-1],
+                    rate=close,
+                    bar_timestamp=timestamp,
+                    age_seconds=age,
                     source="HISTORICAL_MIDPOINT",
                     order_sent=False,
                     errors=tuple(errors + probe.errors),
                 )
             errors.extend(probe.errors)
-            errors.append(f"{cfg.port}: historical MIDPOINT for {contract.symbol}->{contract.currency} unavailable")
+            errors.append(
+                f"{cfg.port}: fresh timestamped historical MIDPOINT for "
+                f"{contract.symbol}->{contract.currency} unavailable"
+            )
         finally:
             if probe.isConnected():
                 probe.disconnect()
@@ -144,6 +187,8 @@ def preview_ibkr_paper_historical_fx_rate(
         quote_currency=contract.currency,
         exchange=contract.exchange,
         rate=None,
+        bar_timestamp=None,
+        age_seconds=None,
         source="HISTORICAL_MIDPOINT",
         order_sent=False,
         errors=tuple(errors),
