@@ -5,21 +5,25 @@ import order_manager
 import paper_trading_runner
 
 
-def _filled_result():
+def _filled_result(quantity=1.0, price=100.0):
     broker_result = SimpleNamespace(
         sent=True,
         reached_terminal=True,
         last_known_status="Filled",
-        filled_quantity=1.0,
-        avg_fill_price=100.0,
+        filled_quantity=quantity,
+        avg_fill_price=price,
     )
     return SimpleNamespace(attempted=True, broker_result=broker_result)
 
 
-def test_confirmed_ibkr_fill_updates_trade_equity_and_drawdown_reporting(monkeypatch, tmp_path):
+def _set_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(order_manager, "ORDER_LOG_DIR", tmp_path)
     monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", tmp_path / "paper_orders.jsonl")
     monkeypatch.setattr(order_manager, "TRADE_PNL_PATH", tmp_path / "paper_trade_pnls.json")
+
+
+def test_usd_confirmed_fill_is_preserved_but_jpy_reporting_fails_closed(monkeypatch, tmp_path):
+    _set_paths(monkeypatch, tmp_path)
 
     def fake_execute(**kwargs):
         from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
@@ -32,7 +36,37 @@ def test_confirmed_ibkr_fill_updates_trade_equity_and_drawdown_reporting(monkeyp
         return _filled_result()
 
     monkeypatch.setattr(paper_trading_runner, "execute_approved_signal_via_ibkr_paper", fake_execute)
-    paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
+    result = paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
+
+    assert result["status"] == "FILLED"
+    assert result["currency"] == "USD"
+    assert result["reporting_safe"] is False
+    assert not (tmp_path / "paper_trade_pnls.json").exists()
+    assert not (tmp_path / "equity_history.csv").exists()
+    assert not (tmp_path / "paper_drawdown.json").exists()
+    status = json.loads((tmp_path / "paper_accounting_status.json").read_text(encoding="utf-8"))
+    assert status["safe"] is False
+    assert "USD" in status["reason"]
+
+
+def test_jpy_confirmed_fill_still_updates_legacy_reporting(monkeypatch, tmp_path):
+    _set_paths(monkeypatch, tmp_path)
+
+    def fake_execute(**kwargs):
+        from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
+        record_confirmed_fill(
+            ticker=kwargs["ticker"], side=kwargs["signal"], filled_quantity=100,
+            avg_fill_price=100.0, currency="JPY",
+            order_intent_id=kwargs["order_intent_id"],
+            order_log_path=kwargs["order_log_path"],
+        )
+        return _filled_result(quantity=100.0, price=100.0)
+
+    monkeypatch.setattr(paper_trading_runner, "execute_approved_signal_via_ibkr_paper", fake_execute)
+    result = paper_trading_runner._execute_confirmed_ibkr_paper_order("9432.T", "BUY", 100, 100.0)
+
+    assert result["reporting_safe"] is True
+    assert result["currency"] == "JPY"
     assert (tmp_path / "paper_trade_pnls.json").exists()
     assert (tmp_path / "equity_history.csv").exists()
     drawdown_path = tmp_path / "paper_drawdown.json"
@@ -41,10 +75,8 @@ def test_confirmed_ibkr_fill_updates_trade_equity_and_drawdown_reporting(monkeyp
     assert drawdown == {"maximum_drawdown": 0.0, "equity_points": 1}
 
 
-def test_reexecution_same_intent_does_not_double_count(monkeypatch, tmp_path):
-    monkeypatch.setattr(order_manager, "ORDER_LOG_DIR", tmp_path)
-    monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", tmp_path / "paper_orders.jsonl")
-    monkeypatch.setattr(order_manager, "TRADE_PNL_PATH", tmp_path / "paper_trade_pnls.json")
+def test_reexecution_same_session_intent_does_not_double_count(monkeypatch, tmp_path):
+    _set_paths(monkeypatch, tmp_path)
 
     def fake_execute(**kwargs):
         from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
@@ -57,14 +89,11 @@ def test_reexecution_same_intent_does_not_double_count(monkeypatch, tmp_path):
         return _filled_result()
 
     monkeypatch.setattr(paper_trading_runner, "execute_approved_signal_via_ibkr_paper", fake_execute)
-    paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
-    paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
+    first = paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
+    second = paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 101.0)
+
     lines = (tmp_path / "paper_orders.jsonl").read_text().strip().splitlines()
     assert len(lines) == 1
-    equity_lines = (tmp_path / "equity_history.csv").read_text(encoding="utf-8-sig").strip().splitlines()
-    assert len(equity_lines) == 2
-    payload = json.loads((tmp_path / "paper_trade_pnls.json").read_text())
-    assert payload["realized_trade_pnls"] == []
-    drawdown = json.loads((tmp_path / "paper_drawdown.json").read_text(encoding="utf-8"))
-    assert drawdown["equity_points"] == 1
-    assert drawdown["maximum_drawdown"] == 0.0
+    assert first["order_intent_id"] == second["order_intent_id"]
+    assert first["reporting_safe"] is False
+    assert second["reporting_safe"] is False
