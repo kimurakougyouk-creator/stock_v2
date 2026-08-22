@@ -19,9 +19,10 @@ def _settings(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_paper_runner_scans_without_legacy_order_branch(monkeypatch):
+def test_paper_runner_scans_only_verified_pilot_universe_without_legacy_order_branch(monkeypatch):
     calls = []
     monkeypatch.setattr(paper_trading_runner, "SETTINGS", _settings())
+    monkeypatch.setattr(paper_trading_runner, "verified_paper_tickers", lambda: ("AAPL", "SPY", "9432.T"))
     monkeypatch.setattr(paper_trading_runner.signal_runner, "_create_configured_ai_provider", lambda: "TEST_AI")
     monkeypatch.setattr(
         paper_trading_runner.signal_runner,
@@ -33,7 +34,12 @@ def test_paper_runner_scans_without_legacy_order_branch(monkeypatch):
     assert result["errors"] == []
     assert result["paper_orders"] == []
     assert result["execution_errors"] == []
-    assert calls == [{"ai_provider": "TEST_AI", "allow_orders": False, "allow_email": False}]
+    assert calls == [{
+        "tickers": ["AAPL", "SPY", "9432.T"],
+        "ai_provider": "TEST_AI",
+        "allow_orders": False,
+        "allow_email": False,
+    }]
 
 
 def test_paper_runner_rejects_disabled_paper(monkeypatch):
