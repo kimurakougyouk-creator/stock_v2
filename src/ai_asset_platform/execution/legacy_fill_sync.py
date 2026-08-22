@@ -1,6 +1,6 @@
 """Synchronize confirmed broker fills into the legacy paper-order state.
 
-This module never sends an order.  It records only terminal, confirmed fills so
+This module never sends an order. It records only terminal, confirmed fills so
 legacy risk/accounting helpers keep reading the same durable state during the
 IBKR Paper migration.
 """
@@ -19,12 +19,15 @@ def record_confirmed_fill(
     side: str,
     filled_quantity: float,
     avg_fill_price: float,
+    currency: str,
     order_intent_id: str,
     order_log_path: Path,
 ) -> dict[str, Any]:
     """Append one confirmed fill, idempotently by ``order_intent_id``.
 
-    No record is written for invalid/unconfirmed data.  Existing records with
+    Currency is mandatory because the legacy ledger historically assumed JPY.
+    Persisting an IBKR fill without its broker/product currency would let later
+    risk/accounting code compare unlike monetary units. Existing records with
     the same intent id are returned unchanged, preventing duplicate accounting
     after retries/restarts.
     """
@@ -33,6 +36,10 @@ def record_confirmed_fill(
         raise ValueError("side must be BUY or SELL")
     if not order_intent_id:
         raise ValueError("order_intent_id is required")
+
+    normalized_currency = str(currency).strip().upper()
+    if len(normalized_currency) != 3 or not normalized_currency.isalpha():
+        raise ValueError("currency must be a 3-letter code")
 
     quantity = float(filled_quantity)
     price = float(avg_fill_price)
@@ -63,6 +70,7 @@ def record_confirmed_fill(
         "side": normalized_side,
         "shares": int(quantity),
         "reference_price": price,
+        "currency": normalized_currency,
         "status": "FILLED",
         "order_intent_id": order_intent_id,
     }
