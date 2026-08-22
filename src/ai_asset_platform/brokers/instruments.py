@@ -9,9 +9,10 @@ from ai_asset_platform.core.asset_classes import AssetClass
 class InstrumentSpec:
     """Broker-neutral description of a tradable instrument.
 
-    verified_paper_test_quantity defaults to the historical one-share pilot for
-    backward-compatible instrument callers.  Mapped markets that have not been
-    broker-audited must explicitly set None and therefore fail closed.
+    Paper order quantity is intentionally unverified by default. Every product
+    must opt in with a broker-verified quantity before the Paper order path can
+    transmit it. This avoids leaking historical one-share assumptions into new
+    markets such as Japan stocks, overnight products, or futures.
     """
 
     symbol: str
@@ -22,7 +23,7 @@ class InstrumentSpec:
     strike: float | None = None
     right: str | None = None
     multiplier: str | None = None
-    verified_paper_test_quantity: int | None = 1
+    verified_paper_test_quantity: int | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
