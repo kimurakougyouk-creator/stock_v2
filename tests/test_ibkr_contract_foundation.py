@@ -35,7 +35,7 @@ def test_explicit_etf_paper_preparation_is_no_transmit():
     )
     prepared = prepare_ibkr_paper_order_for_instrument(
         request,
-        InstrumentSpec("SPY", AssetClass.ETF),
+        InstrumentSpec("SPY", AssetClass.ETF, verified_paper_test_quantity=1),
         IbkrConnectionConfig(),
     )
     assert prepared.contract.symbol == "SPY"
@@ -45,6 +45,21 @@ def test_explicit_etf_paper_preparation_is_no_transmit():
     assert prepared.order.totalQuantity == 1
     assert prepared.order.tif == "DAY"
     assert prepared.order.transmit is False
+
+
+def test_unverified_paper_quantity_fails_closed():
+    request = OrderRequest(
+        symbol="SPY",
+        side=OrderSide.BUY,
+        quantity=1,
+        order_type=OrderType.MARKET,
+    )
+    with pytest.raises(RuntimeError, match="未登録"):
+        prepare_ibkr_paper_order_for_instrument(
+            request,
+            InstrumentSpec("SPY", AssetClass.ETF),
+            IbkrConnectionConfig(),
+        )
 
 
 def test_explicit_instrument_rejects_symbol_mismatch():
@@ -57,7 +72,7 @@ def test_explicit_instrument_rejects_symbol_mismatch():
     with pytest.raises(ValueError, match="symbol"):
         prepare_ibkr_paper_order_for_instrument(
             request,
-            InstrumentSpec("SPY", AssetClass.ETF),
+            InstrumentSpec("SPY", AssetClass.ETF, verified_paper_test_quantity=1),
             IbkrConnectionConfig(),
         )
 
