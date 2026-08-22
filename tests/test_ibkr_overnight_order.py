@@ -6,16 +6,20 @@ from ai_asset_platform.brokers.orders import OrderSide
 from ai_asset_platform.core.asset_classes import AssetClass
 
 
+def _spy_spec():
+    return OvernightPaperOrderSpec(
+        symbol="SPY",
+        side=OrderSide.BUY,
+        quantity=1,
+        limit_price=500.00,
+        primary_exchange="ARCA",
+        asset_class=AssetClass.ETF,
+    )
+
+
 def test_verified_spy_overnight_order_is_limit_day_and_never_transmits():
     prepared = prepare_ibkr_overnight_paper_limit_order(
-        OvernightPaperOrderSpec(
-            symbol="SPY",
-            side=OrderSide.BUY,
-            quantity=1,
-            limit_price=500.00,
-            primary_exchange="ARCA",
-            asset_class=AssetClass.ETF,
-        ),
+        _spy_spec(),
         verified_paper_test_quantity=1,
     )
     assert prepared.contract.symbol == "SPY"
@@ -33,15 +37,7 @@ def test_verified_spy_overnight_order_is_limit_day_and_never_transmits():
 
 def test_overnight_order_blocks_unverified_quantity():
     with pytest.raises(RuntimeError, match="unverified"):
-        prepare_ibkr_overnight_paper_limit_order(
-            OvernightPaperOrderSpec(
-                symbol="SPY",
-                side=OrderSide.BUY,
-                quantity=1,
-                limit_price=500.00,
-                primary_exchange="ARCA",
-            )
-        )
+        prepare_ibkr_overnight_paper_limit_order(_spy_spec())
 
 
 def test_overnight_order_rejects_quantity_mismatch():
@@ -73,16 +69,20 @@ def test_overnight_order_rejects_non_us_stock_etf_asset_class():
         )
 
 
-def test_overnight_order_rejects_gateway_port():
-    with pytest.raises(RuntimeError, match="7497"):
+@pytest.mark.parametrize("port", [4002, 7497])
+def test_overnight_order_accepts_standard_paper_ports(port):
+    prepared = prepare_ibkr_overnight_paper_limit_order(
+        _spy_spec(),
+        config=IbkrConnectionConfig(port=port),
+        verified_paper_test_quantity=1,
+    )
+    assert prepared.order.transmit is False
+
+
+def test_overnight_order_rejects_non_paper_port():
+    with pytest.raises(RuntimeError, match="4002 or 7497"):
         prepare_ibkr_overnight_paper_limit_order(
-            OvernightPaperOrderSpec(
-                symbol="SPY",
-                side=OrderSide.BUY,
-                quantity=1,
-                limit_price=500.00,
-                primary_exchange="ARCA",
-            ),
-            config=IbkrConnectionConfig(port=4002),
+            _spy_spec(),
+            config=IbkrConnectionConfig(port=12345),
             verified_paper_test_quantity=1,
         )

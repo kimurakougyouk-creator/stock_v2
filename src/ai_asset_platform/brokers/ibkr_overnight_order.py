@@ -9,6 +9,9 @@ from ai_asset_platform.brokers.orders import OrderRequest, OrderSide, OrderType
 from ai_asset_platform.core.asset_classes import AssetClass
 
 
+PAPER_API_PORTS = {4002, 7497}
+
+
 @dataclass(frozen=True)
 class OvernightPaperOrderSpec:
     symbol: str
@@ -27,14 +30,15 @@ def prepare_ibkr_overnight_paper_limit_order(
 ) -> IbkrPreparedOrder:
     """Build an IBKR Overnight Paper limit order without transmitting it.
 
-    Overnight is treated as an independent directed venue. This function only
-    prepares a DAY/LMT order for the OVERNIGHT destination and leaves
-    ``transmit`` disabled. Quantity must be explicitly broker-verified.
+    Supports the two standard simulated-trading endpoints used by IBKR:
+    Gateway Paper (4002) and TWS Paper (7497). The caller must still provide a
+    Paper-only config, broker-resolved primary exchange, and an explicitly
+    verified quantity. The returned order always has transmit=False.
     """
-    cfg = config or create_ibkr_paper_config(use_gateway=False)
+    cfg = config or create_ibkr_paper_config()
     cfg.validate()
-    if cfg.port != 7497:
-        raise RuntimeError("Overnight Paper preparation currently requires TWS Paper port 7497.")
+    if cfg.port not in PAPER_API_PORTS:
+        raise RuntimeError("Overnight Paper preparation requires IBKR Paper port 4002 or 7497.")
     if not cfg.paper_trading or cfg.allow_live_trading:
         raise RuntimeError("Overnight preparation is Paper-only and Live must remain disabled.")
     if spec.asset_class not in {AssetClass.STOCK, AssetClass.ETF}:
@@ -61,9 +65,6 @@ def prepare_ibkr_overnight_paper_limit_order(
     )
     prepared = prepare_ibkr_paper_order_for_instrument(request, instrument, cfg)
 
-    # Overnight orders are single-session DAY orders. Keep outsideRth false:
-    # routing is controlled by the dedicated OVERNIGHT destination, not the
-    # regular SMART outside-RTH flag.
     prepared.order.tif = "DAY"
     prepared.order.outsideRth = False
     prepared.order.transmit = False
