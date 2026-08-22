@@ -14,6 +14,7 @@ class IbkrContractSpec:
     sec_type: str
     exchange: str
     currency: str
+    primary_exchange: str | None = None
     last_trade_date_or_contract_month: str | None = None
     strike: float | None = None
     right: str | None = None
@@ -43,8 +44,13 @@ def build_ibkr_contract_spec(instrument: InstrumentSpec) -> IbkrContractSpec:
     return IbkrContractSpec(
         symbol=instrument.symbol.strip(),
         sec_type=sec_type,
-        exchange=instrument.exchange.strip(),
+        exchange=instrument.exchange.strip().upper(),
         currency=instrument.currency.strip().upper(),
+        primary_exchange=(
+            instrument.primary_exchange.strip().upper()
+            if instrument.primary_exchange is not None
+            else None
+        ),
     )
 
 
@@ -61,6 +67,8 @@ def to_ibapi_contract(spec: IbkrContractSpec):
     contract.secType = spec.sec_type
     contract.exchange = spec.exchange
     contract.currency = spec.currency
+    if spec.primary_exchange:
+        contract.primaryExchange = spec.primary_exchange
     if spec.last_trade_date_or_contract_month:
         contract.lastTradeDateOrContractMonth = spec.last_trade_date_or_contract_month
     if spec.strike is not None:
