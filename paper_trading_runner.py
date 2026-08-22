@@ -3,7 +3,8 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import TRADING_CAPITAL
+from config import STOP_LOSS_RATE, TRADING_CAPITAL
+from ai_asset_platform.brokers.ibkr_fx_snapshot import preview_ibkr_paper_fx_rate
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.confirmed_fill_evidence import (
     confirmed_fill_from_broker_result,
@@ -13,7 +14,13 @@ from ai_asset_platform.execution.paper_trading_loop import run_paper_trading_loo
 from ai_asset_platform.execution.signal_order_bridge import (
     _instrument_for_ticker,
     verified_paper_test_quantity_for_ticker,
+    verified_paper_tickers,
 )
+from ai_asset_platform.execution.verified_paper_preflight import (
+    VerifiedPaperPreflightError,
+    evaluate_verified_paper_preflight,
+)
+from ai_asset_platform.execution.verified_paper_scan import execute_verified_actions_from_scan
 from ai_asset_platform.reports.equity_history import (
     append_equity_history,
     calculate_maximum_drawdown,
@@ -46,11 +53,7 @@ def _write_accounting_status(*, safe: bool, reason: str | None) -> None:
     path = order_manager.ORDER_LOG_DIR / "paper_accounting_status.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(
-            {"safe": bool(safe), "reason": reason},
-            ensure_ascii=False,
-            indent=2,
-        ) + "\n",
+        json.dumps({"safe": bool(safe), "reason": reason}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -70,14 +73,10 @@ def _write_multicurrency_summary(summary, *, cross_currency: bool) -> None:
         "maximum_drawdown": summary.maximum_drawdown,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _write_account_currency_trade_history(trades, *, account_currency: str) -> None:
-    """Persist detailed realized trades whose monetary fields share one currency."""
     path = order_manager.ORDER_LOG_DIR / "paper_trade_pnls_account_currency.json"
     records = [trade.as_record() for trade in trades]
     payload = {
@@ -88,21 +87,12 @@ def _write_account_currency_trade_history(trades, *, account_currency: str) -> N
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
 
 
 def _sync_confirmed_fill_to_reporting() -> bool:
-    """Rebuild account-currency PnL/equity/drawdown from confirmed evidence.
-
-    Cross-currency records require an explicit per-fill FX rate. Missing FX fails
-    closed without deleting the confirmed fill. The legacy detailed trade JSON is
-    still regenerated for single-account-currency ledgers, while the new account-
-    currency trade history is written for both single- and cross-currency ledgers.
-    """
+    """Rebuild account-currency PnL/equity/drawdown from confirmed evidence."""
     orders = order_manager.load_accounting_orders()
     account_currency = str(SETTINGS.account_currency).strip().upper()
     try:
@@ -125,37 +115,32 @@ def _sync_confirmed_fill_to_reporting() -> bool:
         return False
 
     cross_currency = any(
-        str(order.get("currency", "")).strip().upper()
-        not in {"", account_currency}
+        str(order.get("currency", "")).strip().upper() not in {"", account_currency}
         for order in orders
         if isinstance(order, dict)
     )
-
     if not cross_currency:
         order_manager.save_realized_trade_pnls()
 
-    _write_account_currency_trade_history(
-        realized_trades,
-        account_currency=account_currency,
-    )
+    _write_account_currency_trade_history(realized_trades, account_currency=account_currency)
     _write_multicurrency_summary(summary, cross_currency=cross_currency)
     _write_accounting_status(safe=True, reason=None)
     if not points:
         return True
 
-    append_equity_history(
-        points[-1],
-        order_manager.ORDER_LOG_DIR / "equity_history.csv",
-    )
+    append_equity_history(points[-1], order_manager.ORDER_LOG_DIR / "equity_history.csv")
     drawdown_path = order_manager.ORDER_LOG_DIR / "paper_drawdown.json"
-    payload = {
-        "maximum_drawdown": float(calculate_maximum_drawdown(points)),
-        "equity_points": len(points),
-        "account_currency": account_currency,
-    }
     drawdown_path.parent.mkdir(parents=True, exist_ok=True)
     drawdown_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            {
+                "maximum_drawdown": float(calculate_maximum_drawdown(points)),
+                "equity_points": len(points),
+                "account_currency": account_currency,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
         encoding="utf-8",
     )
     return True
@@ -164,11 +149,9 @@ def _sync_confirmed_fill_to_reporting() -> bool:
 def _describe_unconfirmed_ibkr_result(execution) -> str:
     if not execution.attempted:
         return f"IBKR Paper注文は送信前に停止しました: {execution.reason}"
-
     result = execution.broker_result
     if result is None:
         return "IBKR Paper注文結果を取得できませんでした。注文済みとして記録しません。"
-
     details = [
         f"status={getattr(result, 'status', None)}",
         f"sent={getattr(result, 'sent', None)}",
@@ -183,10 +166,26 @@ def _describe_unconfirmed_ibkr_result(execution) -> str:
     errors = getattr(result, "errors", None)
     if errors:
         details.append(f"errors={errors}")
-    return (
-        "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。"
-        + " / ".join(details)
+    return "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。" + " / ".join(details)
+
+
+def _preflight_fx_rate(*, instrument_currency: str, side: str) -> float | None:
+    """Get read-only FX evidence only when a new BUY needs account valuation."""
+    if str(side).upper() == "SELL":
+        return None
+    account_currency = str(SETTINGS.account_currency).strip().upper()
+    instrument_currency = str(instrument_currency).strip().upper()
+    if instrument_currency == account_currency:
+        return 1.0
+    snapshot = preview_ibkr_paper_fx_rate(
+        base_currency=instrument_currency,
+        quote_currency=account_currency,
     )
+    if not snapshot.ready or snapshot.rate is None or float(snapshot.rate) <= 0:
+        raise RuntimeError(
+            f"{instrument_currency}->{account_currency} FX snapshot is unavailable; BUY blocked"
+        )
+    return float(snapshot.rate)
 
 
 def _execute_confirmed_ibkr_paper_order(
@@ -208,6 +207,28 @@ def _execute_confirmed_ibkr_paper_order(
 
     instrument = _instrument_for_ticker(ticker)
     normalized_shares = int(verified_quantity)
+    fx_rate = _preflight_fx_rate(
+        instrument_currency=instrument.currency,
+        side=normalized_signal,
+    )
+    try:
+        preflight = evaluate_verified_paper_preflight(
+            records=order_manager.load_accounting_orders(),
+            ticker=str(ticker),
+            side=normalized_signal,
+            quantity=normalized_shares,
+            reference_price=float(reference_price),
+            instrument_currency=instrument.currency,
+            settings=SETTINGS,
+            initial_capital=float(TRADING_CAPITAL),
+            fx_to_account_rate=fx_rate,
+            stop_loss_rate=float(STOP_LOSS_RATE),
+        )
+    except VerifiedPaperPreflightError as exc:
+        raise RuntimeError(f"verified Paper preflight failed: {exc}") from exc
+    if not preflight.allowed:
+        raise RuntimeError(f"verified Paper preflight blocked order: {preflight.reason}")
+
     order_intent_id = (
         "signal-runner:paper-pilot:"
         f"{ticker}:{normalized_signal}:{normalized_shares}:"
@@ -241,6 +262,7 @@ def _execute_confirmed_ibkr_paper_order(
         "order_intent_id": order_intent_id,
         "strategy_requested_shares": requested_shares,
         "paper_pilot_shares": normalized_shares,
+        "preflight_fx_to_account_rate": fx_rate,
         "reporting_safe": reporting_safe,
     }
 
@@ -254,13 +276,23 @@ def run_paper_trading() -> dict:
         raise RuntimeError("Live Tradingが有効なため、安全のためPaper試運転を中止しました。")
     if SETTINGS.live_trading_unlocked:
         raise RuntimeError("Live Tradingが解除されているため、安全のためPaper試運転を中止しました。")
+
     ai_provider = signal_runner._create_configured_ai_provider()
-    original_create_paper_order = signal_runner.create_paper_order
-    signal_runner.create_paper_order = _execute_confirmed_ibkr_paper_order
-    try:
-        return signal_runner.run_signal_scan(ai_provider=ai_provider, allow_orders=True, allow_email=False)
-    finally:
-        signal_runner.create_paper_order = original_create_paper_order
+    # The IBKR Paper pilot scans only instruments whose broker quantity has
+    # already been evidenced.  This also guarantees AAPL/SPY are analyzed even
+    # while the legacy tickers.csv remains JP-only. Unverified symbols cannot
+    # accidentally become Paper orders through this runner.
+    scan_result = signal_runner.run_signal_scan(
+        tickers=list(verified_paper_tickers()),
+        ai_provider=ai_provider,
+        allow_orders=False,
+        allow_email=False,
+    )
+    return execute_verified_actions_from_scan(
+        scan_result,
+        execute_order=_execute_confirmed_ibkr_paper_order,
+        settings=SETTINGS,
+    )
 
 
 def run_continuous_paper_trading(*, max_runs: int = 3):

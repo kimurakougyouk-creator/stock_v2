@@ -26,6 +26,15 @@ def _result(**overrides):
     return SimpleNamespace(**payload)
 
 
+def _allow_preflight(monkeypatch):
+    monkeypatch.setattr(paper_trading_runner, "_preflight_fx_rate", lambda **kwargs: 150.0)
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "evaluate_verified_paper_preflight",
+        lambda **kwargs: SimpleNamespace(allowed=True, reason="passed"),
+    )
+
+
 def test_explicit_filled_status_is_confirmed():
     result = _result(last_known_status="Filled", filled_quantity=1.0, avg_fill_price=101.5)
     assert confirmed_fill_from_broker_result(result, 1) == (1.0, 101.5)
@@ -50,9 +59,7 @@ def test_partial_execdetails_remain_unconfirmed():
     result = _result(
         filled_quantity=0.0,
         avg_fill_price=None,
-        executions=[
-            {"order_id": 11, "exec_id": "A", "shares": 0.4, "price": 100.0},
-        ],
+        executions=[{"order_id": 11, "exec_id": "A", "shares": 0.4, "price": 100.0}],
     )
     assert confirmed_fill_from_broker_result(result, 1) is None
 
@@ -65,27 +72,15 @@ def test_runner_accepts_complete_execdetails_using_same_shared_rule(monkeypatch)
     result = _result(
         filled_quantity=0.0,
         avg_fill_price=None,
-        executions=[
-            {"order_id": 11, "exec_id": "A", "shares": 1.0, "price": 123.45},
-        ],
+        executions=[{"order_id": 11, "exec_id": "A", "shares": 1.0, "price": 123.45}],
     )
     execution = SimpleNamespace(attempted=True, reason="ok", broker_result=result)
+    _allow_preflight(monkeypatch)
+    monkeypatch.setattr(paper_trading_runner, "verified_paper_test_quantity_for_ticker", lambda ticker: 1)
+    monkeypatch.setattr(paper_trading_runner, "execute_approved_signal_via_ibkr_paper", lambda **kwargs: execution)
+    monkeypatch.setattr(paper_trading_runner, "_sync_confirmed_fill_to_reporting", lambda: True)
 
-    monkeypatch.setattr(
-        paper_trading_runner,
-        "verified_paper_test_quantity_for_ticker",
-        lambda ticker: 1,
-    )
-    monkeypatch.setattr(
-        paper_trading_runner,
-        "execute_approved_signal_via_ibkr_paper",
-        lambda **kwargs: execution,
-    )
-    monkeypatch.setattr(paper_trading_runner, "_sync_confirmed_fill_to_reporting", lambda: None)
-
-    row = paper_trading_runner._execute_confirmed_ibkr_paper_order(
-        "SPY", "BUY", 1, 120.0
-    )
+    row = paper_trading_runner._execute_confirmed_ibkr_paper_order("SPY", "BUY", 1, 120.0)
     assert row["status"] == "FILLED"
     assert row["shares"] == 1
     assert row["reference_price"] == pytest.approx(123.45)
@@ -95,23 +90,12 @@ def test_runner_still_rejects_partial_execdetails(monkeypatch):
     result = _result(
         filled_quantity=0.0,
         avg_fill_price=None,
-        executions=[
-            {"order_id": 11, "exec_id": "A", "shares": 0.5, "price": 123.45},
-        ],
+        executions=[{"order_id": 11, "exec_id": "A", "shares": 0.5, "price": 123.45}],
     )
     execution = SimpleNamespace(attempted=True, reason="ok", broker_result=result)
-    monkeypatch.setattr(
-        paper_trading_runner,
-        "verified_paper_test_quantity_for_ticker",
-        lambda ticker: 1,
-    )
-    monkeypatch.setattr(
-        paper_trading_runner,
-        "execute_approved_signal_via_ibkr_paper",
-        lambda **kwargs: execution,
-    )
+    _allow_preflight(monkeypatch)
+    monkeypatch.setattr(paper_trading_runner, "verified_paper_test_quantity_for_ticker", lambda ticker: 1)
+    monkeypatch.setattr(paper_trading_runner, "execute_approved_signal_via_ibkr_paper", lambda **kwargs: execution)
 
     with pytest.raises(RuntimeError, match="Filled"):
-        paper_trading_runner._execute_confirmed_ibkr_paper_order(
-            "SPY", "BUY", 1, 120.0
-        )
+        paper_trading_runner._execute_confirmed_ibkr_paper_order("SPY", "BUY", 1, 120.0)

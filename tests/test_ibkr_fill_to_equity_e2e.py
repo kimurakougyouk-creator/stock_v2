@@ -22,8 +22,18 @@ def _set_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(order_manager, "TRADE_PNL_PATH", tmp_path / "paper_trade_pnls.json")
 
 
+def _allow_preflight(monkeypatch, *, fx=150.0):
+    monkeypatch.setattr(paper_trading_runner, "_preflight_fx_rate", lambda **kwargs: fx)
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "evaluate_verified_paper_preflight",
+        lambda **kwargs: SimpleNamespace(allowed=True, reason="passed"),
+    )
+
+
 def test_usd_confirmed_fill_with_fx_updates_jpy_equity_reporting(monkeypatch, tmp_path):
     _set_paths(monkeypatch, tmp_path)
+    _allow_preflight(monkeypatch)
 
     def fake_execute(**kwargs):
         from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
@@ -60,6 +70,7 @@ def test_usd_confirmed_fill_with_fx_updates_jpy_equity_reporting(monkeypatch, tm
 
 def test_usd_confirmed_round_trip_writes_converted_realized_trade(monkeypatch, tmp_path):
     _set_paths(monkeypatch, tmp_path)
+    _allow_preflight(monkeypatch)
     calls = {"n": 0}
 
     def fake_execute(**kwargs):
@@ -90,6 +101,7 @@ def test_usd_confirmed_round_trip_writes_converted_realized_trade(monkeypatch, t
 
 def test_usd_confirmed_fill_without_fx_remains_fail_closed(monkeypatch, tmp_path):
     _set_paths(monkeypatch, tmp_path)
+    _allow_preflight(monkeypatch)
 
     def fake_execute(**kwargs):
         from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
@@ -113,6 +125,7 @@ def test_usd_confirmed_fill_without_fx_remains_fail_closed(monkeypatch, tmp_path
 
 def test_jpy_confirmed_fill_still_updates_legacy_and_new_summary(monkeypatch, tmp_path):
     _set_paths(monkeypatch, tmp_path)
+    _allow_preflight(monkeypatch, fx=1.0)
 
     def fake_execute(**kwargs):
         from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
@@ -143,6 +156,7 @@ def test_jpy_confirmed_fill_still_updates_legacy_and_new_summary(monkeypatch, tm
 
 def test_reexecution_same_session_intent_does_not_double_count(monkeypatch, tmp_path):
     _set_paths(monkeypatch, tmp_path)
+    _allow_preflight(monkeypatch)
 
     def fake_execute(**kwargs):
         from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
