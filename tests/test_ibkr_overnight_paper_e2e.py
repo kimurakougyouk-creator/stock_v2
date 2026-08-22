@@ -26,22 +26,22 @@ def _ready_whatif():
 
 def test_official_overnight_session_windows_are_dst_safe():
     assert module.is_ibkr_overnight_session_open(
-        datetime(2026, 8, 23, 20, 0, tzinfo=ET)  # Sunday evening
+        datetime(2026, 8, 23, 20, 0, tzinfo=ET)
     )
     assert module.is_ibkr_overnight_session_open(
-        datetime(2026, 8, 24, 3, 49, tzinfo=ET)  # Monday continuation
+        datetime(2026, 8, 24, 3, 49, tzinfo=ET)
     )
     assert not module.is_ibkr_overnight_session_open(
         datetime(2026, 8, 24, 3, 50, tzinfo=ET)
     )
     assert not module.is_ibkr_overnight_session_open(
-        datetime(2026, 8, 22, 22, 0, tzinfo=ET)  # Saturday
+        datetime(2026, 8, 22, 22, 0, tzinfo=ET)
     )
     assert not module.is_ibkr_overnight_session_open(
-        datetime(2026, 8, 23, 12, 0, tzinfo=ET)  # Sunday daytime
+        datetime(2026, 8, 23, 12, 0, tzinfo=ET)
     )
     assert not module.is_ibkr_overnight_session_open(
-        datetime(2026, 8, 21, 20, 0, tzinfo=ET)  # Friday evening
+        datetime(2026, 8, 21, 20, 0, tzinfo=ET)
     )
 
 
@@ -174,11 +174,43 @@ def test_ready_path_uses_limit_day_overnight_qty_one_and_persists_only_confirmed
     assert seen["instrument"].primary_exchange == "ARCA"
     assert seen["instrument"].verified_paper_test_quantity == 1
     assert seen["apply_account_fill"] is False
-    assert seen["intent"].startswith(
-        "overnight-paper-e2e:SPY:BUY:1:2026-08-23:702.0000"
-    )
+    assert seen["intent"] == "overnight-paper-e2e:SPY:BUY:1:2026-08-23"
     assert persisted[0]["filled_quantity"] == 1.0
     assert persisted[0]["avg_fill_price"] == 701.25
+
+
+def test_same_session_different_limit_prices_keep_same_intent_id(monkeypatch):
+    monkeypatch.setattr(module, "SETTINGS", _settings())
+    monkeypatch.setenv("AI_ASSET_ENABLE_IBKR_OVERNIGHT_E2E", "true")
+    monkeypatch.setattr(
+        module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _ready_whatif()
+    )
+    broker = SimpleNamespace(disconnect=lambda: None)
+    monkeypatch.setattr(module, "_connect_first_available_paper_broker", lambda: broker)
+    intents = []
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs):
+            pass
+        def execute_ibkr_paper_order(
+            self, order, *, order_intent_id, instrument, apply_account_fill
+        ):
+            intents.append(order_intent_id)
+            return SimpleNamespace(order_id=9)
+
+    monkeypatch.setattr(module, "ExecutionService", FakeExecutionService)
+    monkeypatch.setattr(module, "build_shared_risk_gate", lambda: None)
+    monkeypatch.setattr(
+        module, "_confirmed_fill_from_broker_result", lambda result, expected: None
+    )
+
+    now = datetime(2026, 8, 23, 21, 0, tzinfo=ET)
+    module.run_spy_overnight_paper_e2e(limit_price=700.0, now=now)
+    module.run_spy_overnight_paper_e2e(limit_price=705.0, now=now)
+    assert intents == [
+        "overnight-paper-e2e:SPY:BUY:1:2026-08-23",
+        "overnight-paper-e2e:SPY:BUY:1:2026-08-23",
+    ]
 
 
 def test_unconfirmed_broker_result_is_never_persisted(monkeypatch):
