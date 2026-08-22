@@ -9,18 +9,24 @@ def preflight(status: str, port: int = 7497) -> IbkrPreflightResult:
 
 
 def test_blocks_empty_symbol():
-    result = validate_ibkr_paper_test_order("", 1, preflight=preflight("READY_TO_CONNECT"))
+    result = validate_ibkr_paper_test_order("", 1, verified_test_quantity=1, preflight=preflight("READY_TO_CONNECT"))
     assert result.allowed is False and result.status == "BLOCKED"
 
 
 def test_blocks_zero_quantity():
-    result = validate_ibkr_paper_test_order("AAPL", 0, preflight=preflight("READY_TO_CONNECT"))
+    result = validate_ibkr_paper_test_order("AAPL", 0, verified_test_quantity=1, preflight=preflight("READY_TO_CONNECT"))
     assert result.allowed is False and result.status == "BLOCKED"
 
 
-def test_default_remains_one_share_fail_closed():
-    result = validate_ibkr_paper_test_order("AAPL", 2, preflight=preflight("READY_TO_CONNECT"))
+def test_unverified_quantity_fails_closed():
+    result = validate_ibkr_paper_test_order("AAPL", 1, preflight=preflight("READY_TO_CONNECT"))
     assert result.allowed is False and result.status == "BLOCKED"
+    assert "未設定" in result.message
+
+
+def test_verified_one_share_quantity_is_allowed_when_ready():
+    result = validate_ibkr_paper_test_order("AAPL", 1, verified_test_quantity=1, preflight=preflight("READY_TO_CONNECT"))
+    assert result.allowed is True
 
 
 def test_verified_100_share_quantity_is_allowed_when_ready():
@@ -41,17 +47,17 @@ def test_invalid_verified_quantity_is_blocked():
 
 
 def test_waits_when_tws_not_ready():
-    result = validate_ibkr_paper_test_order("AAPL", 1, preflight=preflight("WAITING_FOR_TWS"))
+    result = validate_ibkr_paper_test_order("AAPL", 1, verified_test_quantity=1, preflight=preflight("WAITING_FOR_TWS"))
     assert result.allowed is False and result.status == "WAITING"
 
 
 def test_allows_only_safe_ready_paper_order():
-    result = validate_ibkr_paper_test_order("aapl", 1, preflight=preflight("READY_TO_CONNECT"))
+    result = validate_ibkr_paper_test_order("aapl", 1, verified_test_quantity=1, preflight=preflight("READY_TO_CONNECT"))
     assert result.allowed is True and result.status == "READY" and result.symbol == "AAPL" and result.quantity == 1
 
 
 def test_allows_safe_ready_paper_order_via_gateway():
-    result = validate_ibkr_paper_test_order("aapl", 1, preflight=preflight("READY_TO_CONNECT", port=4002), use_gateway=True)
+    result = validate_ibkr_paper_test_order("aapl", 1, verified_test_quantity=1, preflight=preflight("READY_TO_CONNECT", port=4002), use_gateway=True)
     assert result.allowed is True and result.status == "READY"
 
 
@@ -61,7 +67,7 @@ def test_gateway_flag_without_preflight_uses_gateway_port(monkeypatch):
         seen.append(use_gateway)
         return preflight("READY_TO_CONNECT", port=4002)
     monkeypatch.setattr(ibkr_paper_order_guard, "run_ibkr_paper_preflight", fake_preflight)
-    result = validate_ibkr_paper_test_order("AAPL", 1, use_gateway=True)
+    result = validate_ibkr_paper_test_order("AAPL", 1, verified_test_quantity=1, use_gateway=True)
     assert seen == [True] and result.allowed is True
 
 
@@ -71,5 +77,5 @@ def test_default_use_gateway_is_false_and_uses_tws_port(monkeypatch):
         seen.append(use_gateway)
         return preflight("READY_TO_CONNECT", port=7497)
     monkeypatch.setattr(ibkr_paper_order_guard, "run_ibkr_paper_preflight", fake_preflight)
-    result = validate_ibkr_paper_test_order("AAPL", 1)
+    result = validate_ibkr_paper_test_order("AAPL", 1, verified_test_quantity=1)
     assert seen == [False] and result.allowed is True
