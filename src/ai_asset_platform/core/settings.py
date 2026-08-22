@@ -29,6 +29,7 @@ class PlatformSettings:
     system_name: str = "AI Asset Platform"
     system_version: str = "3.1-dev"
     run_mode: str = "DEVELOPMENT"
+    account_currency: str = "JPY"
     enable_ai: bool = True
     minimum_ai_confidence: float = 70.0
     emergency_stop: bool = False
@@ -47,13 +48,9 @@ class PlatformSettings:
     trailing_stop_percent = 5.0
     enable_paper_trading: bool = True
     enable_live_trading: bool = False
-    # Fail closed by default. Paper transmission is enabled only for a process
-    # explicitly started with AI_ASSET_ENABLE_IBKR_PAPER=true.
     enable_ibkr_paper: bool = field(
         default_factory=lambda: _env_flag("AI_ASSET_ENABLE_IBKR_PAPER", default=False)
     )
-    # Declare only established base-market capabilities here. OVERNIGHT remains
-    # a separate validation gate until its Paper E2E is completed.
     supported_markets: tuple[str, ...] = field(
         default_factory=lambda: ("JP_STOCK", "US_STOCK", "US_ETF")
     )
@@ -63,8 +60,6 @@ class PlatformSettings:
 
     @property
     def live_trading_unlocked(self) -> bool:
-        """本番取引の二重安全ロックが解除されているかを返す。"""
-
         return (
             self.run_mode == "LIVE"
             and self.enable_live_trading is True
@@ -80,6 +75,7 @@ if __name__ == "__main__":
     print(SETTINGS.system_name)
     print("Version :", SETTINGS.system_version)
     print("Mode    :", SETTINGS.run_mode)
+    print("Account :", SETTINGS.account_currency)
     print("AI      :", SETTINGS.enable_ai)
     print("AI Conf :", SETTINGS.minimum_ai_confidence)
     print("Stop    :", SETTINGS.emergency_stop)
