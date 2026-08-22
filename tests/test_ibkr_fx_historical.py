@@ -68,11 +68,30 @@ def test_historical_fx_returns_latest_fresh_midpoint_close(monkeypatch):
     assert result.order_sent is False
     assert FakeProbe.instances[0].client_id == 276
     call = FakeProbe.instances[0].calls[0]
+    assert call[2] == ""
     assert call[4] == "5 mins"
     assert call[5] == "MIDPOINT"
     assert call[6] == 0
     assert call[7] == 2
     assert call[8] is False
+
+
+def test_historical_fx_can_anchor_to_confirmed_execution_time(monkeypatch):
+    FakeProbe.instances.clear()
+    monkeypatch.setattr(module, "_HistoricalFxProbe", FakeProbe)
+    monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
+
+    result = module.preview_ibkr_paper_historical_fx_rate(
+        base_currency="USD",
+        quote_currency="JPY",
+        end_datetime="20260821 16:33:06 US/Eastern",
+        reference_timestamp=1_000_600.0,
+    )
+
+    assert result.ready is True
+    assert result.rate == 150.1
+    assert result.age_seconds == 300.0
+    assert FakeProbe.instances[0].calls[0][2] == "20260821 16:33:06 US/Eastern"
 
 
 def test_historical_fx_stale_bar_fails_closed(monkeypatch):
@@ -133,5 +152,19 @@ def test_max_age_must_be_positive(monkeypatch):
         )
     except ValueError as exc:
         assert "max_age_seconds" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_end_datetime_requires_reference_timestamp(monkeypatch):
+    monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
+    try:
+        module.preview_ibkr_paper_historical_fx_rate(
+            base_currency="USD",
+            quote_currency="JPY",
+            end_datetime="20260821 16:33:06 US/Eastern",
+        )
+    except ValueError as exc:
+        assert "reference_timestamp" in str(exc)
     else:
         raise AssertionError("expected ValueError")
