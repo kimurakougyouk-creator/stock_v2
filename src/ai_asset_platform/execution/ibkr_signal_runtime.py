@@ -23,6 +23,37 @@ from ai_asset_platform.execution.signal_order_bridge import (
 )
 
 
+def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
+    """Connect to Gateway Paper 4002 or TWS Paper 7497 before any order exists.
+
+    Endpoint fallback is safe because it occurs before Contract/order submission.
+    Once a broker connects, the caller uses that one session for the single
+    execution attempt. No order request is ever retried on another endpoint.
+    """
+    errors: list[str] = []
+    for use_gateway in (True, False):
+        config = create_ibkr_paper_config(use_gateway=use_gateway)
+        broker = IbkrBrokerAdapter(
+            config=config,
+            enable_paper_order_transmission=True,
+        )
+        try:
+            if broker.connect():
+                return broker
+            errors.append(f"port={config.port}: connect returned False")
+        except Exception as exc:
+            errors.append(f"port={config.port}: {exc}")
+        finally:
+            if not broker.is_connected():
+                try:
+                    broker.disconnect()
+                except Exception:
+                    pass
+
+    detail = " | ".join(errors) if errors else "no Paper endpoint was reachable"
+    raise RuntimeError(f"IBKR Paperへ接続できません: {detail}")
+
+
 def execute_approved_signal_via_ibkr_paper(
     *,
     ticker: str,
@@ -34,26 +65,20 @@ def execute_approved_signal_via_ibkr_paper(
     """Execute one pre-approved signal and persist only a confirmed Filled result.
 
     Paper transmission requires both existing settings gates plus the shared
-    risk gate. The current operator runtime is TWS Paper on 127.0.0.1:7497;
-    Live Trading remains disabled by the config and platform gates.
+    risk gate. The local Paper endpoint is selected safely between Gateway 4002
+    and TWS 7497 before any broker request exists. Live Trading remains disabled.
     """
     if not SETTINGS.enable_paper_trading:
         return SignalExecutionResult(False, "paper trading disabled")
     if not SETTINGS.enable_ibkr_paper:
         return SignalExecutionResult(False, "IBKR Paper disabled")
 
-    broker = IbkrBrokerAdapter(
-        config=create_ibkr_paper_config(use_gateway=False),
-        enable_paper_order_transmission=True,
-    )
+    broker = _connect_first_available_paper_broker()
     service = ExecutionService(
         broker=broker,
         account=Account(initial_cash=0.0),
         risk_gate=build_shared_risk_gate(),
     )
-
-    if not broker.connect():
-        raise RuntimeError("IBKR TWS Paperへ接続できません")
 
     try:
         execution = execute_signal_via_ibkr_paper(
