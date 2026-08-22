@@ -80,6 +80,19 @@ def test_daily_loss_limit_blocks_buy_but_not_protective_sell():
     assert gate(OrderRequest("SPY", OrderSide.SELL, 1)).allowed is True
 
 
+def test_unconverted_ibkr_currency_blocks_new_buy_but_not_sell():
+    state = snapshot(daily_realized_pnl_currency_safe=False)
+    gate = build_shared_risk_gate(
+        settings=replace(SETTINGS, daily_loss_limit_yen=10_000.0),
+        snapshot_provider=provider(state),
+    )
+    buy = gate(OrderRequest("SPY", OrderSide.BUY, 1))
+    sell = gate(OrderRequest("SPY", OrderSide.SELL, 1))
+    assert buy.allowed is False
+    assert "円換算" in buy.reason
+    assert sell.allowed is True
+
+
 def test_consecutive_loss_limit_blocks_buy_but_not_protective_sell():
     state = snapshot(consecutive_losses=3)
     gate = build_shared_risk_gate(
@@ -105,6 +118,7 @@ def test_disabled_numeric_limits_do_not_block_safe_order():
                 daily_sell_orders=999,
                 daily_realized_pnl=-999_999.0,
                 consecutive_losses=999,
+                daily_realized_pnl_currency_safe=False,
             )
         ),
     )
