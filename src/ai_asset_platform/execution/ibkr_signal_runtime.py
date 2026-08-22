@@ -13,6 +13,7 @@ from pathlib import Path
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
+from ai_asset_platform.brokers.ibkr_fx_snapshot import preview_ibkr_paper_fx_rate
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.confirmed_fill_evidence import (
     confirmed_fill_from_broker_result,
@@ -30,12 +31,7 @@ _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
 
 
 def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
-    """Connect to Gateway Paper 4002 or TWS Paper 7497 before any order exists.
-
-    Endpoint fallback is safe because it occurs before Contract/order submission.
-    Once a broker connects, the caller uses that one session for the single
-    execution attempt. No order request is ever retried on another endpoint.
-    """
+    """Connect to Gateway Paper 4002 or TWS Paper 7497 before any order exists."""
     errors: list[str] = []
     for use_gateway in (True, False):
         config = create_ibkr_paper_config(use_gateway=use_gateway)
@@ -60,6 +56,32 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
     raise RuntimeError(f"IBKR Paperへ接続できません: {detail}")
 
 
+def _capture_account_fx_rate(instrument_currency: str) -> float | None:
+    """Return broker-observed instrument->account FX, or None fail-closed.
+
+    A confirmed fill must always be preserved even when the secondary read-only
+    FX snapshot is unavailable. Missing FX simply keeps multi-currency reporting
+    unavailable until explicit conversion evidence exists.
+    """
+    instrument = str(instrument_currency).strip().upper()
+    account = str(SETTINGS.account_currency).strip().upper()
+    if len(instrument) != 3 or len(account) != 3:
+        return None
+    if instrument == account:
+        return 1.0
+    try:
+        snapshot = preview_ibkr_paper_fx_rate(
+            base_currency=instrument,
+            quote_currency=account,
+        )
+    except Exception:
+        return None
+    if not snapshot.ready or snapshot.rate is None:
+        return None
+    rate = float(snapshot.rate)
+    return rate if rate > 0 else None
+
+
 def execute_approved_signal_via_ibkr_paper(
     *,
     ticker: str,
@@ -68,12 +90,7 @@ def execute_approved_signal_via_ibkr_paper(
     order_intent_id: str,
     order_log_path: Path = Path("results/paper_orders.jsonl"),
 ) -> SignalExecutionResult:
-    """Execute one pre-approved signal and persist only a confirmed Filled result.
-
-    Paper transmission requires both existing settings gates plus the shared
-    risk gate. The local Paper endpoint is selected safely between Gateway 4002
-    and TWS 7497 before any broker request exists. Live Trading remains disabled.
-    """
+    """Execute one pre-approved signal and persist only a confirmed Filled result."""
     if not SETTINGS.enable_paper_trading:
         return SignalExecutionResult(False, "paper trading disabled")
     if not SETTINGS.enable_ibkr_paper:
@@ -104,6 +121,7 @@ def execute_approved_signal_via_ibkr_paper(
         )
         if confirmed is not None:
             confirmed_quantity, confirmed_price = confirmed
+            fx_rate = _capture_account_fx_rate(instrument.currency)
             record_confirmed_fill(
                 ticker=ticker,
                 side=signal,
@@ -112,6 +130,7 @@ def execute_approved_signal_via_ibkr_paper(
                 currency=instrument.currency,
                 order_intent_id=order_intent_id,
                 order_log_path=order_log_path,
+                fx_to_account_rate=fx_rate,
             )
         return execution
     finally:
