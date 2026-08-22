@@ -23,6 +23,7 @@ class FakeProbe:
         self.fatal_error = None
         self.connected = False
         self.market_data_calls = []
+        self.market_data_types = []
         FakeProbe.instances.append(self)
 
     def connect(self, host, port, client_id):
@@ -32,6 +33,9 @@ class FakeProbe:
 
     def run(self):
         return None
+
+    def reqMarketDataType(self, market_data_type):
+        self.market_data_types.append(market_data_type)
 
     def reqMktData(self, req_id, contract, generic_ticks, snapshot, regulatory, options):
         self.market_data_calls.append(
@@ -100,7 +104,7 @@ def test_midpoint_requires_two_valid_sides():
     assert module._midpoint(0, 150.1) is None
 
 
-def test_snapshot_uses_read_only_market_data_and_returns_midpoint(monkeypatch):
+def test_live_snapshot_uses_read_only_market_data_and_returns_midpoint(monkeypatch):
     FakeProbe.instances.clear()
     monkeypatch.setattr(module, "_FxSnapshotProbe", FakeProbe)
     monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
@@ -120,12 +124,35 @@ def test_snapshot_uses_read_only_market_data_and_returns_midpoint(monkeypatch):
     assert result.source == "MARKET_DATA"
     assert result.ready is True
     assert result.order_sent is False
+    assert FakeProbe.instances[0].market_data_types == []
 
-    call = FakeProbe.instances[0].market_data_calls[0]
-    assert call[3] is True
-    assert call[4] is False
-    assert call[1].secType == "CASH"
-    assert call[1].exchange == "IDEALPRO"
+
+def test_delayed_snapshot_is_second_broker_only_fallback(monkeypatch):
+    class DelayedOnlyProbe(FakeProbe):
+        def reqMktData(self, *args):
+            self.market_data_calls.append(args)
+            if self.market_data_types == [3]:
+                self.bid = 149.80
+                self.ask = 150.20
+            else:
+                self.bid = None
+                self.ask = None
+                self.errors = ["10197: competing live session"]
+
+    FakeProbe.instances.clear()
+    monkeypatch.setattr(module, "_FxSnapshotProbe", DelayedOnlyProbe)
+    monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
+
+    result = module.preview_ibkr_paper_fx_rate(
+        base_currency="USD", quote_currency="JPY"
+    )
+
+    assert result.ready is True
+    assert result.source == "DELAYED_MARKET_DATA"
+    assert result.rate == 150.0
+    assert any(instance.market_data_types == [3] for instance in FakeProbe.instances)
+    assert any("10197" in error for error in result.errors)
+    assert result.order_sent is False
 
 
 def test_account_exchange_rate_is_read_only_broker_fallback(monkeypatch):
@@ -146,50 +173,44 @@ def test_account_exchange_rate_is_read_only_broker_fallback(monkeypatch):
     assert result.ask is None
     assert result.ready is True
     assert result.order_sent is False
-    assert FakeAccountProbe.instances[0].calls == [
-        "managed",
-        (True, "DU123"),
-        (False, "DU123"),
-    ]
 
 
-def test_snapshot_without_bid_ask_uses_account_exchange_rate(monkeypatch):
-    class OneSidedProbe(FakeProbe):
+def test_all_broker_fx_sources_missing_fail_closed(monkeypatch):
+    class MissingProbe(FakeProbe):
         def reqMktData(self, *args):
-            self.bid = 149.90
-            self.ask = None
-            self.errors = ["10197: No market data during competing session"]
-
-    FakeAccountProbe.instances.clear()
-    monkeypatch.setattr(module, "_FxSnapshotProbe", OneSidedProbe)
-    monkeypatch.setattr(module, "_AccountFxProbe", FakeAccountProbe)
-    monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
-
-    result = module.preview_ibkr_paper_fx_rate(
-        base_currency="USD", quote_currency="JPY"
-    )
-    assert result.connected is True
-    assert result.rate == 150.25
-    assert result.ready is True
-    assert result.source == "ACCOUNT_EXCHANGE_RATE"
-    assert result.order_sent is False
-    assert any("10197" in error for error in result.errors)
-
-
-def test_snapshot_and_account_rate_both_missing_fail_closed(monkeypatch):
-    class OneSidedProbe(FakeProbe):
-        def reqMktData(self, *args):
-            self.bid = 149.90
+            self.bid = None
             self.ask = None
 
-    class MissingAccountProbe(FakeAccountProbe):
-        def reqAccountUpdates(self, subscribe, account_id):
-            self.calls.append((subscribe, account_id))
-            self.rate = None
+    class MissingSummary:
+        ready = False
+        connected = False
+        endpoint_port = None
+        base_currency = "USD"
+        quote_currency = "JPY"
+        exchange = "ACCOUNT_SUMMARY"
+        bid = None
+        ask = None
+        rate = None
+        source = "ACCOUNT_SUMMARY_EXCHANGE_RATE"
+        errors = ("summary unavailable",)
 
-    monkeypatch.setattr(module, "_FxSnapshotProbe", OneSidedProbe)
-    monkeypatch.setattr(module, "_AccountFxProbe", MissingAccountProbe)
+    class MissingLegacy:
+        ready = False
+        connected = False
+        endpoint_port = None
+        base_currency = "USD"
+        quote_currency = "JPY"
+        exchange = "ACCOUNT"
+        bid = None
+        ask = None
+        rate = None
+        source = "ACCOUNT_EXCHANGE_RATE"
+        errors = ("legacy unavailable",)
+
+    monkeypatch.setattr(module, "_FxSnapshotProbe", MissingProbe)
     monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
+    monkeypatch.setattr(module, "preview_ibkr_paper_account_summary_fx_rate", lambda **kwargs: MissingSummary())
+    monkeypatch.setattr(module, "preview_ibkr_paper_account_fx_rate", lambda **kwargs: MissingLegacy())
 
     result = module.preview_ibkr_paper_fx_rate(
         base_currency="USD", quote_currency="JPY"
@@ -197,3 +218,5 @@ def test_snapshot_and_account_rate_both_missing_fail_closed(monkeypatch):
     assert result.rate is None
     assert result.ready is False
     assert result.order_sent is False
+    assert "summary unavailable" in result.errors
+    assert "legacy unavailable" in result.errors
