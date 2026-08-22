@@ -28,16 +28,16 @@ def fill(*, ticker, side, shares, price, currency, fx=None, intent=None, created
 
 
 def settings(**overrides):
-    return replace(
-        SETTINGS,
+    values = dict(
         account_currency="JPY",
         max_positions=5,
         max_position_allocation=0.20,
         max_portfolio_allocation=0.80,
         max_portfolio_risk_rate=0.03,
         max_daily_trading_amount_yen=1_000_000.0,
-        **overrides,
     )
+    values.update(overrides)
+    return replace(SETTINGS, **values)
 
 
 def test_usd_buy_uses_explicit_jpy_rate_and_passes_small_pilot():
@@ -78,18 +78,31 @@ def test_protective_sell_is_not_blocked_by_buy_allocation_limits():
     result = evaluate_verified_paper_preflight(
         records=records, ticker="SPY", side="SELL", quantity=1, reference_price=690,
         instrument_currency="USD", settings=settings(max_position_allocation=0.01, max_portfolio_allocation=0.01),
-        initial_capital=1_000_000, fx_to_account_rate=150, stop_loss_rate=0.03,
+        initial_capital=1_000_000, fx_to_account_rate=None, stop_loss_rate=0.03,
         target_date=date(2026, 8, 22),
     )
     assert result.allowed is True
+    assert result.fx_to_account_rate is None
+    assert result.ending_cash_account is None
+
+
+def test_protective_sell_still_allowed_when_old_cross_currency_fill_lacks_fx():
+    records = [fill(ticker="SPY", side="BUY", shares=1, price=700, currency="USD", fx=None, intent="old-buy")]
+    result = evaluate_verified_paper_preflight(
+        records=records, ticker="SPY", side="SELL", quantity=1, reference_price=690,
+        instrument_currency="USD", settings=settings(), initial_capital=1_000_000,
+        fx_to_account_rate=None, stop_loss_rate=0.03,
+    )
+    assert result.allowed is True
+    assert result.held_quantity == 1
 
 
 def test_sell_over_confirmed_position_fails_closed():
-    records = [fill(ticker="SPY", side="BUY", shares=1, price=700, currency="USD", fx=150, intent="buy")]
+    records = [fill(ticker="SPY", side="BUY", shares=1, price=700, currency="USD", fx=None, intent="buy")]
     result = evaluate_verified_paper_preflight(
         records=records, ticker="SPY", side="SELL", quantity=2, reference_price=690,
         instrument_currency="USD", settings=settings(), initial_capital=1_000_000,
-        fx_to_account_rate=150, stop_loss_rate=0.03,
+        fx_to_account_rate=None, stop_loss_rate=0.03,
         target_date=date(2026, 8, 22),
     )
     assert result.allowed is False
