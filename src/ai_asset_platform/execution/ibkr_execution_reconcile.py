@@ -100,7 +100,14 @@ def main() -> int:
     )
     print("===== IBKR PAPER EXECUTION RECONCILIATION =====")
     print("SNAPSHOT READY   :", snapshot.ready)
+    print("ENDPOINT PORT    :", snapshot.endpoint_port)
     print("EXECUTION COUNT  :", len(snapshot.executions))
+    for index, item in enumerate(snapshot.executions, start=1):
+        print(
+            f"EXECUTION {index}: symbol={item.symbol} side={item.side} qty={item.quantity:g} "
+            f"price={item.price:g} currency={item.currency} exchange={item.exchange} "
+            f"order_id={item.order_id} perm_id={item.perm_id} exec_id={item.exec_id} time={item.time}"
+        )
     print("RECONCILED COUNT :", result.reconciled_count)
     print("SKIPPED COUNT    :", result.skipped_count)
     print("ERRORS           :", list(result.errors))
