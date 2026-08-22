@@ -70,6 +70,7 @@ def prepare_ibkr_paper_order_for_instrument(
     )
     ib_order.totalQuantity = request.quantity
     ib_order.tif = "DAY"
+    ib_order.outsideRth = bool(request.outside_rth)
 
     if request.order_type is OrderType.MARKET:
         ib_order.orderType = "MKT"

@@ -23,6 +23,7 @@ class OrderRequest:
     quantity: int
     order_type: OrderType = OrderType.MARKET
     limit_price: float | None = None
+    outside_rth: bool = False
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
