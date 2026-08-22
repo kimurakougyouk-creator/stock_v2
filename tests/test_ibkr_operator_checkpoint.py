@@ -107,6 +107,70 @@ def test_checkpoint_combines_accounting_whatif_fx_and_preflight(monkeypatch):
     assert result.preflight_error is None
     assert result.spy_confirmed_held_quantity == 0
     assert result.legacy_evidence_blockers == ()
+    assert result.quarantined_legacy_fill_count == 0
+
+
+def test_checkpoint_quarantines_legacy_fill_missing_currency_without_guessing(monkeypatch):
+    monkeypatch.setattr(module, "SETTINGS", _settings())
+    rows = [{
+        "mode": "IBKR_PAPER",
+        "status": "FILLED",
+        "ticker": "AAPL",
+        "side": "BUY",
+        "shares": 1,
+        "reference_price": 308.98,
+        "order_intent_id": "legacy-no-currency",
+    }]
+    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: rows)
+    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
+    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
+    seen = {"records": None, "preflight_records": None}
+
+    def fake_accounting(records, **kwargs):
+        seen["records"] = list(records)
+        return _accounting()
+
+    def fake_preflight(**kwargs):
+        seen["preflight_records"] = list(kwargs["records"])
+        return _preflight()
+
+    monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", fake_accounting)
+    monkeypatch.setattr(module, "evaluate_verified_paper_preflight", fake_preflight)
+    result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
+
+    assert result.ready_for_paper_e2e_review is True
+    assert result.quarantined_legacy_fill_count == 1
+    assert result.legacy_evidence_blockers == (
+        "AAPL:legacy-no-currency:missing-currency",
+    )
+    assert seen["records"] == []
+    assert seen["preflight_records"] == []
+
+
+def test_existing_spy_confirmed_fill_blocks_duplicate_buy_even_if_quarantined(monkeypatch):
+    monkeypatch.setattr(module, "SETTINGS", _settings())
+    rows = [{
+        "mode": "IBKR_PAPER",
+        "status": "FILLED",
+        "ticker": "SPY",
+        "side": "BUY",
+        "shares": 1,
+        "reference_price": 765.45,
+        "order_intent_id": "old-spy-fill",
+    }]
+    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: rows)
+    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
+    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
+    monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", lambda *args, **kwargs: _accounting())
+    called = {"preflight": 0}
+    monkeypatch.setattr(module, "evaluate_verified_paper_preflight", lambda **kwargs: called.__setitem__("preflight", 1))
+
+    result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
+    assert result.spy_confirmed_held_quantity == 1
+    assert result.ready_for_paper_e2e_review is False
+    assert "already has 1 confirmed share" in result.preflight_error
+    assert result.quarantined_legacy_fill_count == 1
+    assert called["preflight"] == 0
 
 
 def test_checkpoint_never_marks_ready_when_whatif_fails(monkeypatch):
@@ -132,92 +196,6 @@ def test_checkpoint_blocks_readiness_when_fx_evidence_fails(monkeypatch):
     result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
     assert result.ready_for_paper_e2e_review is False
     assert "FX evidence" in result.preflight_error
-    assert called["preflight"] == 0
-
-
-def test_checkpoint_reports_missing_historical_fx_evidence(monkeypatch):
-    monkeypatch.setattr(module, "SETTINGS", _settings())
-    rows = [{
-        "mode": "IBKR_PAPER",
-        "status": "FILLED",
-        "ticker": "AAPL",
-        "side": "BUY",
-        "shares": 1,
-        "currency": "USD",
-        "order_intent_id": "old-aapl-fill",
-    }]
-    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: rows)
-    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
-    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
-
-    def unsafe(*args, **kwargs):
-        raise module.MulticurrencyConfirmedAccountingError(
-            "confirmed fill currency USD requires explicit fx_to_account_rate into JPY"
-        )
-
-    monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", unsafe)
-    result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
-    assert result.ready_for_paper_e2e_review is False
-    assert "old-aapl-fill" in result.accounting_error
-    assert "missing-historical-fx" in result.accounting_error
-    assert result.preflight is None
-    assert "legacy confirmed-fill evidence" in result.preflight_error
-
-
-def test_checkpoint_reports_missing_currency_without_guessing(monkeypatch):
-    monkeypatch.setattr(module, "SETTINGS", _settings())
-    rows = [{
-        "mode": "IBKR_PAPER",
-        "status": "FILLED",
-        "ticker": "AAPL",
-        "side": "BUY",
-        "shares": 1,
-        "order_intent_id": "legacy-no-currency",
-    }]
-    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: rows)
-    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
-    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
-    monkeypatch.setattr(
-        module,
-        "audit_multicurrency_confirmed_accounting",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            module.MulticurrencyConfirmedAccountingError("IBKR_PAPER confirmed fill is missing currency")
-        ),
-    )
-    result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
-    assert result.ready_for_paper_e2e_review is False
-    assert "missing-currency" in result.accounting_error
-    assert "legacy-no-currency" in result.accounting_error
-
-
-def test_existing_spy_confirmed_fill_blocks_duplicate_buy_even_when_accounting_unsafe(monkeypatch):
-    monkeypatch.setattr(module, "SETTINGS", _settings())
-    rows = [{
-        "mode": "IBKR_PAPER",
-        "status": "FILLED",
-        "ticker": "SPY",
-        "side": "BUY",
-        "shares": 1,
-        "reference_price": 765.45,
-        "order_intent_id": "old-spy-fill",
-    }]
-    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: rows)
-    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
-    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
-    monkeypatch.setattr(
-        module,
-        "audit_multicurrency_confirmed_accounting",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            module.MulticurrencyConfirmedAccountingError("missing currency")
-        ),
-    )
-    called = {"preflight": 0}
-    monkeypatch.setattr(module, "evaluate_verified_paper_preflight", lambda **kwargs: called.__setitem__("preflight", 1))
-
-    result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
-    assert result.spy_confirmed_held_quantity == 1
-    assert result.ready_for_paper_e2e_review is False
-    assert "already has 1 confirmed share" in result.preflight_error
     assert called["preflight"] == 0
 
 
