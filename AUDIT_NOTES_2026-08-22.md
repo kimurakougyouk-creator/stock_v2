@@ -8,3 +8,4 @@ Validated intent:
 - Confirmed-fill persistence still preserves fills even when FX evidence is unavailable.
 - Operator checkpoint remains non-real-order.
 - The one-command operator script remains the only intended local manual entry point.
+- Full repository pytest must pass on a pull-request run before the next local operator call.

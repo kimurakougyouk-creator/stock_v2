@@ -28,6 +28,9 @@ from ai_asset_platform.execution.signal_order_bridge import (
 )
 
 _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
+# Backward-compatible test seam. By default this is the composed broker-only
+# resolver (live/delayed/account data plus historical MIDPOINT fallback).
+preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
 
 
 def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
@@ -71,7 +74,7 @@ def _capture_account_fx_rate(instrument_currency: str) -> float | None:
     if instrument == account:
         return 1.0
     try:
-        snapshot = resolve_ibkr_paper_fx_evidence(
+        snapshot = preview_ibkr_paper_fx_rate(
             base_currency=instrument,
             quote_currency=account,
         )

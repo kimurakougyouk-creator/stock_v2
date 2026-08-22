@@ -32,6 +32,10 @@ from ai_asset_platform.reports.multicurrency_confirmed_accounting import (
     audit_multicurrency_confirmed_accounting,
 )
 
+# Backward-compatible test seam. The default implementation is now the composed
+# broker-only resolver, including the historical MIDPOINT fallback.
+preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
+
 
 @dataclass(frozen=True)
 class IbkrOperatorCheckpointResult:
@@ -198,7 +202,7 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
             errors=(),
         )
     else:
-        fx = resolve_ibkr_paper_fx_evidence(
+        fx = preview_ibkr_paper_fx_rate(
             base_currency="USD",
             quote_currency=account_currency,
         )
