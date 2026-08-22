@@ -63,7 +63,7 @@ def is_ibkr_overnight_session_open(now: datetime | None = None) -> bool:
     day. ZoneInfo handles EDT/EST conversion; no fixed UTC/JST offset is used.
     """
     current = now.astimezone(_ET) if now is not None else datetime.now(_ET)
-    weekday = current.weekday()  # Monday=0 ... Sunday=6
+    weekday = current.weekday()
     clock = current.timetz().replace(tzinfo=None)
 
     if weekday in {6, 0, 1, 2, 3} and clock >= _OVERNIGHT_START:
@@ -139,9 +139,6 @@ def run_spy_overnight_paper_e2e(
             False,
         )
 
-    # Deliberately exclude price from the durable intent id. If an attempt has
-    # an uncertain/timeout result, changing the limit price in the same session
-    # must not create a new identity that could bypass duplicate protection.
     intent_id = f"overnight-paper-e2e:SPY:BUY:1:{overnight_session_key(now)}"
     instrument = InstrumentSpec(
         symbol="SPY",
@@ -181,6 +178,7 @@ def run_spy_overnight_paper_e2e(
                 side="BUY",
                 filled_quantity=quantity,
                 avg_fill_price=price,
+                currency=instrument.currency,
                 order_intent_id=intent_id,
                 order_log_path=order_log_path,
             )
