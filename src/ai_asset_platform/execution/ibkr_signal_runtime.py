@@ -1,11 +1,4 @@
-"""Final safe runtime for one already-approved signal -> IBKR Paper fill.
-
-The caller remains responsible for the existing signal_runner safety checks.
-This module also enforces the shared pre-send risk gate so migrated execution
-cannot bypass emergency-stop/daily-limit/cooldown controls. It contains no Live
-Trading path.
-"""
-
+"""Final safe runtime for one already-approved signal -> IBKR Paper fill."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,9 +9,7 @@ from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.broker_position_guard import evaluate_broker_position_guard
-from ai_asset_platform.execution.confirmed_fill_evidence import (
-    confirmed_fill_from_broker_result,
-)
+from ai_asset_platform.execution.confirmed_fill_evidence import confirmed_fill_from_broker_result
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.service import ExecutionService
 from ai_asset_platform.execution.shared_risk_gate import build_shared_risk_gate
@@ -29,20 +20,14 @@ from ai_asset_platform.execution.signal_order_bridge import (
 )
 
 _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
-# Backward-compatible test seam. By default this is the composed broker-only
-# resolver (live/delayed/account data plus historical MIDPOINT fallback).
 preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
 
 
 def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
-    """Connect to Gateway Paper 4002 or TWS Paper 7497 before any order exists."""
     errors: list[str] = []
     for use_gateway in (True, False):
         config = create_ibkr_paper_config(use_gateway=use_gateway)
-        broker = IbkrBrokerAdapter(
-            config=config,
-            enable_paper_order_transmission=True,
-        )
+        broker = IbkrBrokerAdapter(config=config, enable_paper_order_transmission=True)
         try:
             if broker.connect():
                 return broker
@@ -55,19 +40,11 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
                     broker.disconnect()
                 except Exception:
                     pass
-
     detail = " | ".join(errors) if errors else "no Paper endpoint was reachable"
     raise RuntimeError(f"IBKR Paperへ接続できません: {detail}")
 
 
 def _capture_account_fx_rate(instrument_currency: str) -> float | None:
-    """Return broker-observed instrument->account FX, or None fail-closed.
-
-    A confirmed fill must always be preserved even when secondary read-only FX
-    evidence is unavailable. The resolver uses broker market/account evidence
-    first and a broker historical MIDPOINT only as a final read-only fallback.
-    Missing FX keeps multi-currency reporting unavailable; no rate is guessed.
-    """
     instrument = str(instrument_currency).strip().upper()
     account = str(SETTINGS.account_currency).strip().upper()
     if len(instrument) != 3 or len(account) != 3:
@@ -75,10 +52,7 @@ def _capture_account_fx_rate(instrument_currency: str) -> float | None:
     if instrument == account:
         return 1.0
     try:
-        snapshot = preview_ibkr_paper_fx_rate(
-            base_currency=instrument,
-            quote_currency=account,
-        )
+        snapshot = preview_ibkr_paper_fx_rate(base_currency=instrument, quote_currency=account)
     except Exception:
         return None
     if not snapshot.ready or snapshot.rate is None:
@@ -87,15 +61,21 @@ def _capture_account_fx_rate(instrument_currency: str) -> float | None:
     return rate if rate > 0 else None
 
 
+def _broker_exec_ids(result: object | None) -> list[str]:
+    ids: list[str] = []
+    for row in list(getattr(result, "executions", None) or []):
+        if not isinstance(row, dict):
+            continue
+        value = str(row.get("exec_id", "")).strip()
+        if value and value not in ids:
+            ids.append(value)
+    return ids
+
+
 def execute_approved_signal_via_ibkr_paper(
-    *,
-    ticker: str,
-    signal: str,
-    shares: int,
-    order_intent_id: str,
+    *, ticker: str, signal: str, shares: int, order_intent_id: str,
     order_log_path: Path = Path("results/paper_orders.jsonl"),
 ) -> SignalExecutionResult:
-    """Execute one pre-approved signal and persist only a confirmed Filled result."""
     if not SETTINGS.enable_paper_trading:
         return SignalExecutionResult(False, "paper trading disabled")
     if not SETTINGS.enable_ibkr_paper:
@@ -103,48 +83,32 @@ def execute_approved_signal_via_ibkr_paper(
 
     normalized_signal = str(signal).strip().upper()
     position_guard = evaluate_broker_position_guard(
-        ticker=ticker,
-        side=normalized_signal,
-        quantity=int(shares),
+        ticker=ticker, side=normalized_signal, quantity=int(shares)
     )
     if not position_guard.allowed:
         return SignalExecutionResult(False, f"broker position guard blocked: {position_guard.reason}")
 
     instrument = _instrument_for_ticker(ticker)
     broker = _connect_first_available_paper_broker()
-    service = ExecutionService(
-        broker=broker,
-        account=Account(initial_cash=0.0),
-        risk_gate=build_shared_risk_gate(),
-    )
-
+    service = ExecutionService(broker=broker, account=Account(initial_cash=0.0), risk_gate=build_shared_risk_gate())
     try:
         execution = execute_signal_via_ibkr_paper(
-            service=service,
-            ticker=ticker,
-            signal=normalized_signal,
-            shares=shares,
-            order_intent_id=order_intent_id,
-            apply_account_fill=False,
+            service=service, ticker=ticker, signal=normalized_signal, shares=shares,
+            order_intent_id=order_intent_id, apply_account_fill=False,
         )
         result = execution.broker_result
-        confirmed = (
-            confirmed_fill_from_broker_result(result, shares)
-            if execution.attempted
-            else None
-        )
+        confirmed = confirmed_fill_from_broker_result(result, shares) if execution.attempted else None
         if confirmed is not None:
             confirmed_quantity, confirmed_price = confirmed
             fx_rate = _capture_account_fx_rate(instrument.currency)
+            raw_order_id = getattr(result, "order_id", None)
             record_confirmed_fill(
-                ticker=ticker,
-                side=normalized_signal,
-                filled_quantity=confirmed_quantity,
-                avg_fill_price=confirmed_price,
-                currency=instrument.currency,
-                order_intent_id=order_intent_id,
-                order_log_path=order_log_path,
-                fx_to_account_rate=fx_rate,
+                ticker=ticker, side=normalized_signal,
+                filled_quantity=confirmed_quantity, avg_fill_price=confirmed_price,
+                currency=instrument.currency, order_intent_id=order_intent_id,
+                order_log_path=order_log_path, fx_to_account_rate=fx_rate,
+                broker_exec_ids=_broker_exec_ids(result),
+                broker_order_id=int(raw_order_id) if raw_order_id is not None else None,
             )
         return execution
     finally:
