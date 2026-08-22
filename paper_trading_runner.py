@@ -1,5 +1,8 @@
 """Paper Trading専用ランナー。"""
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from config import TRADING_CAPITAL
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.confirmed_fill_evidence import (
@@ -8,7 +11,12 @@ from ai_asset_platform.execution.confirmed_fill_evidence import (
 from ai_asset_platform.execution.ibkr_signal_runtime import execute_approved_signal_via_ibkr_paper
 from ai_asset_platform.execution.paper_trading_loop import run_paper_trading_loop
 from ai_asset_platform.execution.signal_order_bridge import (
+    _instrument_for_ticker,
     verified_paper_test_quantity_for_ticker,
+)
+from ai_asset_platform.reports.confirmed_accounting import (
+    ConfirmedAccountingCurrencyError,
+    audit_confirmed_accounting_file,
 )
 from ai_asset_platform.reports.equity_history import (
     append_equity_history,
@@ -20,17 +28,63 @@ import order_manager
 import signal_runner
 
 
-def _sync_confirmed_fill_to_reporting() -> None:
-    """確定約定から実現損益・総資産履歴・最大DDを冪等に再生成する。注文は送信しない。"""
+_US_ET = ZoneInfo("America/New_York")
+_JST = ZoneInfo("Asia/Tokyo")
+
+
+def _paper_signal_session_key(ticker: str, now: datetime | None = None) -> str:
+    """Return a price-independent trading-date key for the verified pilot.
+
+    Tokyo symbols use the Tokyo calendar date; current US pilot symbols use the
+    New York calendar date. The key deliberately excludes reference price so an
+    uncertain order cannot be retried merely because the quote changed.
+    """
+    zone = _JST if str(ticker).strip().upper().endswith(".T") else _US_ET
+    current = now.astimezone(zone) if now is not None else datetime.now(zone)
+    return current.date().isoformat()
+
+
+def _write_accounting_status(*, safe: bool, reason: str | None) -> None:
+    path = order_manager.ORDER_LOG_DIR / "paper_accounting_status.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"safe": bool(safe), "reason": reason},
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _sync_confirmed_fill_to_reporting() -> bool:
+    """確定約定から報告を冪等再生成する。通貨が混在する場合は安全に停止する。
+
+    The legacy report engine is single-currency JPY. Validate the durable fills
+    before touching its PnL/equity outputs. A USD IBKR fill is preserved in the
+    ledger, but reporting is marked unavailable until explicit FX conversion is
+    supplied by a future accounting layer. This function never sends orders.
+    """
+    try:
+        audit_confirmed_accounting_file(
+            order_manager.ORDER_LOG_PATH,
+            initial_capital=float(TRADING_CAPITAL),
+            account_currency="JPY",
+        )
+    except ConfirmedAccountingCurrencyError as exc:
+        _write_accounting_status(safe=False, reason=str(exc))
+        return False
+
     order_manager.save_realized_trade_pnls()
-    # Broker-side accounting must never consume READY/SENT/REJECTED rows.
-    # order_manager keeps legacy local PAPER rows compatible while requiring
-    # explicit FILLED evidence for IBKR_PAPER and future explicit broker modes.
     orders = order_manager.load_accounting_orders()
     equity_points = calculate_equity_curve(orders, initial_capital=float(TRADING_CAPITAL))
+    _write_accounting_status(safe=True, reason=None)
     if not equity_points:
-        return
-    append_equity_history(equity_points[-1], order_manager.ORDER_LOG_DIR / "equity_history.csv")
+        return True
+    append_equity_history(
+        equity_points[-1],
+        order_manager.ORDER_LOG_DIR / "equity_history.csv",
+    )
     drawdown_path = order_manager.ORDER_LOG_DIR / "paper_drawdown.json"
     payload = {
         "maximum_drawdown": float(calculate_maximum_drawdown(equity_points)),
@@ -41,6 +95,7 @@ def _sync_confirmed_fill_to_reporting() -> None:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    return True
 
 
 def _describe_unconfirmed_ibkr_result(execution) -> str:
@@ -89,12 +144,12 @@ def _execute_confirmed_ibkr_paper_order(
             f"{ticker}: broker-verified Paper pilot quantity is not registered; order blocked."
         )
 
+    instrument = _instrument_for_ticker(ticker)
     normalized_shares = int(verified_quantity)
-    normalized_price = float(reference_price)
     order_intent_id = (
         "signal-runner:paper-pilot:"
         f"{ticker}:{normalized_signal}:{normalized_shares}:"
-        f"{normalized_price:.8f}"
+        f"{_paper_signal_session_key(ticker)}"
     )
     execution = execute_approved_signal_via_ibkr_paper(
         ticker=str(ticker),
@@ -112,17 +167,19 @@ def _execute_confirmed_ibkr_paper_order(
     if confirmed is None:
         raise RuntimeError(_describe_unconfirmed_ibkr_result(execution))
     confirmed_quantity, confirmed_price = confirmed
-    _sync_confirmed_fill_to_reporting()
+    reporting_safe = _sync_confirmed_fill_to_reporting()
     return {
         "mode": "IBKR_PAPER",
         "ticker": str(ticker),
         "side": normalized_signal,
         "shares": int(confirmed_quantity),
         "reference_price": float(confirmed_price),
+        "currency": instrument.currency,
         "status": "FILLED",
         "order_intent_id": order_intent_id,
         "strategy_requested_shares": requested_shares,
         "paper_pilot_shares": normalized_shares,
+        "reporting_safe": reporting_safe,
     }
 
 
