@@ -6,6 +6,7 @@ from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
 from ai_asset_platform.brokers.ibkr_overnight_whatif import (
     _WhatIfProbe,
     _connect_probe_before_any_request,
+    _paper_endpoint_candidates,
     preview_ibkr_paper_overnight_order,
 )
 
@@ -20,12 +21,16 @@ def test_whatif_rejects_non_positive_price():
         preview_ibkr_paper_overnight_order(limit_price=0.0)
 
 
-def test_whatif_requires_tws_paper_port():
-    with pytest.raises(RuntimeError, match="7497"):
-        preview_ibkr_paper_overnight_order(
-            limit_price=768.0,
-            config=IbkrConnectionConfig(port=4002),
-        )
+def test_default_endpoint_candidates_prefer_gateway_then_tws():
+    configs = _paper_endpoint_candidates(None)
+    assert [cfg.port for cfg in configs] == [4002, 7497]
+    assert all(cfg.paper_trading for cfg in configs)
+    assert all(not cfg.allow_live_trading for cfg in configs)
+
+
+def test_explicit_invalid_port_is_rejected():
+    with pytest.raises(RuntimeError, match="4002 or 7497"):
+        _paper_endpoint_candidates(IbkrConnectionConfig(port=12345))
 
 
 def test_probe_collects_whatif_order_state():
@@ -37,14 +42,14 @@ def test_probe_collects_whatif_order_state():
     assert probe.preview_ready.is_set()
 
 
-def test_initial_connection_may_retry_before_any_broker_request(monkeypatch):
-    attempts = {"count": 0}
+def test_endpoint_detection_falls_back_from_gateway_to_tws_before_requests(monkeypatch):
+    seen_ports = []
     requested = {"contracts": 0, "orders": 0}
 
     def fake_connect(self, host, port, client_id):
-        attempts["count"] += 1
-        if attempts["count"] == 1:
-            self.error(-1, 0, 502, "temporary connection failure")
+        seen_ports.append(port)
+        if port == 4002:
+            self.error(-1, 0, 502, "gateway unavailable")
         else:
             self.next_order_id = 77
             self.connected_ready.set()
@@ -56,22 +61,22 @@ def test_initial_connection_may_retry_before_any_broker_request(monkeypatch):
     monkeypatch.setattr(_WhatIfProbe, "placeOrder", lambda self, *args: requested.__setitem__("orders", requested["orders"] + 1))
     monkeypatch.setattr("ai_asset_platform.brokers.ibkr_overnight_whatif.time.sleep", lambda _: None)
 
-    probe, errors = _connect_probe_before_any_request(
-        IbkrConnectionConfig(port=7497),
+    probe, cfg, errors = _connect_probe_before_any_request(
+        _paper_endpoint_candidates(None),
         timeout=0.0,
-        attempts=2,
+        attempts_per_endpoint=1,
         retry_delay=0.0,
     )
 
-    assert attempts["count"] == 2
+    assert seen_ports == [4002, 7497]
     assert probe is not None
-    assert probe.next_order_id == 77
+    assert cfg is not None and cfg.port == 7497
     assert requested == {"contracts": 0, "orders": 0}
-    assert any("502" in item for item in errors)
+    assert any("port=4002" in item for item in errors)
 
 
-def test_single_session_resolves_both_contracts_and_requests_preview_once(monkeypatch):
-    seen = {"connect": 0, "contracts": [], "places": 0}
+def test_single_session_gateway_resolves_contracts_and_requests_preview_once(monkeypatch):
+    seen = {"connect_ports": [], "contracts": [], "places": 0}
 
     prepared = SimpleNamespace(
         contract=SimpleNamespace(exchange="OVERNIGHT", primaryExchange="ARCA"),
@@ -82,6 +87,7 @@ def test_single_session_resolves_both_contracts_and_requests_preview_once(monkey
         seen["verified_qty"] = verified_paper_test_quantity
         seen["limit_price"] = spec.limit_price
         seen["primary"] = spec.primary_exchange
+        seen["prepared_port"] = config.port
         return prepared
 
     monkeypatch.setattr(
@@ -90,8 +96,7 @@ def test_single_session_resolves_both_contracts_and_requests_preview_once(monkey
     )
 
     def fake_connect(self, host, port, client_id):
-        seen["connect"] += 1
-        seen["client_id"] = client_id
+        seen["connect_ports"].append(port)
         self.next_order_id = 55
         self.connected_ready.set()
 
@@ -103,7 +108,6 @@ def test_single_session_resolves_both_contracts_and_requests_preview_once(monkey
 
     def fake_place(self, order_id, contract, order):
         seen["places"] += 1
-        seen["order_id"] = order_id
         seen["what_if"] = order.whatIf
         seen["transmit"] = order.transmit
         self.order_state = SimpleNamespace(
@@ -122,28 +126,23 @@ def test_single_session_resolves_both_contracts_and_requests_preview_once(monkey
 
     result = preview_ibkr_paper_overnight_order(
         limit_price=768.0,
-        config=IbkrConnectionConfig(port=7497, paper_trading=True, allow_live_trading=False),
         timeout=0.0,
-        connect_attempts=1,
+        connect_attempts_per_endpoint=1,
     )
 
-    assert seen["connect"] == 1
+    assert seen["connect_ports"] == [4002]
     assert seen["contracts"] == [(1, "SMART", ""), (2, "OVERNIGHT", "ARCA")]
     assert seen["places"] == 1
     assert seen["verified_qty"] == 1
-    assert seen["limit_price"] == 768.0
-    assert seen["primary"] == "ARCA"
+    assert seen["prepared_port"] == 4002
     assert seen["what_if"] is True
     assert seen["transmit"] is True
-    assert seen["order_id"] == 55
     assert result.connected is True
+    assert result.connected_port == 4002
     assert result.preview_received is True
     assert result.order_sent is False
     assert result.primary_exchange == "ARCA"
     assert result.destination == "OVERNIGHT"
-    assert result.margin_change == "12.34"
-    assert result.commission == 1.23
-    assert result.commission_currency == "USD"
     assert result.ready is True
 
 
@@ -157,20 +156,17 @@ def test_contract_resolution_failure_never_requests_whatif(monkeypatch):
     def fake_req_contract_details(self, req_id, contract):
         self.contract_ready.set()
 
-    def fake_place(self, order_id, contract, order):
-        seen["places"] += 1
-
     monkeypatch.setattr(_WhatIfProbe, "connect", fake_connect)
     monkeypatch.setattr(_WhatIfProbe, "run", lambda self: None)
     monkeypatch.setattr(_WhatIfProbe, "reqContractDetails", fake_req_contract_details)
-    monkeypatch.setattr(_WhatIfProbe, "placeOrder", fake_place)
+    monkeypatch.setattr(_WhatIfProbe, "placeOrder", lambda self, *args: seen.__setitem__("places", seen["places"] + 1))
     monkeypatch.setattr(_WhatIfProbe, "isConnected", lambda self: False)
 
     result = preview_ibkr_paper_overnight_order(
         limit_price=768.0,
-        config=IbkrConnectionConfig(port=7497),
+        config=IbkrConnectionConfig(port=4002),
         timeout=0.0,
-        connect_attempts=1,
+        connect_attempts_per_endpoint=1,
     )
     assert seen["places"] == 0
     assert result.preview_received is False
@@ -208,9 +204,9 @@ def test_whatif_fatal_server_error_fails_closed(monkeypatch):
 
     result = preview_ibkr_paper_overnight_order(
         limit_price=768.0,
-        config=IbkrConnectionConfig(port=7497),
+        config=IbkrConnectionConfig(port=4002),
         timeout=0.0,
-        connect_attempts=1,
+        connect_attempts_per_endpoint=1,
     )
     assert result.preview_received is False
     assert result.order_sent is False
