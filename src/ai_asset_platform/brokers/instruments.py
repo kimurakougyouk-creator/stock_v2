@@ -13,12 +13,17 @@ class InstrumentSpec:
     must opt in with a broker-verified quantity before the Paper order path can
     transmit it. This avoids leaking historical one-share assumptions into new
     markets such as Japan stocks, overnight products, or futures.
+
+    ``primary_exchange`` is optional for normal SMART-routed products but is
+    mandatory when directing a US stock/ETF contract to IBKR's OVERNIGHT
+    destination. Requiring it here keeps overnight routing fail-closed.
     """
 
     symbol: str
     asset_class: AssetClass
     exchange: str = "SMART"
     currency: str = "USD"
+    primary_exchange: str | None = None
     expiry: str | None = None
     strike: float | None = None
     right: str | None = None
@@ -32,6 +37,10 @@ class InstrumentSpec:
             raise ValueError("exchange must not be empty")
         if not self.currency.strip():
             raise ValueError("currency must not be empty")
+        if self.primary_exchange is not None and not self.primary_exchange.strip():
+            raise ValueError("primary_exchange must not be blank when provided")
+        if self.exchange.strip().upper() == "OVERNIGHT" and not self.primary_exchange:
+            raise ValueError("OVERNIGHT routing requires primary_exchange")
         if self.verified_paper_test_quantity is not None and self.verified_paper_test_quantity <= 0:
             raise ValueError("verified_paper_test_quantity must be positive when provided")
         if self.asset_class is AssetClass.FUTURE and not self.expiry:
