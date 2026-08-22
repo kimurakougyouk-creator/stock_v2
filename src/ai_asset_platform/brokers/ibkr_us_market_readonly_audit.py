@@ -56,12 +56,14 @@ def main() -> int:
     print("ETF CONNECTED          :", result.etf.connected)
     print("ETF CONTRACT RESOLVED  :", result.etf.contract_resolved)
     print("ETF ORDER SENT         :", result.etf.order_sent)
+    print("ETF MESSAGE            :", result.etf.message)
     print("OVERNIGHT CONNECTED    :", result.overnight.connected)
     print("OVERNIGHT BASE RESOLVED:", result.overnight.base_contract_resolved)
     print("OVERNIGHT READY        :", result.overnight.overnight_contract_ready)
     print("PRIMARY EXCHANGE       :", result.overnight.primary_exchange)
     print("DESTINATION            :", result.overnight.destination)
     print("OVERNIGHT ORDER SENT   :", result.overnight.order_sent)
+    print("OVERNIGHT MESSAGE      :", result.overnight.message)
     print("OVERALL READY          :", result.ready)
     return 0 if result.ready else 1
 
