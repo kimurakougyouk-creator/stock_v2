@@ -1,9 +1,9 @@
 """Shared fail-closed pre-send risk gate for migrated execution paths.
 
-The gate reads the durable Paper ledger but evaluates realized PnL and loss
-streaks in the configured account currency and account calendar. Cross-currency
-IBKR fills require explicit per-fill FX evidence. No FX rate is guessed and no
-broker order is created here.
+The gate reads the durable Paper ledger but evaluates realized PnL, daily order
+counts, cooldowns and loss streaks in the configured account currency/calendar.
+Cross-currency IBKR fills require explicit per-fill FX evidence. No FX rate is
+guessed and no broker order is created here.
 """
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ from typing import Callable
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
 from ai_asset_platform.core.account_clock import account_today
 from ai_asset_platform.core.settings import PlatformSettings, SETTINGS
+from ai_asset_platform.execution.account_calendar_ledger import (
+    daily_order_count,
+    repurchase_cooldown_remaining_minutes,
+)
 from ai_asset_platform.execution.service import RiskGateResult
 from ai_asset_platform.reports.multicurrency_trade_history import (
     MulticurrencyTradeHistoryError,
@@ -65,21 +69,20 @@ def load_legacy_risk_snapshot(
     order: OrderRequest,
     settings: PlatformSettings = SETTINGS,
 ) -> LegacyRiskSnapshot:
-    from order_manager import (
-        calculate_daily_buy_order_count,
-        calculate_daily_sell_order_count,
-        calculate_repurchase_cooldown_remaining_minutes,
-        load_accounting_orders,
-    )
+    from order_manager import load_accounting_orders, load_paper_orders
+
+    raw_orders = load_paper_orders()
+    accounting_orders = load_accounting_orders()
 
     cooldown = 0
     if order.side is OrderSide.BUY:
-        cooldown = calculate_repurchase_cooldown_remaining_minutes(
-            order.symbol,
-            settings.repurchase_cooldown_minutes,
+        cooldown = repurchase_cooldown_remaining_minutes(
+            accounting_orders,
+            ticker=order.symbol,
+            cooldown_minutes=settings.repurchase_cooldown_minutes,
+            settings=settings,
         )
 
-    accounting_orders = load_accounting_orders()
     currency_safe = True
     daily_realized = 0.0
     consecutive_losses = 0
@@ -88,6 +91,7 @@ def load_legacy_risk_snapshot(
             accounting_orders,
             target_date=account_today(settings),
             account_currency=settings.account_currency,
+            account_timezone=settings.account_timezone,
         )
         consecutive_losses = consecutive_losses_account_currency(
             accounting_orders,
@@ -97,8 +101,16 @@ def load_legacy_risk_snapshot(
         currency_safe = False
 
     return LegacyRiskSnapshot(
-        daily_buy_orders=calculate_daily_buy_order_count(),
-        daily_sell_orders=calculate_daily_sell_order_count(),
+        daily_buy_orders=daily_order_count(
+            raw_orders,
+            side="BUY",
+            settings=settings,
+        ),
+        daily_sell_orders=daily_order_count(
+            raw_orders,
+            side="SELL",
+            settings=settings,
+        ),
         daily_realized_pnl=daily_realized,
         consecutive_losses=consecutive_losses,
         repurchase_cooldown_minutes=cooldown,
