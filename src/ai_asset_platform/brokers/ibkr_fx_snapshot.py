@@ -1,12 +1,15 @@
 """Read-only IBKR Paper FX conversion evidence.
 
 The preferred source is a CASH/IDEALPRO bid/ask snapshot. Paper market data can
-be unavailable with IBKR error 10197 when a competing live session owns market
-data. In that case this module may fall back to broker account data. It first
-requests AccountSummary ``ExchangeRate`` (read-only) and, only if unavailable,
-tries the legacy account-updates stream. Neither path creates or transmits an
-Order. If no broker-provided source proves a positive rate, the result fails
-closed.
+be unavailable with IBKR error 10197 when another session owns live market data.
+This module therefore tries three broker-only read paths, in order:
+
+1. live market-data snapshot,
+2. delayed market-data snapshot (still read-only and broker-provided),
+3. account ExchangeRate data (AccountSummary, then legacy account updates).
+
+No path creates, changes, cancels, or transmits an Order. If no positive broker-
+provided rate is available, the result fails closed.
 """
 from __future__ import annotations
 
@@ -76,9 +79,10 @@ class _FxSnapshotProbe(EWrapper, EClient):
             return
         if value <= 0:
             return
-        if int(tickType) == 1:
+        # bid/ask plus delayed bid/ask tick types
+        if int(tickType) in {1, 66}:
             self.bid = value
-        elif int(tickType) == 2:
+        elif int(tickType) in {2, 67}:
             self.ask = value
 
     def tickSnapshotEnd(self, reqId: int) -> None:  # noqa: N802
@@ -98,8 +102,6 @@ class _FxSnapshotProbe(EWrapper, EClient):
 
 
 class _AccountSummaryFxProbe(EWrapper, EClient):
-    """Read AccountSummary ExchangeRate without requiring market data."""
-
     def __init__(self, *, currency: str) -> None:
         EWrapper.__init__(self)
         EClient.__init__(self, self)
@@ -144,8 +146,6 @@ class _AccountSummaryFxProbe(EWrapper, EClient):
 
 
 class _AccountFxProbe(EWrapper, EClient):
-    """Legacy read-only account-updates ExchangeRate fallback."""
-
     def __init__(self, *, currency: str) -> None:
         EWrapper.__init__(self)
         EClient.__init__(self, self)
@@ -204,6 +204,49 @@ def _midpoint(bid: float | None, ask: float | None) -> float | None:
     if bid <= 0 or ask <= 0 or ask < bid:
         return None
     return (float(bid) + float(ask)) / 2.0
+
+
+def _request_market_snapshot(
+    contract: Contract,
+    *,
+    delayed: bool,
+    timeout: float,
+) -> IbkrFxSnapshotResult:
+    errors: list[str] = []
+    source = "DELAYED_MARKET_DATA" if delayed else "MARKET_DATA"
+    for use_gateway in (True, False):
+        cfg = create_ibkr_paper_config(use_gateway=use_gateway)
+        probe = _FxSnapshotProbe()
+        try:
+            try:
+                probe.connect(cfg.host, cfg.port, cfg.client_id + (263 if delayed else 260))
+            except OSError as exc:
+                errors.append(f"{cfg.port}: {exc}")
+                continue
+            Thread(target=probe.run, daemon=True).start()
+            if not probe.connected_ready.wait(timeout) or probe.fatal_error:
+                errors.extend(probe.errors)
+                continue
+            if delayed:
+                # 3 = delayed market data. Read-only; does not create an order.
+                probe.reqMarketDataType(3)
+            probe.reqMktData(1, contract, "", True, False, [])
+            probe.snapshot_ready.wait(timeout)
+            rate = _midpoint(probe.bid, probe.ask)
+            if rate is not None:
+                return IbkrFxSnapshotResult(
+                    True, cfg.port, contract.symbol, contract.currency,
+                    contract.exchange, probe.bid, probe.ask, rate, source, False,
+                    tuple(errors + probe.errors),
+                )
+            errors.extend(probe.errors)
+        finally:
+            if probe.isConnected():
+                probe.disconnect()
+    return IbkrFxSnapshotResult(
+        False, None, contract.symbol, contract.currency, contract.exchange,
+        None, None, None, source, False, tuple(errors),
+    )
 
 
 def preview_ibkr_paper_account_summary_fx_rate(
@@ -283,33 +326,22 @@ def preview_ibkr_paper_account_fx_rate(*, base_currency: str, quote_currency: st
 
 def preview_ibkr_paper_fx_rate(*, base_currency: str, quote_currency: str, exchange: str = "IDEALPRO", timeout: float = 10.0) -> IbkrFxSnapshotResult:
     contract: Contract = build_fx_discovery_contract(base_currency=base_currency, quote_currency=quote_currency, exchange=exchange)
-    errors: list[str] = []
-    for use_gateway in (True, False):
-        cfg = create_ibkr_paper_config(use_gateway=use_gateway)
-        probe = _FxSnapshotProbe()
-        try:
-            try:
-                probe.connect(cfg.host, cfg.port, cfg.client_id + 260)
-            except OSError as exc:
-                errors.append(f"{cfg.port}: {exc}")
-                continue
-            Thread(target=probe.run, daemon=True).start()
-            if not probe.connected_ready.wait(timeout) or probe.fatal_error:
-                errors.extend(probe.errors)
-                continue
-            probe.reqMktData(1, contract, "", True, False, [])
-            probe.snapshot_ready.wait(timeout)
-            rate = _midpoint(probe.bid, probe.ask)
-            if rate is not None:
-                return IbkrFxSnapshotResult(True, cfg.port, contract.symbol, contract.currency, contract.exchange, probe.bid, probe.ask, rate, "MARKET_DATA", False, tuple(errors + probe.errors))
-            errors.extend(probe.errors)
-        finally:
-            if probe.isConnected():
-                probe.disconnect()
+    live = _request_market_snapshot(contract, delayed=False, timeout=timeout)
+    if live.ready:
+        return live
+
+    delayed = _request_market_snapshot(contract, delayed=True, timeout=timeout)
+    if delayed.ready:
+        return IbkrFxSnapshotResult(
+            delayed.connected, delayed.endpoint_port, delayed.base_currency,
+            delayed.quote_currency, delayed.exchange, delayed.bid, delayed.ask,
+            delayed.rate, delayed.source, False,
+            tuple(list(live.errors) + list(delayed.errors)),
+        )
 
     summary = preview_ibkr_paper_account_summary_fx_rate(base_currency=contract.symbol, quote_currency=contract.currency, timeout=timeout)
     if summary.ready:
-        return IbkrFxSnapshotResult(summary.connected, summary.endpoint_port, summary.base_currency, summary.quote_currency, summary.exchange, summary.bid, summary.ask, summary.rate, summary.source, False, tuple(errors + list(summary.errors)))
+        return IbkrFxSnapshotResult(summary.connected, summary.endpoint_port, summary.base_currency, summary.quote_currency, summary.exchange, summary.bid, summary.ask, summary.rate, summary.source, False, tuple(list(live.errors) + list(delayed.errors) + list(summary.errors)))
 
     legacy = preview_ibkr_paper_account_fx_rate(base_currency=contract.symbol, quote_currency=contract.currency, timeout=timeout)
-    return IbkrFxSnapshotResult(legacy.connected, legacy.endpoint_port, legacy.base_currency, legacy.quote_currency, legacy.exchange, legacy.bid, legacy.ask, legacy.rate, legacy.source, False, tuple(errors + list(summary.errors) + list(legacy.errors)))
+    return IbkrFxSnapshotResult(legacy.connected, legacy.endpoint_port, legacy.base_currency, legacy.quote_currency, legacy.exchange, legacy.bid, legacy.ask, legacy.rate, legacy.source, False, tuple(list(live.errors) + list(delayed.errors) + list(summary.errors) + list(legacy.errors)))
