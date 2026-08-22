@@ -14,14 +14,14 @@ from ai_asset_platform.execution.signal_order_bridge import (
     _instrument_for_ticker,
     verified_paper_test_quantity_for_ticker,
 )
-from ai_asset_platform.reports.confirmed_accounting import (
-    ConfirmedAccountingCurrencyError,
-    audit_confirmed_accounting_file,
-)
 from ai_asset_platform.reports.equity_history import (
     append_equity_history,
-    calculate_equity_curve,
     calculate_maximum_drawdown,
+)
+from ai_asset_platform.reports.multicurrency_confirmed_accounting import (
+    MulticurrencyConfirmedAccountingError,
+    audit_multicurrency_confirmed_accounting,
+    calculate_multicurrency_equity_curve,
 )
 from ai_asset_platform.reports.paper_trading_health import evaluate_paper_trading_health
 import order_manager
@@ -33,12 +33,6 @@ _JST = ZoneInfo("Asia/Tokyo")
 
 
 def _paper_signal_session_key(ticker: str, now: datetime | None = None) -> str:
-    """Return a price-independent trading-date key for the verified pilot.
-
-    Tokyo symbols use the Tokyo calendar date; current US pilot symbols use the
-    New York calendar date. The key deliberately excludes reference price so an
-    uncertain order cannot be retried merely because the quote changed.
-    """
     zone = _JST if str(ticker).strip().upper().endswith(".T") else _US_ET
     current = now.astimezone(zone) if now is not None else datetime.now(zone)
     return current.date().isoformat()
@@ -57,38 +51,76 @@ def _write_accounting_status(*, safe: bool, reason: str | None) -> None:
     )
 
 
-def _sync_confirmed_fill_to_reporting() -> bool:
-    """確定約定から報告を冪等再生成する。通貨が混在する場合は安全に停止する。
+def _write_multicurrency_summary(summary, *, cross_currency: bool) -> None:
+    path = order_manager.ORDER_LOG_DIR / "paper_accounting_summary.json"
+    payload = {
+        "account_currency": summary.account_currency,
+        "cross_currency": bool(cross_currency),
+        "confirmed_fill_count": summary.confirmed_fill_count,
+        "equity_point_count": summary.equity_point_count,
+        "ending_cash": summary.ending_cash,
+        "ending_holdings": summary.ending_holdings,
+        "ending_equity": summary.ending_equity,
+        "realized_pnl": summary.realized_pnl,
+        "unrealized_pnl": summary.unrealized_pnl,
+        "maximum_drawdown": summary.maximum_drawdown,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
-    The legacy report engine is single-currency JPY. Validate the durable fills
-    before touching its PnL/equity outputs. A USD IBKR fill is preserved in the
-    ledger, but reporting is marked unavailable until explicit FX conversion is
-    supplied by a future accounting layer. This function never sends orders.
+
+def _sync_confirmed_fill_to_reporting() -> bool:
+    """Rebuild account-currency equity/drawdown from explicit confirmed evidence.
+
+    Cross-currency records require an explicit per-fill FX rate. Missing FX fails
+    closed without deleting the confirmed fill. The old detailed realized-trade
+    JSON is regenerated only for single-account-currency ledgers; mixed-currency
+    runs use the new account-currency summary and equity outputs instead.
     """
+    orders = order_manager.load_accounting_orders()
+    account_currency = str(SETTINGS.account_currency).strip().upper()
     try:
-        audit_confirmed_accounting_file(
-            order_manager.ORDER_LOG_PATH,
+        points = calculate_multicurrency_equity_curve(
+            orders,
             initial_capital=float(TRADING_CAPITAL),
-            account_currency="JPY",
+            account_currency=account_currency,
         )
-    except ConfirmedAccountingCurrencyError as exc:
+        summary = audit_multicurrency_confirmed_accounting(
+            orders,
+            initial_capital=float(TRADING_CAPITAL),
+            account_currency=account_currency,
+        )
+    except MulticurrencyConfirmedAccountingError as exc:
         _write_accounting_status(safe=False, reason=str(exc))
         return False
 
-    order_manager.save_realized_trade_pnls()
-    orders = order_manager.load_accounting_orders()
-    equity_points = calculate_equity_curve(orders, initial_capital=float(TRADING_CAPITAL))
+    cross_currency = any(
+        str(order.get("currency", "")).strip().upper()
+        not in {"", account_currency}
+        for order in orders
+        if isinstance(order, dict)
+    )
+
+    if not cross_currency:
+        order_manager.save_realized_trade_pnls()
+
+    _write_multicurrency_summary(summary, cross_currency=cross_currency)
     _write_accounting_status(safe=True, reason=None)
-    if not equity_points:
+    if not points:
         return True
+
     append_equity_history(
-        equity_points[-1],
+        points[-1],
         order_manager.ORDER_LOG_DIR / "equity_history.csv",
     )
     drawdown_path = order_manager.ORDER_LOG_DIR / "paper_drawdown.json"
     payload = {
-        "maximum_drawdown": float(calculate_maximum_drawdown(equity_points)),
-        "equity_points": len(equity_points),
+        "maximum_drawdown": float(calculate_maximum_drawdown(points)),
+        "equity_points": len(points),
+        "account_currency": account_currency,
     }
     drawdown_path.parent.mkdir(parents=True, exist_ok=True)
     drawdown_path.write_text(
@@ -99,7 +131,6 @@ def _sync_confirmed_fill_to_reporting() -> bool:
 
 
 def _describe_unconfirmed_ibkr_result(execution) -> str:
-    """未約定/未送信を推測せず、観測済みBroker情報だけで説明する。"""
     if not execution.attempted:
         return f"IBKR Paper注文は送信前に停止しました: {execution.reason}"
 
