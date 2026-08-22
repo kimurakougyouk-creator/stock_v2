@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Callable
 
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
@@ -16,13 +17,14 @@ from ai_asset_platform.core.account_clock import account_today
 from ai_asset_platform.core.settings import PlatformSettings, SETTINGS
 from ai_asset_platform.execution.account_calendar_ledger import (
     daily_order_count,
+    record_time_in_account_zone,
     repurchase_cooldown_remaining_minutes,
 )
 from ai_asset_platform.execution.service import RiskGateResult
 from ai_asset_platform.reports.multicurrency_trade_history import (
     MulticurrencyTradeHistoryError,
+    calculate_realized_trade_history,
     consecutive_losses_account_currency,
-    realized_pnl_for_date,
 )
 
 
@@ -65,6 +67,34 @@ def _today_ibkr_realized_pnl_currency_safe(records: list[dict]) -> bool:
     return True
 
 
+def _realized_pnl_for_account_date(
+    records: list[dict],
+    *,
+    target_date: date,
+    settings: PlatformSettings,
+) -> float:
+    total = Decimal("0")
+    trades = calculate_realized_trade_history(
+        records,
+        account_currency=settings.account_currency,
+    )
+    for trade in trades:
+        if not trade.sold_at:
+            raise MulticurrencyTradeHistoryError("realized trade is missing sold_at")
+        try:
+            sold = record_time_in_account_zone(
+                {"created_at": trade.sold_at},
+                settings,
+            )
+        except Exception as exc:
+            raise MulticurrencyTradeHistoryError(
+                "realized trade cannot be mapped to account calendar"
+            ) from exc
+        if sold.date() == target_date:
+            total += Decimal(str(trade.realized_pnl_account))
+    return float(total)
+
+
 def load_legacy_risk_snapshot(
     order: OrderRequest,
     settings: PlatformSettings = SETTINGS,
@@ -87,11 +117,10 @@ def load_legacy_risk_snapshot(
     daily_realized = 0.0
     consecutive_losses = 0
     try:
-        daily_realized = realized_pnl_for_date(
+        daily_realized = _realized_pnl_for_account_date(
             accounting_orders,
             target_date=account_today(settings),
-            account_currency=settings.account_currency,
-            account_timezone=settings.account_timezone,
+            settings=settings,
         )
         consecutive_losses = consecutive_losses_account_currency(
             accounting_orders,
