@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass, field
 from threading import Event, Thread
 
 from ibapi.client import EClient
-from ibapi.contract import Contract
+from ibapi.contract import Contract, ContractDetails
 from ibapi.order import Order
 from ibapi.order_state import OrderState
 from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig, create_ibkr_paper_config
-from ai_asset_platform.brokers.ibkr_overnight_audit import audit_ibkr_paper_overnight_contract
+from ai_asset_platform.brokers.ibkr_contracts import build_ibkr_contract_spec, to_ibapi_contract
 from ai_asset_platform.brokers.ibkr_overnight_order import (
     OvernightPaperOrderSpec,
     prepare_ibkr_overnight_paper_limit_order,
 )
+from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import OrderSide
+from ai_asset_platform.core.asset_classes import AssetClass
 
 
 @dataclass(frozen=True)
@@ -46,8 +47,10 @@ class _WhatIfProbe(EWrapper, EClient):
         EWrapper.__init__(self)
         EClient.__init__(self, self)
         self.connected_ready = Event()
+        self.contract_ready = Event()
         self.preview_ready = Event()
         self.next_order_id: int | None = None
+        self.details_by_req: dict[int, list[ContractDetails]] = {}
         self.order_state: OrderState | None = None
         self.errors: list[str] = []
         self.fatal_error: str | None = None
@@ -55,6 +58,12 @@ class _WhatIfProbe(EWrapper, EClient):
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.next_order_id = orderId
         self.connected_ready.set()
+
+    def contractDetails(self, reqId: int, contractDetails: ContractDetails) -> None:  # noqa: N802
+        self.details_by_req.setdefault(reqId, []).append(contractDetails)
+
+    def contractDetailsEnd(self, reqId: int) -> None:  # noqa: N802
+        self.contract_ready.set()
 
     def openOrder(self, orderId: int, contract: Contract, order: Order, orderState: OrderState) -> None:  # noqa: N802
         if getattr(order, "whatIf", False):
@@ -67,26 +76,27 @@ class _WhatIfProbe(EWrapper, EClient):
         if errorCode in {200, 201, 203, 326, 412, 421, 502, 503, 504, 1100}:
             self.fatal_error = message
             self.connected_ready.set()
+            self.contract_ready.set()
             self.preview_ready.set()
 
 
-def _resolve_overnight_contract_with_readonly_retry(
-    symbol: str,
-    cfg: IbkrConnectionConfig,
+def _resolve_contract_on_connected_probe(
+    probe: _WhatIfProbe,
+    contract: Contract,
     *,
+    req_id: int,
     timeout: float,
-    attempts: int = 2,
-    retry_delay: float = 1.0,
-):
-    """Retry only the read-only ContractDetails audit, never an order request."""
-    last = None
-    for attempt in range(max(1, attempts)):
-        last = audit_ibkr_paper_overnight_contract(symbol, config=cfg, timeout=timeout)
-        if last.overnight_contract_ready and last.primary_exchange:
-            return last
-        if attempt + 1 < max(1, attempts):
-            time.sleep(max(0.0, retry_delay))
-    return last
+) -> Contract | None:
+    probe.contract_ready.clear()
+    probe.details_by_req.pop(req_id, None)
+    probe.reqContractDetails(req_id, contract)
+    probe.contract_ready.wait(timeout)
+    if probe.fatal_error:
+        return None
+    details = probe.details_by_req.get(req_id, [])
+    if not details:
+        return None
+    return details[0].contract
 
 
 def preview_ibkr_paper_overnight_order(
@@ -97,11 +107,11 @@ def preview_ibkr_paper_overnight_order(
     config: IbkrConnectionConfig | None = None,
     timeout: float = 10.0,
 ) -> IbkrOvernightWhatIfResult:
-    """Ask IBKR for an Overnight Paper what-if preview without placing an order.
+    """Resolve Overnight and request one Paper what-if preview in one TWS session.
 
-    Only the preceding read-only ContractDetails audit may retry once. The
-    what-if order request itself is attempted at most once and is never
-    automatically resent.
+    ContractDetails lookups and the what-if request share a single API connection.
+    This avoids connection churn while keeping the what-if request single-shot.
+    No real Paper order is reported as sent and Live Trading remains disabled.
     """
     cfg = config or create_ibkr_paper_config(use_gateway=False)
     cfg.validate()
@@ -114,27 +124,7 @@ def preview_ibkr_paper_overnight_order(
     if float(limit_price) <= 0:
         raise ValueError("limit_price must be positive")
 
-    audit = _resolve_overnight_contract_with_readonly_retry(
-        symbol, cfg, timeout=timeout
-    )
-    if audit is None or not audit.overnight_contract_ready or not audit.primary_exchange:
-        message = getattr(audit, "message", "no audit result")
-        raise RuntimeError(f"Overnight directed contract is not broker-resolved: {message}")
-
-    prepared = prepare_ibkr_overnight_paper_limit_order(
-        OvernightPaperOrderSpec(
-            symbol=symbol,
-            side=OrderSide.BUY,
-            quantity=quantity,
-            limit_price=float(limit_price),
-            primary_exchange=audit.primary_exchange,
-        ),
-        config=cfg,
-        verified_paper_test_quantity=1,
-    )
-    prepared.order.whatIf = True
-    prepared.order.transmit = True
-
+    normalized = symbol.strip().upper()
     probe = _WhatIfProbe()
     try:
         client_id = cfg.client_id + 103
@@ -142,16 +132,78 @@ def preview_ibkr_paper_overnight_order(
         Thread(target=probe.run, daemon=True).start()
         if not probe.connected_ready.wait(timeout) or probe.next_order_id is None:
             return IbkrOvernightWhatIfResult(
-                False, False, symbol.upper(), audit.primary_exchange, "OVERNIGHT",
+                False, False, normalized, None, None,
                 quantity, float(limit_price), False, None, None, None, None,
                 tuple(probe.errors),
             )
         if probe.fatal_error:
             return IbkrOvernightWhatIfResult(
-                True, False, symbol.upper(), audit.primary_exchange, "OVERNIGHT",
+                True, False, normalized, None, None,
                 quantity, float(limit_price), False, None, None, None, None,
                 tuple(probe.errors),
             )
+
+        base_instrument = InstrumentSpec(
+            normalized,
+            AssetClass.ETF,
+            exchange="SMART",
+            currency="USD",
+        )
+        base_contract = to_ibapi_contract(build_ibkr_contract_spec(base_instrument))
+        resolved_base = _resolve_contract_on_connected_probe(
+            probe, base_contract, req_id=1, timeout=timeout
+        )
+        if resolved_base is None:
+            return IbkrOvernightWhatIfResult(
+                True, False, normalized, None, None,
+                quantity, float(limit_price), False, None, None, None, None,
+                tuple(probe.errors),
+            )
+
+        primary = (getattr(resolved_base, "primaryExchange", "") or "").strip().upper()
+        if not primary:
+            return IbkrOvernightWhatIfResult(
+                True, False, normalized, None, None,
+                quantity, float(limit_price), False, None, None, None, None,
+                tuple(probe.errors),
+            )
+
+        overnight_instrument = InstrumentSpec(
+            normalized,
+            AssetClass.ETF,
+            exchange="OVERNIGHT",
+            currency="USD",
+            primary_exchange=primary,
+        )
+        overnight_contract = to_ibapi_contract(
+            build_ibkr_contract_spec(overnight_instrument)
+        )
+        resolved_overnight = _resolve_contract_on_connected_probe(
+            probe, overnight_contract, req_id=2, timeout=timeout
+        )
+        if resolved_overnight is None:
+            return IbkrOvernightWhatIfResult(
+                True, False, normalized, primary, "OVERNIGHT",
+                quantity, float(limit_price), False, None, None, None, None,
+                tuple(probe.errors),
+            )
+
+        resolved_primary = (
+            getattr(resolved_overnight, "primaryExchange", "") or primary
+        ).strip().upper()
+        prepared = prepare_ibkr_overnight_paper_limit_order(
+            OvernightPaperOrderSpec(
+                symbol=normalized,
+                side=OrderSide.BUY,
+                quantity=quantity,
+                limit_price=float(limit_price),
+                primary_exchange=resolved_primary,
+            ),
+            config=cfg,
+            verified_paper_test_quantity=1,
+        )
+        prepared.order.whatIf = True
+        prepared.order.transmit = True
 
         probe.placeOrder(probe.next_order_id, prepared.contract, prepared.order)
         probe.preview_ready.wait(timeout)
@@ -159,7 +211,7 @@ def preview_ibkr_paper_overnight_order(
         state = probe.order_state
         if probe.fatal_error or state is None:
             return IbkrOvernightWhatIfResult(
-                True, False, symbol.upper(), audit.primary_exchange, "OVERNIGHT",
+                True, False, normalized, resolved_primary, "OVERNIGHT",
                 quantity, float(limit_price), False, None, None, None, None,
                 tuple(probe.errors),
             )
@@ -172,7 +224,7 @@ def preview_ibkr_paper_overnight_order(
                 commission = None
 
         return IbkrOvernightWhatIfResult(
-            True, True, symbol.upper(), audit.primary_exchange, "OVERNIGHT",
+            True, True, normalized, resolved_primary, "OVERNIGHT",
             quantity, float(limit_price), False,
             getattr(state, "maintMarginChange", None), commission,
             getattr(state, "commissionCurrency", None),
