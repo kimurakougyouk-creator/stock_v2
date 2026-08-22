@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event, Thread
 
 from ibapi.client import EClient
@@ -33,6 +33,7 @@ class _OvernightContractProbe(EWrapper, EClient):
         self.ready = Event()
         self.details: list[ContractDetails] = []
         self.fatal_error: str | None = None
+        self.errors: list[str] = []
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.connected_ready.set()
@@ -44,10 +45,15 @@ class _OvernightContractProbe(EWrapper, EClient):
         self.ready.set()
 
     def error(self, reqId, errorTime, errorCode, errorString, advancedOrderRejectJson=""):
+        message = f"{errorCode}: {errorString}"
+        self.errors.append(message)
         if errorCode in {200, 326, 502, 503, 504, 1100}:
-            self.fatal_error = f"{errorCode}: {errorString}"
+            self.fatal_error = message
             self.connected_ready.set()
             self.ready.set()
+
+    def diagnostic_suffix(self) -> str:
+        return f" Errors: {' | '.join(self.errors[-5:])}" if self.errors else ""
 
 
 def audit_ibkr_paper_overnight_contract(
@@ -57,13 +63,7 @@ def audit_ibkr_paper_overnight_contract(
     config: IbkrConnectionConfig | None = None,
     timeout: float = 8.0,
 ) -> IbkrOvernightAuditResult:
-    """Build an OVERNIGHT contract from broker-resolved listing data.
-
-    This is intentionally read-only. It requests ContractDetails for the normal
-    SMART contract, extracts the broker-returned primary listing exchange, then
-    constructs the directed OVERNIGHT contract. It never creates or transmits an
-    order and does not mark the product as Paper-order verified.
-    """
+    """Build an OVERNIGHT contract from broker-resolved listing data, read-only."""
     cfg = config or IbkrConnectionConfig()
     cfg.validate()
     if not cfg.paper_trading or cfg.allow_live_trading:
@@ -73,14 +73,17 @@ def audit_ibkr_paper_overnight_contract(
     base_instrument = InstrumentSpec(normalized, asset_class, exchange="SMART", currency="USD")
     base_contract = to_ibapi_contract(build_ibkr_contract_spec(base_instrument))
 
+    # Isolate this diagnostic session from normal order/connection client ids.
+    audit_cfg = replace(cfg, client_id=cfg.client_id + 102)
     probe = _OvernightContractProbe()
     try:
-        probe.connect(cfg.host, cfg.port, cfg.client_id)
+        probe.connect(audit_cfg.host, audit_cfg.port, audit_cfg.client_id)
         Thread(target=probe.run, daemon=True).start()
         if not probe.connected_ready.wait(timeout):
             return IbkrOvernightAuditResult(
                 False, False, False, normalized, None, None, False,
-                "IBKR Paper API did not become ready before timeout.",
+                "IBKR Paper API did not become ready before timeout."
+                + probe.diagnostic_suffix(),
             )
         if probe.fatal_error:
             return IbkrOvernightAuditResult(
@@ -96,7 +99,8 @@ def audit_ibkr_paper_overnight_contract(
         if not probe.details:
             return IbkrOvernightAuditResult(
                 True, False, False, normalized, None, None, False,
-                "IBKR Paper API returned no base contract details before timeout.",
+                "IBKR Paper API returned no base contract details before timeout."
+                + probe.diagnostic_suffix(),
             )
 
         resolved = probe.details[0].contract
@@ -104,7 +108,8 @@ def audit_ibkr_paper_overnight_contract(
         if not primary:
             return IbkrOvernightAuditResult(
                 True, True, False, normalized, None, None, False,
-                "Broker-resolved contract did not include primaryExchange; overnight routing remains blocked.",
+                "Broker-resolved contract did not include primaryExchange; overnight routing remains blocked."
+                + probe.diagnostic_suffix(),
             )
 
         overnight_instrument = InstrumentSpec(
@@ -116,14 +121,12 @@ def audit_ibkr_paper_overnight_contract(
         )
         overnight_contract = to_ibapi_contract(build_ibkr_contract_spec(overnight_instrument))
         return IbkrOvernightAuditResult(
-            True,
-            True,
-            True,
-            normalized,
+            True, True, True, normalized,
             overnight_contract.primaryExchange,
             overnight_contract.exchange,
             False,
-            "Overnight contract routing fields are ready. No order was created or transmitted.",
+            "Overnight contract routing fields are ready. No order was created or transmitted."
+            + probe.diagnostic_suffix(),
         )
     finally:
         if probe.isConnected():
