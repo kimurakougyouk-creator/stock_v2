@@ -39,6 +39,13 @@ def test_contract_details_probe_marks_fatal_contract_error():
     assert probe.ready.is_set()
 
 
+def test_contract_details_probe_preserves_nonfatal_errors_for_diagnostics():
+    probe = _ContractDetailsProbe()
+    probe.error(1, 0, 2104, "Market data farm connection is OK")
+    assert "2104:" in probe.diagnostic_suffix()
+    assert probe.fatal_error is None
+
+
 def test_etf_audit_stops_before_contract_lookup_when_connection_fails(monkeypatch):
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr_etf_audit.probe_ibkr_paper_connection",
@@ -52,9 +59,8 @@ def test_etf_audit_stops_before_contract_lookup_when_connection_fails(monkeypatc
     assert result.message == "offline"
 
 
-def test_etf_audit_uses_distinct_client_id_for_contract_session(monkeypatch):
+def test_etf_audit_uses_isolated_client_id_for_contract_session(monkeypatch):
     observed: dict[str, int] = {}
-
     monkeypatch.setattr(
         "ai_asset_platform.brokers.ibkr_etf_audit.probe_ibkr_paper_connection",
         lambda config, timeout: IbkrConnectionResult(True, 10, "connected"),
@@ -65,9 +71,6 @@ def test_etf_audit_uses_distinct_client_id_for_contract_session(monkeypatch):
         self.connected_ready.set()
 
     def fake_req_contract_details(self, req_id, contract):
-        # Keep this regression test focused on client-id selection, not ibapi's
-        # real socket state. Signal completion with no details so the audit
-        # returns safely with order_sent=False.
         self.ready.set()
 
     monkeypatch.setattr(_ContractDetailsProbe, "connect", fake_connect)
@@ -77,8 +80,7 @@ def test_etf_audit_uses_distinct_client_id_for_contract_session(monkeypatch):
 
     cfg = IbkrConnectionConfig(client_id=41)
     result = audit_ibkr_paper_etf("SPY", config=cfg, timeout=0.0)
-
-    assert observed["client_id"] == 42
+    assert observed["client_id"] == 142
     assert result.connected is True
     assert result.contract_resolved is False
     assert result.order_sent is False
