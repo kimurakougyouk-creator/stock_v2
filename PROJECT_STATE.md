@@ -5,19 +5,24 @@ Last updated: 2026-08-23
 This file is the concise, evidence-based handoff ledger for AI agents. Update it after meaningful verified progress. Do not replace verified facts with guesses.
 
 ## Current phase
-Final IBKR Paper integrated runtime validation. Repository-side safety, multicurrency accounting, broker/local reconciliation, broker execution recovery, broker execution-id deduplication, and a dedicated position-reducing SPY Overnight close path are merged. The remaining verification boundary is one local Chromebook/TWS-or-Gateway Paper close-cycle observation and the follow-up checkpoint.
+Final IBKR Paper integrated runtime validation plus repository-only multi-asset foundation work. The remaining real-broker lifecycle boundary is still one local Chromebook/TWS-or-Gateway Paper SPY close-cycle observation and follow-up checkpoint. While that session-dependent proof is pending, repository work continues on issue #56 without enabling any new asset-class trading capability.
 
 ## Verified repository state
 - Repository: `kimurakougyouk-creator/stock_v2`
 - Branch: `main`
 - PRs #114-#118: account-currency accounting, fail-closed verified Paper preflight, dedicated verified IBKR Paper execution path, one-command operator checkpoint, and account-timezone handling.
-- PR #135 merged: read-only broker execution-history evidence plus broker/local position reconciliation guard in the Paper execution path.
-- PR #136 merged: deterministic broker execution reconciliation into the durable local Paper ledger.
-- PR #138 merged after CI success: one-command `ibkr_auto.sh` now performs broker-confirmed execution reconciliation before the fail-closed checkpoint.
-- PR #139 merged after CI success: broker historical MIDPOINT FX evidence can be anchored to confirmed execution time for recovery accounting instead of incorrectly comparing an old fill to the current wall clock.
-- PR #140 merged after fixing an initial CI failure and re-running to success: confirmed fills persist broker execution/order identity; reconciliation deduplicates by broker `exec_id` across application intents and recovery intents.
-- PR #141 merged after CI success: dedicated fail-closed, position-reducing SPY Overnight Paper SELL path, separate SELL what-if, explicit close confirmation gate, and one-command close script. Live Trading remains prohibited.
-- Current open pull requests: none.
+- PR #135: read-only broker execution-history evidence plus broker/local position reconciliation guard.
+- PR #136: deterministic broker execution reconciliation into the durable local Paper ledger.
+- PR #138: `ibkr_auto.sh` reconciles broker-confirmed executions before the fail-closed checkpoint.
+- PR #139: broker historical MIDPOINT FX evidence can be anchored to confirmed execution time for recovery accounting.
+- PR #140: broker execution/order identity persists; reconciliation deduplicates by broker `exec_id` across application and recovery intents.
+- PR #141: dedicated fail-closed, position-reducing SPY Overnight Paper SELL path with separate SELL what-if and explicit confirmation gate.
+- PR #145: session-aware one-command SPY Paper close cycle chooses only an already-supported close route and never opens exposure; if no supported session is open, no order path is called.
+- PR #146: batch read-only multi-asset ContractDetails audit foundation; default targets are explicit and no order is created or transmitted.
+- PR #147: fail-closed futures Contract foundation requiring explicit broker-derived symbol, exchange, currency, expiry and multiplier; no futures quantity or order path is enabled.
+- PR #148: fail-closed options Contract foundation requiring explicit broker-derived symbol, exchange, currency, expiry, strike, right and multiplier; no option selection or order path is enabled.
+- PR #149: fail-closed crypto Contract foundation requiring explicit broker-derived symbol, documented venue and currency; no token selection, quantity assignment or order path is enabled.
+- Live Trading remains prohibited.
 
 ## Verified real IBKR Paper evidence
 - Controlled SPY Paper BUY: quantity 1, terminal status `Filled`, filled quantity `1.0`, average fill price `765.45`, order id `3`.
@@ -38,11 +43,17 @@ Final IBKR Paper integrated runtime validation. Repository-side safety, multicur
 - Protective/position-reducing SELL preflight intentionally does not require a fresh FX quote merely to reduce an already-confirmed position.
 - Timeout or uncertain order state is never automatically resent.
 
+## Multi-asset issue #56 boundary
+- ETF/global stock/FX/futures/options/crypto repository foundations exist, but existence of a Contract builder or discovery helper is not trading support.
+- Futures, options and crypto remain unverified trading capabilities: no Paper quantity is assigned, no new exposure order path is enabled, and account/region/product permission is not inferred.
+- Crypto venue/currency constraints are represented explicitly; account/residence availability remains a separate evidence gate.
+- Promotion to a verified capability still requires product-specific safety checks, no-transmit evidence and real Paper E2E evidence.
+
 ## Current blockers and their meaning
 - `FX READY=False` in the latest checkpoint is explained by unavailable current USD/JPY market data plus stale historical evidence at that moment. This must not be bypassed for new BUY exposure.
 - `LEGACY EVIDENCE BLOCKERS` still includes an older AAPL record with missing currency. That legacy row remains quarantined from safe accounting rather than being guessed.
-- `SPY CONFIRMED HELD QTY` was still zero in the pre-reconciliation local checkpoint while the broker held one SPY share. Repository changes after that observation now automatically reconcile broker-confirmed execution evidence before re-running the checkpoint.
-- The held SPY share is therefore the intentional next lifecycle target: reconcile it locally, close it through the dedicated position-reducing Paper SELL path, persist the confirmed SELL with broker identity, then verify broker/local quantity returns to zero.
+- The broker held one SPY share while the older local checkpoint still showed zero before reconciliation; repository changes now reconcile broker-confirmed execution evidence before the checkpoint.
+- The held SPY share remains the intentional next real-broker lifecycle target: reconcile locally, close through the position-reducing Paper SELL path, persist the confirmed SELL with broker identity, then verify broker/local quantity returns to zero.
 
 ## Accounting and reporting
 - Only accounting-effective records are included; IBKR Paper requires confirmed `FILLED` evidence.
@@ -52,9 +63,9 @@ Final IBKR Paper integrated runtime validation. Repository-side safety, multicur
 
 ## Verification boundary
 - GitHub CI cannot access the user's local TWS/Gateway or local runtime ledger.
-- Repository CI has validated the new reconciliation, execution-id deduplication, and position-reducing close code, but only the user's local Paper broker can prove the full close-cycle behavior.
+- Repository CI validates code paths and safety invariants but cannot substitute for real Paper broker evidence.
 - The next real-broker action must be Paper-only and position-reducing. It must not create new exposure.
 - No Live Trading completion claim is permitted.
 
-## Single next action
-Do not ask the user to perform fragmented diagnostics. First sync current `main` locally. Then use the dedicated one-command SPY Paper close path during an open Overnight session, with its explicit confirmation gate, to close exactly the one reconciled SPY share. After the broker-confirmed SELL is persisted, immediately re-run the non-order `ibkr_auto.sh` checkpoint and require broker/local SPY quantity zero before any new BUY test is considered.
+## Single next real-broker action
+Do not ask the user to perform fragmented diagnostics. When a supported close session is open, sync current `main` locally and use the session-aware one-command SPY Paper close path with its explicit confirmation gate to close exactly the one broker-confirmed SPY share. After the broker-confirmed SELL is persisted, immediately re-run the non-order checkpoint and require broker/local SPY quantity zero before any new BUY test is considered.
