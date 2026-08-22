@@ -14,6 +14,7 @@ from ai_asset_platform.execution.paper_trading_loop import run_paper_trading_loo
 from ai_asset_platform.execution.signal_order_bridge import (
     _instrument_for_ticker,
     verified_paper_test_quantity_for_ticker,
+    verified_paper_tickers,
 )
 from ai_asset_platform.execution.verified_paper_preflight import (
     VerifiedPaperPreflightError,
@@ -277,10 +278,12 @@ def run_paper_trading() -> dict:
         raise RuntimeError("Live Tradingが解除されているため、安全のためPaper試運転を中止しました。")
 
     ai_provider = signal_runner._create_configured_ai_provider()
-    # Analysis/reporting runs with order creation disabled.  This prevents the
-    # legacy JPY/100-share order-sizing branch from gating or sizing IBKR US/ETF
-    # orders.  A dedicated market-neutral executor consumes FinalSignal below.
+    # The IBKR Paper pilot scans only instruments whose broker quantity has
+    # already been evidenced.  This also guarantees AAPL/SPY are analyzed even
+    # while the legacy tickers.csv remains JP-only. Unverified symbols cannot
+    # accidentally become Paper orders through this runner.
     scan_result = signal_runner.run_signal_scan(
+        tickers=list(verified_paper_tickers()),
         ai_provider=ai_provider,
         allow_orders=False,
         allow_email=False,
