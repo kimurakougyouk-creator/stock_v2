@@ -15,12 +15,14 @@ def test_reconcile_confirmed_fill_from_execution_evidence(tmp_path):
     log = tmp_path / "paper_orders.jsonl"
     record = reconcile_confirmed_fill(
         fill_state_path=state, order_id=3, ticker="SPY", side="BUY",
-        order_intent_id="spy-paper-e2e-20260822-001", order_log_path=log,
+        currency="USD", order_intent_id="spy-paper-e2e-20260822-001",
+        order_log_path=log,
     )
     assert record["ticker"] == "SPY"
     assert record["side"] == "BUY"
     assert record["shares"] == 1
     assert record["reference_price"] == 765.45
+    assert record["currency"] == "USD"
     assert len(log.read_text(encoding="utf-8").splitlines()) == 1
 
 
@@ -32,7 +34,7 @@ def test_reconcile_is_idempotent(tmp_path):
     }), encoding="utf-8")
     log = tmp_path / "paper_orders.jsonl"
     kwargs = dict(fill_state_path=state, order_id=3, ticker="SPY", side="BUY",
-                  order_intent_id="same", order_log_path=log)
+                  currency="USD", order_intent_id="same", order_log_path=log)
     reconcile_confirmed_fill(**kwargs)
     reconcile_confirmed_fill(**kwargs)
     assert len(log.read_text(encoding="utf-8").splitlines()) == 1
@@ -47,5 +49,6 @@ def test_reconcile_rejects_mismatched_evidence(tmp_path):
     with pytest.raises(ValueError, match="disagree"):
         reconcile_confirmed_fill(
             fill_state_path=state, order_id=3, ticker="SPY", side="BUY",
-            order_intent_id="bad", order_log_path=tmp_path / "orders.jsonl",
+            currency="USD", order_intent_id="bad",
+            order_log_path=tmp_path / "orders.jsonl",
         )
