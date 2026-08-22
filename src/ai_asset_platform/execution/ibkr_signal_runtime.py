@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
+from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.service import ExecutionService
@@ -33,16 +34,18 @@ def execute_approved_signal_via_ibkr_paper(
     """Execute one pre-approved signal and persist only a confirmed Filled result.
 
     Paper transmission requires both existing settings gates plus the shared
-    risk gate. The temporary Account is deliberately not used as accounting
-    authority during migration; the durable legacy order log remains the single
-    state read by signal_runner.
+    risk gate. The current operator runtime is TWS Paper on 127.0.0.1:7497;
+    Live Trading remains disabled by the config and platform gates.
     """
     if not SETTINGS.enable_paper_trading:
         return SignalExecutionResult(False, "paper trading disabled")
     if not SETTINGS.enable_ibkr_paper:
         return SignalExecutionResult(False, "IBKR Paper disabled")
 
-    broker = IbkrBrokerAdapter(enable_paper_order_transmission=True)
+    broker = IbkrBrokerAdapter(
+        config=create_ibkr_paper_config(use_gateway=False),
+        enable_paper_order_transmission=True,
+    )
     service = ExecutionService(
         broker=broker,
         account=Account(initial_cash=0.0),
@@ -50,7 +53,7 @@ def execute_approved_signal_via_ibkr_paper(
     )
 
     if not broker.connect():
-        raise RuntimeError("IBKR Paperへ接続できません")
+        raise RuntimeError("IBKR TWS Paperへ接続できません")
 
     try:
         execution = execute_signal_via_ibkr_paper(
