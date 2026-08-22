@@ -23,6 +23,10 @@ from ai_asset_platform.reports.multicurrency_confirmed_accounting import (
     audit_multicurrency_confirmed_accounting,
     calculate_multicurrency_equity_curve,
 )
+from ai_asset_platform.reports.multicurrency_trade_history import (
+    MulticurrencyTradeHistoryError,
+    calculate_realized_trade_history,
+)
 from ai_asset_platform.reports.paper_trading_health import evaluate_paper_trading_health
 import order_manager
 import signal_runner
@@ -72,13 +76,32 @@ def _write_multicurrency_summary(summary, *, cross_currency: bool) -> None:
     )
 
 
+def _write_account_currency_trade_history(trades, *, account_currency: str) -> None:
+    """Persist detailed realized trades whose monetary fields share one currency."""
+    path = order_manager.ORDER_LOG_DIR / "paper_trade_pnls_account_currency.json"
+    records = [trade.as_record() for trade in trades]
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "account_currency": account_currency,
+        "realized_trade_pnls": [record["realized_pnl_account"] for record in records],
+        "realized_trades": records,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def _sync_confirmed_fill_to_reporting() -> bool:
-    """Rebuild account-currency equity/drawdown from explicit confirmed evidence.
+    """Rebuild account-currency PnL/equity/drawdown from confirmed evidence.
 
     Cross-currency records require an explicit per-fill FX rate. Missing FX fails
-    closed without deleting the confirmed fill. The old detailed realized-trade
-    JSON is regenerated only for single-account-currency ledgers; mixed-currency
-    runs use the new account-currency summary and equity outputs instead.
+    closed without deleting the confirmed fill. The legacy detailed trade JSON is
+    still regenerated for single-account-currency ledgers, while the new account-
+    currency trade history is written for both single- and cross-currency ledgers.
     """
     orders = order_manager.load_accounting_orders()
     account_currency = str(SETTINGS.account_currency).strip().upper()
@@ -93,7 +116,11 @@ def _sync_confirmed_fill_to_reporting() -> bool:
             initial_capital=float(TRADING_CAPITAL),
             account_currency=account_currency,
         )
-    except MulticurrencyConfirmedAccountingError as exc:
+        realized_trades = calculate_realized_trade_history(
+            orders,
+            account_currency=account_currency,
+        )
+    except (MulticurrencyConfirmedAccountingError, MulticurrencyTradeHistoryError) as exc:
         _write_accounting_status(safe=False, reason=str(exc))
         return False
 
@@ -107,6 +134,10 @@ def _sync_confirmed_fill_to_reporting() -> bool:
     if not cross_currency:
         order_manager.save_realized_trade_pnls()
 
+    _write_account_currency_trade_history(
+        realized_trades,
+        account_currency=account_currency,
+    )
     _write_multicurrency_summary(summary, cross_currency=cross_currency)
     _write_accounting_status(safe=True, reason=None)
     if not points:
