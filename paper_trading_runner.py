@@ -20,7 +20,10 @@ import signal_runner
 def _sync_confirmed_fill_to_reporting() -> None:
     """確定約定から実現損益・総資産履歴・最大DDを冪等に再生成する。注文は送信しない。"""
     order_manager.save_realized_trade_pnls()
-    orders = order_manager.load_paper_orders()
+    # Broker-side accounting must never consume READY/SENT/REJECTED rows.
+    # order_manager keeps legacy local PAPER rows compatible while requiring
+    # explicit FILLED evidence for IBKR_PAPER and future explicit broker modes.
+    orders = order_manager.load_accounting_orders()
     equity_points = calculate_equity_curve(orders, initial_capital=float(TRADING_CAPITAL))
     if not equity_points:
         return
