@@ -1,10 +1,10 @@
 """Shared fail-closed pre-send risk gate for migrated execution paths.
 
-This module deliberately reuses the verified legacy paper ledger as the current
-source of daily-order/loss/cooldown state while the execution stack is migrated.
-It does not enable any broker or Live Trading capability.
+The gate reads the durable Paper ledger but evaluates realized PnL and loss
+streaks in the configured account currency. Cross-currency IBKR fills therefore
+require the explicit per-fill FX evidence captured with the confirmed fill. No
+FX rate is guessed, no broker order is created here, and Live is never enabled.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +14,11 @@ from typing import Callable
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
 from ai_asset_platform.core.settings import PlatformSettings, SETTINGS
 from ai_asset_platform.execution.service import RiskGateResult
+from ai_asset_platform.reports.multicurrency_trade_history import (
+    MulticurrencyTradeHistoryError,
+    consecutive_losses_account_currency,
+    realized_pnl_for_date,
+)
 
 
 @dataclass(frozen=True)
@@ -30,12 +35,11 @@ SnapshotProvider = Callable[[OrderRequest, PlatformSettings], LegacyRiskSnapshot
 
 
 def _today_ibkr_realized_pnl_currency_safe(records: list[dict]) -> bool:
-    """Return whether today's IBKR realized-PnL rows can be treated as JPY.
+    """Compatibility helper: reject today's unconverted non-JPY IBKR SELL rows.
 
-    Only SELL fills dated today can contribute a realized PnL to today's loss
-    total. Historical USD buys alone must not permanently block future BUYs.
-    A today's IBKR SELL with missing/non-JPY currency makes the legacy JPY loss
-    comparison unsafe because no explicit FX conversion exists yet.
+    The authoritative risk snapshot now reconstructs realized PnL using the
+    explicit-FX trade-history engine. This helper remains for regression tests
+    and diagnostics only.
     """
     today = date.today()
     for record in records:
@@ -46,13 +50,17 @@ def _today_ibkr_realized_pnl_currency_safe(records: list[dict]) -> bool:
         try:
             created = datetime.fromisoformat(str(record["created_at"]))
         except (KeyError, TypeError, ValueError):
-            # A malformed date means we cannot prove it is outside today's loss
-            # calculation. Fail closed rather than silently ignore uncertainty.
             return False
         if created.date() != today:
             continue
         currency = str(record.get("currency", "")).strip().upper()
-        if currency != "JPY":
+        if currency == "JPY":
+            continue
+        try:
+            rate = float(record.get("fx_to_account_rate"))
+        except (TypeError, ValueError):
+            return False
+        if rate <= 0:
             return False
     return True
 
@@ -61,11 +69,14 @@ def load_legacy_risk_snapshot(
     order: OrderRequest,
     settings: PlatformSettings = SETTINGS,
 ) -> LegacyRiskSnapshot:
-    """Read safety state from the existing durable paper-order ledger."""
+    """Read safety state from the durable Paper ledger in account currency.
+
+    If explicit-FX accounting cannot prove the realized PnL/loss streak, the
+    snapshot marks currency safety false. The BUY gate then fails closed while
+    protective SELLs remain available.
+    """
     from order_manager import (
-        calculate_consecutive_losses,
         calculate_daily_buy_order_count,
-        calculate_daily_realized_pnl,
         calculate_daily_sell_order_count,
         calculate_repurchase_cooldown_remaining_minutes,
         load_accounting_orders,
@@ -79,15 +90,29 @@ def load_legacy_risk_snapshot(
         )
 
     accounting_orders = load_accounting_orders()
+    currency_safe = True
+    daily_realized = 0.0
+    consecutive_losses = 0
+    try:
+        daily_realized = realized_pnl_for_date(
+            accounting_orders,
+            target_date=date.today(),
+            account_currency=settings.account_currency,
+        )
+        consecutive_losses = consecutive_losses_account_currency(
+            accounting_orders,
+            account_currency=settings.account_currency,
+        )
+    except MulticurrencyTradeHistoryError:
+        currency_safe = False
+
     return LegacyRiskSnapshot(
         daily_buy_orders=calculate_daily_buy_order_count(),
         daily_sell_orders=calculate_daily_sell_order_count(),
-        daily_realized_pnl=calculate_daily_realized_pnl(),
-        consecutive_losses=calculate_consecutive_losses(),
+        daily_realized_pnl=daily_realized,
+        consecutive_losses=consecutive_losses,
         repurchase_cooldown_minutes=cooldown,
-        daily_realized_pnl_currency_safe=_today_ibkr_realized_pnl_currency_safe(
-            accounting_orders
-        ),
+        daily_realized_pnl_currency_safe=currency_safe,
     )
 
 
@@ -99,8 +124,8 @@ def build_shared_risk_gate(
     """Return a fail-closed RiskGate compatible with ExecutionService.
 
     Loss streak/daily-loss controls intentionally block new BUY exposure only,
-    matching the legacy safety behavior so protective SELL exits remain possible.
-    Disabled numeric limits (<= 0) are not treated as already exhausted.
+    so a protective SELL remains possible. Disabled numeric limits (<= 0) are
+    not treated as already exhausted.
     """
 
     def gate(order: OrderRequest) -> RiskGateResult:
@@ -128,7 +153,7 @@ def build_shared_risk_gate(
             ):
                 return RiskGateResult(
                     False,
-                    "IBKR損益を円換算できないため新規BUYを拒否しました",
+                    "IBKR損益を口座通貨へ安全に換算できないため新規BUYを拒否しました",
                 )
             if (
                 settings.daily_loss_limit_yen > 0
