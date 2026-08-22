@@ -32,12 +32,7 @@ class IbkrFxSnapshotResult:
 
     @property
     def ready(self) -> bool:
-        return (
-            self.connected
-            and self.rate is not None
-            and self.rate > 0
-            and not self.order_sent
-        )
+        return self.connected and self.rate is not None and self.rate > 0 and not self.order_sent
 
 
 class _FxSnapshotProbe(EWrapper, EClient):
@@ -61,18 +56,31 @@ class _FxSnapshotProbe(EWrapper, EClient):
             return
         if value <= 0:
             return
-        if int(tickType) == 1:  # bid
+        if int(tickType) == 1:
             self.bid = value
-        elif int(tickType) == 2:  # ask
+        elif int(tickType) == 2:
             self.ask = value
 
     def tickSnapshotEnd(self, reqId: int) -> None:  # noqa: N802
         self.snapshot_ready.set()
 
-    def error(self, reqId, errorTime, errorCode, errorString, advancedOrderRejectJson=""):
-        message = f"{errorCode}: {errorString}"
+    def error(self, reqId, *args):
+        """Accept both legacy and newer ibapi EWrapper.error callback shapes."""
+        if len(args) >= 4:
+            error_code = args[1]
+            error_string = args[2]
+        elif len(args) >= 2:
+            error_code = args[0]
+            error_string = args[1]
+        else:
+            return
+        try:
+            normalized_code = int(error_code)
+        except (TypeError, ValueError):
+            return
+        message = f"{normalized_code}: {error_string}"
         self.errors.append(message)
-        if int(errorCode) in {200, 326, 502, 503, 504, 1100}:
+        if normalized_code in {200, 326, 502, 503, 504, 1100}:
             self.fatal_error = message
             self.connected_ready.set()
             self.snapshot_ready.set()
@@ -93,11 +101,7 @@ def preview_ibkr_paper_fx_rate(
     exchange: str = "IDEALPRO",
     timeout: float = 10.0,
 ) -> IbkrFxSnapshotResult:
-    """Request one read-only FX bid/ask snapshot from Paper TWS/Gateway.
-
-    The returned rate is quote-currency units per one base-currency unit, using
-    the midpoint of positive bid/ask values from the broker snapshot.
-    """
+    """Request one read-only FX bid/ask snapshot from Paper TWS/Gateway."""
     contract: Contract = build_fx_discovery_contract(
         base_currency=base_currency,
         quote_currency=quote_currency,
@@ -109,7 +113,11 @@ def preview_ibkr_paper_fx_rate(
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
         probe = _FxSnapshotProbe()
         try:
-            probe.connect(cfg.host, cfg.port, cfg.client_id + 260)
+            try:
+                probe.connect(cfg.host, cfg.port, cfg.client_id + 260)
+            except OSError as exc:
+                connection_errors.append(f"{cfg.port}: {exc}")
+                continue
             Thread(target=probe.run, daemon=True).start()
             ready = probe.connected_ready.wait(timeout)
             if not ready or probe.fatal_error:
