@@ -1,16 +1,16 @@
-"""Synchronize confirmed broker fills into the legacy paper-order state.
+"""Synchronize confirmed broker fills into the durable paper-order state.
 
 This module never sends an order. It records only terminal, confirmed fills so
-legacy risk/accounting helpers keep reading the same durable state during the
-IBKR Paper migration.
+risk/accounting helpers keep reading the same durable state during the IBKR Paper
+migration.
 """
-
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from ai_asset_platform.core.account_clock import account_now
 
 
 def record_confirmed_fill(
@@ -24,13 +24,6 @@ def record_confirmed_fill(
     order_log_path: Path,
     fx_to_account_rate: float | None = None,
 ) -> dict[str, Any]:
-    """Append one confirmed fill, idempotently by ``order_intent_id``.
-
-    Currency is mandatory. An explicit FX conversion rate may be persisted when
-    it was independently observed; missing FX never blocks preservation of the
-    confirmed broker fill itself. Existing records with the same intent id are
-    returned unchanged, preventing duplicate accounting after retries/restarts.
-    """
     normalized_side = str(side).upper()
     if normalized_side not in {"BUY", "SELL"}:
         raise ValueError("side must be BUY or SELL")
@@ -70,7 +63,7 @@ def record_confirmed_fill(
                     return existing
 
     record: dict[str, Any] = {
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": account_now().isoformat(timespec="seconds"),
         "mode": "IBKR_PAPER",
         "ticker": str(ticker),
         "side": normalized_side,
