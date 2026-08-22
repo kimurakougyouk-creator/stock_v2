@@ -22,11 +22,10 @@ from ai_asset_platform.execution.service import ExecutionService
 from ai_asset_platform.execution.shared_risk_gate import build_shared_risk_gate
 from ai_asset_platform.execution.signal_order_bridge import (
     SignalExecutionResult,
+    _instrument_for_ticker,
     execute_signal_via_ibkr_paper,
 )
 
-# Backward-compatible private alias for existing tests/Overnight pilot while the
-# implementation itself lives in one shared fail-closed module.
 _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
 
 
@@ -80,6 +79,7 @@ def execute_approved_signal_via_ibkr_paper(
     if not SETTINGS.enable_ibkr_paper:
         return SignalExecutionResult(False, "IBKR Paper disabled")
 
+    instrument = _instrument_for_ticker(ticker)
     broker = _connect_first_available_paper_broker()
     service = ExecutionService(
         broker=broker,
@@ -109,6 +109,7 @@ def execute_approved_signal_via_ibkr_paper(
                 side=signal,
                 filled_quantity=confirmed_quantity,
                 avg_fill_price=confirmed_price,
+                currency=instrument.currency,
                 order_intent_id=order_intent_id,
                 order_log_path=order_log_path,
             )
