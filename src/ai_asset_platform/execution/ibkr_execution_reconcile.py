@@ -2,15 +2,16 @@
 
 Read-only with respect to IBKR: this module consumes execution snapshots and
 writes only the local durable order ledger. It never creates, changes, cancels,
-or transmits broker orders. Existing local intent ids are preserved; broker
-exec_id is used only to create a deterministic recovery intent when evidence is
-missing locally.
+or transmits broker orders. Broker historical MIDPOINT data may be used to
+attach account-currency FX evidence at the exact confirmed execution time.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import order_manager
 from ai_asset_platform.brokers.ibkr_execution_snapshot import (
@@ -18,6 +19,10 @@ from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     IbkrPaperExecutionSnapshot,
     preview_ibkr_paper_execution_snapshot,
 )
+from ai_asset_platform.brokers.ibkr_fx_historical import (
+    preview_ibkr_paper_historical_fx_rate,
+)
+from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 
 
@@ -54,12 +59,78 @@ def _existing_intents(path: Path) -> set[str]:
     return intents
 
 
+def _execution_reference_timestamp(raw: str) -> float | None:
+    value = str(raw).strip()
+    try:
+        local_text, timezone_name = value.rsplit(" ", 1)
+        local = datetime.strptime(local_text, "%Y%m%d %H:%M:%S")
+        return local.replace(tzinfo=ZoneInfo(timezone_name)).timestamp()
+    except Exception:
+        return None
+
+
+def _execution_fx_to_account(execution: IbkrExecutionEvidence) -> float | None:
+    source = str(execution.currency).strip().upper()
+    target = str(SETTINGS.account_currency).strip().upper()
+    if source == target:
+        return 1.0
+    if len(source) != 3 or len(target) != 3:
+        return None
+    reference_timestamp = _execution_reference_timestamp(execution.time)
+    if reference_timestamp is None:
+        return None
+    try:
+        evidence = preview_ibkr_paper_historical_fx_rate(
+            base_currency=source,
+            quote_currency=target,
+            end_datetime=str(execution.time).strip(),
+            reference_timestamp=reference_timestamp,
+        )
+    except Exception:
+        return None
+    if not evidence.ready or evidence.rate is None:
+        return None
+    rate = float(evidence.rate)
+    return rate if rate > 0 else None
+
+
+def _enrich_existing_intent_fx(path: Path, *, intent: str, rate: float) -> bool:
+    if not path.exists() or rate <= 0:
+        return False
+    original = path.read_text(encoding="utf-8").splitlines()
+    output: list[str] = []
+    changed = False
+    for line in original:
+        if not line.strip():
+            output.append(line)
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            output.append(line)
+            continue
+        if (
+            str(record.get("order_intent_id", "")).strip() == intent
+            and not record.get("fx_to_account_rate")
+        ):
+            record["fx_to_account_rate"] = float(rate)
+            output.append(json.dumps(record, ensure_ascii=False))
+            changed = True
+        else:
+            output.append(line)
+    if changed:
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text("\n".join(output) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    return changed
+
+
 def reconcile_execution_snapshot_to_ledger(
     snapshot: IbkrPaperExecutionSnapshot,
     *,
     order_log_path: Path,
 ) -> ReconciliationResult:
-    """Persist missing broker execution evidence idempotently into local state."""
+    """Persist broker execution evidence and fill-time FX idempotently."""
     if not snapshot.ready:
         return ReconciliationResult(0, 0, ("broker execution snapshot is not ready",))
 
@@ -73,8 +144,16 @@ def reconcile_execution_snapshot_to_ledger(
                 skipped += 1
                 continue
             intent = _recovery_intent(execution)
+            fx_rate = _execution_fx_to_account(execution)
             if intent in existing:
-                skipped += 1
+                if fx_rate is not None and _enrich_existing_intent_fx(
+                    order_log_path,
+                    intent=intent,
+                    rate=fx_rate,
+                ):
+                    reconciled += 1
+                else:
+                    skipped += 1
                 continue
             record_confirmed_fill(
                 ticker=execution.symbol,
@@ -84,6 +163,7 @@ def reconcile_execution_snapshot_to_ledger(
                 currency=execution.currency,
                 order_intent_id=intent,
                 order_log_path=order_log_path,
+                fx_to_account_rate=fx_rate,
             )
             existing.add(intent)
             reconciled += 1
