@@ -22,8 +22,25 @@ def _whatif(*, ready=True):
     )
 
 
+def _fx(*, ready=True):
+    return SimpleNamespace(
+        connected=ready,
+        endpoint_port=4002 if ready else None,
+        base_currency="USD",
+        quote_currency="JPY",
+        exchange="IDEALPRO",
+        bid=150.0 if ready else None,
+        ask=150.2 if ready else None,
+        rate=150.1 if ready else None,
+        order_sent=False,
+        errors=(),
+        ready=ready,
+    )
+
+
 def _accounting():
     return SimpleNamespace(
+        account_currency="JPY",
         confirmed_fill_count=2,
         equity_point_count=2,
         ending_equity=1000200.0,
@@ -33,68 +50,125 @@ def _accounting():
     )
 
 
-def test_checkpoint_combines_local_accounting_and_single_whatif(monkeypatch):
-    seen = {"preview": 0, "accounting": 0}
+def _preflight(*, allowed=True, reason="passed"):
+    return SimpleNamespace(
+        allowed=allowed,
+        reason=reason,
+        planned_notional_account=115276.8,
+        held_quantity=0,
+        current_position_count=0,
+        daily_trading_amount_account=0.0,
+    )
 
-    def fake_preview(*, limit_price):
-        seen["preview"] += 1
+
+def _settings():
+    return SimpleNamespace(account_currency="JPY")
+
+
+def test_checkpoint_combines_accounting_whatif_fx_and_preflight(monkeypatch):
+    seen = {"whatif": 0, "fx": 0, "accounting": 0, "preflight": 0}
+    monkeypatch.setattr(module, "SETTINGS", _settings())
+    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: [])
+
+    def fake_whatif(*, limit_price):
+        seen["whatif"] += 1
         assert limit_price == 768.0
         return _whatif()
 
-    def fake_accounting(path, *, initial_capital, account_currency):
+    def fake_fx(**kwargs):
+        seen["fx"] += 1
+        assert kwargs == {"base_currency": "USD", "quote_currency": "JPY"}
+        return _fx()
+
+    def fake_accounting(records, *, initial_capital, account_currency):
         seen["accounting"] += 1
-        assert path == module.order_manager.ORDER_LOG_PATH
+        assert records == []
         assert initial_capital == float(module.TRADING_CAPITAL)
         assert account_currency == "JPY"
         return _accounting()
 
-    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", fake_preview)
-    monkeypatch.setattr(module, "audit_confirmed_accounting_file", fake_accounting)
+    def fake_preflight(**kwargs):
+        seen["preflight"] += 1
+        assert kwargs["fx_to_account_rate"] == 150.1
+        return _preflight()
+
+    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", fake_whatif)
+    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", fake_fx)
+    monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", fake_accounting)
+    monkeypatch.setattr(module, "evaluate_verified_paper_preflight", fake_preflight)
 
     result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
-    assert seen == {"preview": 1, "accounting": 1}
+    assert seen == {"whatif": 1, "fx": 1, "accounting": 1, "preflight": 1}
     assert result.ready_for_paper_e2e_review is True
     assert result.whatif.order_sent is False
-    assert result.accounting is not None
-    assert result.accounting.confirmed_fill_count == 2
+    assert result.fx.order_sent is False
     assert result.accounting_error is None
+    assert result.preflight_error is None
 
 
 def test_checkpoint_never_marks_ready_when_whatif_fails(monkeypatch):
-    monkeypatch.setattr(
-        module,
-        "preview_ibkr_paper_overnight_order",
-        lambda **kwargs: _whatif(ready=False),
-    )
-    monkeypatch.setattr(
-        module,
-        "audit_confirmed_accounting_file",
-        lambda *args, **kwargs: _accounting(),
-    )
-
+    monkeypatch.setattr(module, "SETTINGS", _settings())
+    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: [])
+    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif(ready=False))
+    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
+    monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", lambda *args, **kwargs: _accounting())
+    monkeypatch.setattr(module, "evaluate_verified_paper_preflight", lambda **kwargs: _preflight())
     result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
     assert result.ready_for_paper_e2e_review is False
     assert result.whatif.order_sent is False
 
 
-def test_checkpoint_still_runs_safe_whatif_but_blocks_readiness_on_currency_error(monkeypatch):
-    seen = {"preview": 0}
+def test_checkpoint_blocks_readiness_when_fx_snapshot_fails(monkeypatch):
+    monkeypatch.setattr(module, "SETTINGS", _settings())
+    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: [])
+    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
+    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx(ready=False))
+    monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", lambda *args, **kwargs: _accounting())
+    called = {"preflight": 0}
+    monkeypatch.setattr(module, "evaluate_verified_paper_preflight", lambda **kwargs: called.__setitem__("preflight", 1))
+    result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
+    assert result.ready_for_paper_e2e_review is False
+    assert "FX snapshot" in result.preflight_error
+    assert called["preflight"] == 0
 
-    def fake_preview(**kwargs):
-        seen["preview"] += 1
-        return _whatif(ready=True)
 
-    def unsafe_accounting(*args, **kwargs):
-        raise module.ConfirmedAccountingCurrencyError(
-            "confirmed fill currency USD cannot be combined with account currency JPY"
+def test_checkpoint_reports_missing_historical_fx_evidence(monkeypatch):
+    monkeypatch.setattr(module, "SETTINGS", _settings())
+    rows = [{
+        "mode": "IBKR_PAPER",
+        "status": "FILLED",
+        "ticker": "SPY",
+        "currency": "USD",
+        "order_intent_id": "old-spy-fill",
+    }]
+    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: rows)
+    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
+    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
+
+    def unsafe(*args, **kwargs):
+        raise module.MulticurrencyConfirmedAccountingError(
+            "confirmed fill currency USD requires explicit fx_to_account_rate into JPY"
         )
 
-    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", fake_preview)
-    monkeypatch.setattr(module, "audit_confirmed_accounting_file", unsafe_accounting)
-
+    monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", unsafe)
     result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
-    assert seen["preview"] == 1
-    assert result.whatif.order_sent is False
-    assert result.accounting is None
-    assert "USD" in result.accounting_error
     assert result.ready_for_paper_e2e_review is False
+    assert "old-spy-fill" in result.accounting_error
+    assert "SPY" in result.accounting_error
+    assert result.preflight is None
+
+
+def test_checkpoint_blocks_when_position_preflight_blocks(monkeypatch):
+    monkeypatch.setattr(module, "SETTINGS", _settings())
+    monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: [])
+    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
+    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
+    monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", lambda *args, **kwargs: _accounting())
+    monkeypatch.setattr(
+        module,
+        "evaluate_verified_paper_preflight",
+        lambda **kwargs: _preflight(allowed=False, reason="new BUY blocked because the symbol is already held"),
+    )
+    result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
+    assert result.ready_for_paper_e2e_review is False
+    assert "already held" in result.preflight_error
