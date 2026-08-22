@@ -5,6 +5,7 @@ import pytest
 from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
 from ai_asset_platform.brokers.ibkr_overnight_whatif import (
     _WhatIfProbe,
+    _connect_probe_before_any_request,
     preview_ibkr_paper_overnight_order,
 )
 
@@ -36,6 +37,39 @@ def test_probe_collects_whatif_order_state():
     assert probe.preview_ready.is_set()
 
 
+def test_initial_connection_may_retry_before_any_broker_request(monkeypatch):
+    attempts = {"count": 0}
+    requested = {"contracts": 0, "orders": 0}
+
+    def fake_connect(self, host, port, client_id):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            self.error(-1, 0, 502, "temporary connection failure")
+        else:
+            self.next_order_id = 77
+            self.connected_ready.set()
+
+    monkeypatch.setattr(_WhatIfProbe, "connect", fake_connect)
+    monkeypatch.setattr(_WhatIfProbe, "run", lambda self: None)
+    monkeypatch.setattr(_WhatIfProbe, "isConnected", lambda self: False)
+    monkeypatch.setattr(_WhatIfProbe, "reqContractDetails", lambda self, *args: requested.__setitem__("contracts", requested["contracts"] + 1))
+    monkeypatch.setattr(_WhatIfProbe, "placeOrder", lambda self, *args: requested.__setitem__("orders", requested["orders"] + 1))
+    monkeypatch.setattr("ai_asset_platform.brokers.ibkr_overnight_whatif.time.sleep", lambda _: None)
+
+    probe, errors = _connect_probe_before_any_request(
+        IbkrConnectionConfig(port=7497),
+        timeout=0.0,
+        attempts=2,
+        retry_delay=0.0,
+    )
+
+    assert attempts["count"] == 2
+    assert probe is not None
+    assert probe.next_order_id == 77
+    assert requested == {"contracts": 0, "orders": 0}
+    assert any("502" in item for item in errors)
+
+
 def test_single_session_resolves_both_contracts_and_requests_preview_once(monkeypatch):
     seen = {"connect": 0, "contracts": [], "places": 0}
 
@@ -63,10 +97,7 @@ def test_single_session_resolves_both_contracts_and_requests_preview_once(monkey
 
     def fake_req_contract_details(self, req_id, contract):
         seen["contracts"].append((req_id, contract.exchange, getattr(contract, "primaryExchange", "")))
-        if req_id == 1:
-            resolved = SimpleNamespace(symbol="SPY", primaryExchange="ARCA")
-        else:
-            resolved = SimpleNamespace(symbol="SPY", primaryExchange="ARCA")
+        resolved = SimpleNamespace(symbol="SPY", primaryExchange="ARCA")
         self.details_by_req[req_id] = [SimpleNamespace(contract=resolved)]
         self.contract_ready.set()
 
@@ -93,6 +124,7 @@ def test_single_session_resolves_both_contracts_and_requests_preview_once(monkey
         limit_price=768.0,
         config=IbkrConnectionConfig(port=7497, paper_trading=True, allow_live_trading=False),
         timeout=0.0,
+        connect_attempts=1,
     )
 
     assert seen["connect"] == 1
@@ -138,6 +170,7 @@ def test_contract_resolution_failure_never_requests_whatif(monkeypatch):
         limit_price=768.0,
         config=IbkrConnectionConfig(port=7497),
         timeout=0.0,
+        connect_attempts=1,
     )
     assert seen["places"] == 0
     assert result.preview_received is False
@@ -177,6 +210,7 @@ def test_whatif_fatal_server_error_fails_closed(monkeypatch):
         limit_price=768.0,
         config=IbkrConnectionConfig(port=7497),
         timeout=0.0,
+        connect_attempts=1,
     )
     assert result.preview_received is False
     assert result.order_sent is False
