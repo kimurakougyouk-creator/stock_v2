@@ -2,8 +2,10 @@
 
 This module never connects to a broker and never creates/transmits an order.
 It validates one already-priced pilot order against durable confirmed fills using
-one explicit account currency. Cross-currency values require an explicit FX
-conversion rate supplied by the caller; no rate is guessed.
+one explicit account currency. Cross-currency BUY exposure requires an explicit
+FX conversion rate supplied by the caller; no rate is guessed. Protective SELL
+checks intentionally need only confirmed quantity evidence so an unavailable FX
+quote cannot trap an existing position.
 """
 from __future__ import annotations
 
@@ -203,6 +205,45 @@ def evaluate_verified_paper_preflight(
         raise VerifiedPaperPreflightError("quantity must be positive")
     price = _positive_decimal(reference_price, field="reference_price")
 
+    materialized = list(records)
+    positions = _position_quantities(materialized)
+    held_quantity = int(positions.get(normalized_ticker, 0))
+    position_count = len(positions)
+
+    # A protective/position-reducing SELL must not depend on FX valuation.  The
+    # only pre-send question needed here is whether confirmed holdings prove the
+    # requested quantity can be reduced. Account-currency reporting is rebuilt
+    # separately after a confirmed fill and may remain fail-closed if FX evidence
+    # is unavailable.
+    if normalized_side == "SELL":
+        if held_quantity < qty:
+            return VerifiedPaperPreflightResult(
+                False,
+                "verified Paper SELL exceeds confirmed held quantity",
+                account_currency,
+                instrument,
+                None,
+                None,
+                None,
+                None,
+                None,
+                position_count,
+                held_quantity,
+            )
+        return VerifiedPaperPreflightResult(
+            True,
+            "protective/position-reducing SELL preflight passed",
+            account_currency,
+            instrument,
+            None,
+            None,
+            None,
+            None,
+            None,
+            position_count,
+            held_quantity,
+        )
+
     if instrument == account_currency:
         if fx_to_account_rate is None:
             fx = Decimal("1")
@@ -219,7 +260,6 @@ def evaluate_verified_paper_preflight(
             )
         fx = _positive_decimal(fx_to_account_rate, field="fx_to_account_rate")
 
-    materialized = list(records)
     try:
         summary = audit_multicurrency_confirmed_accounting(
             materialized,
@@ -229,9 +269,6 @@ def evaluate_verified_paper_preflight(
     except MulticurrencyConfirmedAccountingError as exc:
         raise VerifiedPaperPreflightError(str(exc)) from exc
 
-    positions = _position_quantities(materialized)
-    held_quantity = int(positions.get(normalized_ticker, 0))
-    position_count = len(positions)
     planned = Decimal(qty) * price * fx
     daily = _daily_trading_amount_account(
         materialized,
@@ -250,15 +287,6 @@ def evaluate_verified_paper_preflight(
         current_position_count=position_count,
         held_quantity=held_quantity,
     )
-
-    if normalized_side == "SELL":
-        if held_quantity < qty:
-            return VerifiedPaperPreflightResult(
-                False,
-                "verified Paper SELL exceeds confirmed held quantity",
-                **base,
-            )
-        return VerifiedPaperPreflightResult(True, "protective/position-reducing SELL preflight passed", **base)
 
     if held_quantity > 0:
         return VerifiedPaperPreflightResult(
