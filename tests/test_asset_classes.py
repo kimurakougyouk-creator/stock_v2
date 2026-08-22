@@ -27,6 +27,22 @@ def test_verified_ibkr_us_stock_paper_capability():
     )
 
 
+def test_verified_ibkr_us_etf_paper_capability():
+    assert is_verified_paper_capability(
+        market="US_ETF",
+        asset_class=AssetClass.ETF,
+        broker="IBKR",
+    )
+
+
+def test_overnight_is_not_promoted_by_regular_us_etf_verification():
+    assert not is_verified_paper_capability(
+        market="US_OVERNIGHT",
+        asset_class=AssetClass.ETF,
+        broker="IBKR",
+    )
+
+
 def test_target_does_not_mean_verified():
     assert not is_verified_paper_capability(
         market="GLOBAL_CRYPTO",
