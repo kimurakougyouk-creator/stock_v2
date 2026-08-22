@@ -172,7 +172,12 @@ def _broker_symbol_quantity(account: IbkrPaperAccountSnapshot, symbol: str) -> f
     )
 
 
-def _reconciliation_error(account: IbkrPaperAccountSnapshot, *, account_currency: str) -> str | None:
+def _reconciliation_error(
+    account: IbkrPaperAccountSnapshot,
+    *,
+    account_currency: str,
+    local_spy_held: int | None,
+) -> str | None:
     if not account.ready:
         return "broker Paper account snapshot is incomplete or not ready"
     if str(account.base_currency).strip().upper() != str(account_currency).strip().upper():
@@ -184,6 +189,14 @@ def _reconciliation_error(account: IbkrPaperAccountSnapshot, *, account_currency
         return "broker AvailableFunds is unavailable"
     if account.gross_position_value is None or account.gross_position_value < 0:
         return "broker GrossPositionValue is unavailable"
+    broker_spy_held = _broker_symbol_quantity(account, "SPY")
+    if local_spy_held is None:
+        return "local SPY confirmed position cannot be reconstructed safely"
+    if abs(float(local_spy_held) - float(broker_spy_held)) > 1e-9:
+        return (
+            "local/broker SPY position mismatch: "
+            f"local={local_spy_held}, broker={broker_spy_held:g}"
+        )
     return None
 
 
@@ -208,8 +221,12 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
 
     whatif = preview_ibkr_paper_overnight_order(limit_price=float(limit_price))
     account = preview_ibkr_paper_account_snapshot()
-    reconcile_error = _reconciliation_error(account, account_currency=account_currency)
     broker_spy_held = _broker_symbol_quantity(account, "SPY") if account.connected else None
+    reconcile_error = _reconciliation_error(
+        account,
+        account_currency=account_currency,
+        local_spy_held=spy_held,
+    )
 
     if account_currency == "USD":
         fx = IbkrFxSnapshotResult(
@@ -222,14 +239,14 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
 
     preflight = None
     preflight_error = None
-    if spy_held is None:
+    if reconcile_error is not None:
+        preflight_error = "broker/local position reconciliation is unsafe; BUY preflight remains blocked"
+    elif spy_held is None:
         preflight_error = "SPY confirmed position quantity cannot be reconstructed safely"
     elif spy_held > 0:
         preflight_error = f"SPY already has {spy_held} confirmed share(s); duplicate BUY is blocked"
     elif broker_spy_held is not None and broker_spy_held != 0:
         preflight_error = f"broker Paper account already holds {broker_spy_held:g} SPY share(s); duplicate BUY is blocked"
-    elif reconcile_error is not None:
-        preflight_error = "broker account reconciliation is unsafe; BUY preflight remains blocked"
     elif blockers:
         # Quarantine is useful for diagnostics/accounting continuity, but it is
         # not permission to ignore unknown historical exposure before new BUY.
