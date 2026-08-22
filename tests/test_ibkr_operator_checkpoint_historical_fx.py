@@ -66,7 +66,7 @@ def test_checkpoint_accepts_broker_historical_fx_evidence(monkeypatch):
     monkeypatch.setattr(module, "SETTINGS", SimpleNamespace(account_currency="JPY"))
     monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: [])
     monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
-    monkeypatch.setattr(module, "resolve_ibkr_paper_fx_evidence", lambda **kwargs: _fx())
+    monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
     monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", lambda *args, **kwargs: _accounting())
     monkeypatch.setattr(module, "evaluate_verified_paper_preflight", lambda **kwargs: _preflight())
 
