@@ -1,0 +1,148 @@
+from types import SimpleNamespace
+
+import pytest
+
+from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
+from ai_asset_platform.brokers.ibkr_overnight_whatif import (
+    _WhatIfProbe,
+    preview_ibkr_paper_overnight_order,
+)
+
+
+def _audit_ready():
+    return SimpleNamespace(
+        overnight_contract_ready=True,
+        primary_exchange="ARCA",
+        message="ready",
+    )
+
+
+def test_whatif_rejects_unverified_quantity():
+    with pytest.raises(RuntimeError, match="quantity 1"):
+        preview_ibkr_paper_overnight_order(limit_price=768.0, quantity=2)
+
+
+def test_whatif_rejects_non_positive_price():
+    with pytest.raises(ValueError, match="positive"):
+        preview_ibkr_paper_overnight_order(limit_price=0.0)
+
+
+def test_whatif_requires_tws_paper_port():
+    with pytest.raises(RuntimeError, match="7497"):
+        preview_ibkr_paper_overnight_order(
+            limit_price=768.0,
+            config=IbkrConnectionConfig(port=4002),
+        )
+
+
+def test_probe_collects_whatif_order_state():
+    probe = _WhatIfProbe()
+    state = SimpleNamespace()
+    order = SimpleNamespace(whatIf=True)
+    probe.openOrder(7, SimpleNamespace(), order, state)
+    assert probe.order_state is state
+    assert probe.preview_ready.is_set()
+
+
+def test_whatif_preview_sets_server_preview_flags_and_never_reports_sent(monkeypatch):
+    seen = {}
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr_overnight_whatif.audit_ibkr_paper_overnight_contract",
+        lambda symbol, config, timeout: _audit_ready(),
+    )
+
+    prepared = SimpleNamespace(
+        contract=SimpleNamespace(exchange="OVERNIGHT", primaryExchange="ARCA"),
+        order=SimpleNamespace(whatIf=False, transmit=False),
+    )
+
+    def fake_prepare(spec, *, config, verified_paper_test_quantity):
+        seen["verified_qty"] = verified_paper_test_quantity
+        seen["limit_price"] = spec.limit_price
+        return prepared
+
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr_overnight_whatif.prepare_ibkr_overnight_paper_limit_order",
+        fake_prepare,
+    )
+
+    def fake_connect(self, host, port, client_id):
+        seen["client_id"] = client_id
+        self.next_order_id = 55
+        self.connected_ready.set()
+
+    def fake_place(self, order_id, contract, order):
+        seen["order_id"] = order_id
+        seen["what_if"] = order.whatIf
+        seen["transmit"] = order.transmit
+        self.order_state = SimpleNamespace(
+            maintMarginChange="12.34",
+            commission=1.23,
+            commissionCurrency="USD",
+            warningText="",
+        )
+        self.preview_ready.set()
+
+    monkeypatch.setattr(_WhatIfProbe, "connect", fake_connect)
+    monkeypatch.setattr(_WhatIfProbe, "run", lambda self: None)
+    monkeypatch.setattr(_WhatIfProbe, "placeOrder", fake_place)
+    monkeypatch.setattr(_WhatIfProbe, "isConnected", lambda self: False)
+
+    result = preview_ibkr_paper_overnight_order(
+        limit_price=768.0,
+        config=IbkrConnectionConfig(port=7497, paper_trading=True, allow_live_trading=False),
+        timeout=0.0,
+    )
+
+    assert seen["verified_qty"] == 1
+    assert seen["limit_price"] == 768.0
+    assert seen["what_if"] is True
+    assert seen["transmit"] is True
+    assert seen["order_id"] == 55
+    assert result.connected is True
+    assert result.preview_received is True
+    assert result.order_sent is False
+    assert result.primary_exchange == "ARCA"
+    assert result.destination == "OVERNIGHT"
+    assert result.margin_change == "12.34"
+    assert result.commission == 1.23
+    assert result.commission_currency == "USD"
+    assert result.ready is True
+
+
+def test_whatif_fatal_server_error_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr_overnight_whatif.audit_ibkr_paper_overnight_contract",
+        lambda symbol, config, timeout: _audit_ready(),
+    )
+    prepared = SimpleNamespace(
+        contract=SimpleNamespace(exchange="OVERNIGHT", primaryExchange="ARCA"),
+        order=SimpleNamespace(whatIf=False, transmit=False),
+    )
+    monkeypatch.setattr(
+        "ai_asset_platform.brokers.ibkr_overnight_whatif.prepare_ibkr_overnight_paper_limit_order",
+        lambda *args, **kwargs: prepared,
+    )
+
+    def fake_connect(self, host, port, client_id):
+        self.next_order_id = 55
+        self.connected_ready.set()
+
+    def fake_place(self, order_id, contract, order):
+        self.error(order_id, 0, 201, "Order rejected")
+
+    monkeypatch.setattr(_WhatIfProbe, "connect", fake_connect)
+    monkeypatch.setattr(_WhatIfProbe, "run", lambda self: None)
+    monkeypatch.setattr(_WhatIfProbe, "placeOrder", fake_place)
+    monkeypatch.setattr(_WhatIfProbe, "isConnected", lambda self: False)
+
+    result = preview_ibkr_paper_overnight_order(
+        limit_price=768.0,
+        config=IbkrConnectionConfig(port=7497),
+        timeout=0.0,
+    )
+    assert result.preview_received is False
+    assert result.order_sent is False
+    assert result.ready is False
+    assert any("201" in item for item in result.errors)
