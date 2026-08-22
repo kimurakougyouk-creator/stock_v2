@@ -34,8 +34,6 @@ from ai_asset_platform.brokers.orders import (
     OrderStatus,
 )
 
-# place_order_and_await_fill()が終端とみなす注文状態。
-# ibkr_first_paper_test_confirmation.pyのTERMINAL_ORDER_STATESと同じ定義。
 _TERMINAL_ORDER_STATES = frozenset(
     {
         IbkrOrderState.FILLED,
@@ -57,11 +55,7 @@ def _sanitize_intent_id(order_intent_id: str) -> str:
 
 
 def _acquire_intent_lock(lock_path: Path) -> bool:
-    """order_intent_id単位の排他ロックを取得する。
-
-    os.O_CREAT|os.O_EXCLのアトミック性により、プロセスを跨いでも
-    同一order_intent_idに対しては1者しか取得できないことを保証する。
-    """
+    """order_intent_id単位の排他ロックを取得する。"""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -124,13 +118,8 @@ class IbkrBrokerAdapter(BrokerAdapter):
             fill_state_path,
             on_fill=on_fill,
         )
-        # 直近の接続失敗時の観測データ(接続成功時は更新しない・古いまま残る)。
         self.last_failed_diagnostics: IbkrConnectionDiagnostics | None = None
         self.last_failed_errors: list[dict] = []
-        # place_order_and_await_fill()の重複送信防止用。
-        # プロセス内では、このインスタンスが一度試行したorder_intent_idは
-        # 結果に関わらず二度と試行しない(生涯1回ロックとは異なり、
-        # intent_idごとに独立している)。
         self._attempted_intent_ids: set[str] = set()
 
     @property
@@ -138,14 +127,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
         return "IBKR"
 
     def connect(self, *, connect_timeout: float | None = None) -> bool:
-        """IBKR Paperへ接続する。
-
-        connect_timeoutを指定すると、nextValidId受信を待つ最大秒数だけを
-        変更できる(既定値5.0秒は変更しない呼び出し側の挙動を維持するため)。
-        接続に失敗した場合でも、その時点までに観測できたerrors/diagnosticsを
-        last_failed_errors/last_failed_diagnosticsへ保存する。
-        リトライや自動再接続は一切行わない(1回の接続試行のみ)。
-        """
+        """IBKR Paperへ接続する。失敗時は観測データを保存し、自動再接続しない。"""
         self.config.validate()
 
         if self.is_connected():
@@ -244,25 +226,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
         now_fn: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
     ) -> IbkrAsyncOrderResult:
-        """
-        IBKR Paperへ注文を送信し(最大1回)、終端状態に到達するかtimeout_seconds
-        が経過するまで、既存の観測基盤(orderStatus/openOrder/execDetails/
-        error/diagnostics)を使って監視する。
-
-        新しい発注ロジックは持たない。既存のplace_order()を1回だけ呼ぶ
-        だけであり、送信自体の安全条件(Paper固定・Live禁止・TIF=DAY等)は
-        prepare_ibkr_paper_order()/transmit_ibkr_paper_order()にすべて委ねる。
-
-        order_intent_idは呼び出し側が用意する、この注文意図を一意に表す
-        キー(例: シグナルID)。同一order_intent_idに対する2回目以降の
-        呼び出しは、結果に関わらず必ずDUPLICATE_BLOCKEDになる
-        (プロセス内: インスタンスごとの集合、プロセス跨ぎ: ロックファイルの
-        アトミックな排他作成)。first-paper-test専用の「生涯1回」ロックとは
-        異なり、intent_idごとに独立しているため、別の正当な注文は妨げない。
-
-        タイムアウトしても自動的な再送信は一切行わない。
-        約定/未約定は観測できた事実のみで判定し、推測しない。
-        """
+        """送信は最大1回。終端またはtimeoutまで観測し、決して自動再送しない。"""
         if not order_intent_id.strip():
             raise ValueError("order_intent_idは必須です。")
 
@@ -305,14 +269,9 @@ class IbkrBrokerAdapter(BrokerAdapter):
                 ),
             )
 
-        # ===== 送信はここで1回だけ =====
         result = self.place_order(order, instrument=instrument)
 
         if result.status is not OrderStatus.ACCEPTED:
-            # 実際には送信されなかったことが確定したため、正当な再試行
-            # (新しいインスタンス/プロセスから同じintent_idで)を妨げない
-            # よう、ファイルロックだけは解放する。プロセス内の
-            # _attempted_intent_idsはこのインスタンスでは解除しない。
             _release_intent_lock(lock_path)
             diagnostics = (
                 self._session.diagnostics() if self._session is not None else None
@@ -341,8 +300,6 @@ class IbkrBrokerAdapter(BrokerAdapter):
                 executions=executions,
             )
 
-        # ここから先は送信成功(sent=True)確定。ロックは解放しない
-        # (同じintent_idでの再試行は今後も常にDUPLICATE_BLOCKEDになる)。
         order_id = int(result.order_id)
         client = self._session.client  # type: ignore[union-attr]
 
@@ -350,8 +307,13 @@ class IbkrBrokerAdapter(BrokerAdapter):
         reached_terminal = False
 
         while now_fn() < deadline:
+            order_status = getattr(client, "order_statuses", {}).get(order_id)
             open_order = client.open_orders.get(order_id)
-            status_text = open_order.get("status") if open_order else None
+            status_text = (
+                order_status.get("status")
+                if order_status is not None
+                else (open_order.get("status") if open_order else None)
+            )
             filled_quantity = self.processed_filled(order_id)
 
             if (
@@ -368,14 +330,23 @@ class IbkrBrokerAdapter(BrokerAdapter):
             sleep_fn(poll_interval_seconds)
 
         filled_quantity = self.processed_filled(order_id)
+        order_status = getattr(client, "order_statuses", {}).get(order_id)
         open_order = client.open_orders.get(order_id)
-        last_known_status = open_order.get("status") if open_order else None
+        last_known_status = (
+            order_status.get("status")
+            if order_status is not None
+            else (open_order.get("status") if open_order else None)
+        )
 
         order_executions = [
             e for e in client.executions if e["order_id"] == order_id
         ]
         avg_fill_price: float | None = None
-        if order_executions:
+        if order_status is not None:
+            observed_avg = float(order_status.get("avg_fill_price", 0.0) or 0.0)
+            if observed_avg > 0:
+                avg_fill_price = observed_avg
+        if avg_fill_price is None and order_executions:
             total_shares = sum(e["shares"] for e in order_executions)
             if total_shares > 0:
                 avg_fill_price = (

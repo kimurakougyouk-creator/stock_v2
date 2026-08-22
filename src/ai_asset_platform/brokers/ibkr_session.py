@@ -31,6 +31,7 @@ class _IbkrPaperClient(EWrapper, EClient):
         # 観測専用のバッファ。注文変更・取消・再送信は一切行わない。
         self.errors: list[dict] = []
         self.open_orders: dict[int, dict] = {}
+        self.order_statuses: dict[int, dict] = {}
         self.executions: list[dict] = []
         self.message_loop_exception: BaseException | None = None
         self.message_loop_finished = Event()
@@ -61,15 +62,36 @@ class _IbkrPaperClient(EWrapper, EClient):
         whyHeld,
         mktCapPrice,
     ) -> None:
+        order_id = int(orderId)
+        status_text = str(status)
+        filled_value = float(filled)
+        remaining_value = float(remaining)
+        avg_price_value = float(avgFillPrice)
+        # Keep the broker callback itself as evidence even if openOrder has
+        # already disappeared or no fill-runtime handler is registered.
+        self.order_statuses[order_id] = {
+            "order_id": order_id,
+            "status": status_text,
+            "filled": filled_value,
+            "remaining": remaining_value,
+            "avg_fill_price": avg_price_value,
+            "perm_id": int(permId),
+            "parent_id": int(parentId),
+            "last_fill_price": float(lastFillPrice),
+            "client_id": int(clientId),
+            "why_held": str(whyHeld),
+            "mkt_cap_price": float(mktCapPrice),
+        }
+
         if self._order_status_handler is None:
             return
 
         self._order_status_handler(
-            int(orderId),
-            str(status),
-            float(filled),
-            float(remaining),
-            float(avgFillPrice),
+            order_id,
+            status_text,
+            filled_value,
+            remaining_value,
+            avg_price_value,
         )
 
     def execDetails(  # noqa: N802
