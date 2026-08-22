@@ -34,6 +34,7 @@ class _ContractDetailsProbe(EWrapper, EClient):
         self.ready = Event()
         self.details: list[ContractDetails] = []
         self.fatal_error: str | None = None
+        self.errors: list[str] = []
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.connected_ready.set()
@@ -45,10 +46,15 @@ class _ContractDetailsProbe(EWrapper, EClient):
         self.ready.set()
 
     def error(self, reqId, errorTime, errorCode, errorString, advancedOrderRejectJson=""):
+        message = f"{errorCode}: {errorString}"
+        self.errors.append(message)
         if errorCode in {200, 326, 502, 503, 504, 1100}:
-            self.fatal_error = f"{errorCode}: {errorString}"
+            self.fatal_error = message
             self.connected_ready.set()
             self.ready.set()
+
+    def diagnostic_suffix(self) -> str:
+        return f" Errors: {' | '.join(self.errors[-5:])}" if self.errors else ""
 
 
 def audit_ibkr_paper_etf(
@@ -73,7 +79,8 @@ def audit_ibkr_paper_etf(
             False, False, normalized, None, None, None, False, connection.message
         )
 
-    contract_cfg = replace(cfg, client_id=cfg.client_id + 1)
+    # Keep this read-only contract lookup isolated from the ordinary API client id.
+    contract_cfg = replace(cfg, client_id=cfg.client_id + 101)
     probe = _ContractDetailsProbe()
     try:
         probe.connect(contract_cfg.host, contract_cfg.port, contract_cfg.client_id)
@@ -81,7 +88,8 @@ def audit_ibkr_paper_etf(
         if not probe.connected_ready.wait(timeout):
             return IbkrEtfAuditResult(
                 True, False, normalized, None, None, None, False,
-                "IBKR Paper API contract-details session did not become ready before timeout.",
+                "IBKR Paper API contract-details session did not become ready before timeout."
+                + probe.diagnostic_suffix(),
             )
         if probe.fatal_error:
             return IbkrEtfAuditResult(
@@ -97,14 +105,16 @@ def audit_ibkr_paper_etf(
         if not probe.details:
             return IbkrEtfAuditResult(
                 True, False, normalized, None, None, None, False,
-                "IBKR Paper API returned no contract details before timeout.",
+                "IBKR Paper API returned no contract details before timeout."
+                + probe.diagnostic_suffix(),
             )
 
         resolved = probe.details[0].contract
         return IbkrEtfAuditResult(
             True, True, resolved.symbol, resolved.secType, resolved.exchange,
             resolved.currency, False,
-            "IBKR Paper API resolved the ETF contract. No order was transmitted.",
+            "IBKR Paper API resolved the ETF contract. No order was transmitted."
+            + probe.diagnostic_suffix(),
         )
     finally:
         if probe.isConnected():
