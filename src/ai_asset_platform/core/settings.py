@@ -8,11 +8,6 @@ from dataclasses import dataclass, field
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
-    """Read an explicit boolean opt-in from the environment.
-
-    Only well-known true/false spellings are accepted. Invalid values fail
-    closed instead of accidentally enabling a trading capability.
-    """
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -30,6 +25,10 @@ class PlatformSettings:
     system_version: str = "3.1-dev"
     run_mode: str = "DEVELOPMENT"
     account_currency: str = "JPY"
+    # Daily loss/order limits and durable fill timestamps use this calendar.
+    # It is explicit so a Linux host configured to UTC cannot shift a Japan
+    # account's trading day around midnight.
+    account_timezone: str = "Asia/Tokyo"
     enable_ai: bool = True
     minimum_ai_confidence: float = 70.0
     emergency_stop: bool = False
@@ -76,6 +75,7 @@ if __name__ == "__main__":
     print("Version :", SETTINGS.system_version)
     print("Mode    :", SETTINGS.run_mode)
     print("Account :", SETTINGS.account_currency)
+    print("Timezone:", SETTINGS.account_timezone)
     print("AI      :", SETTINGS.enable_ai)
     print("AI Conf :", SETTINGS.minimum_ai_confidence)
     print("Stop    :", SETTINGS.emergency_stop)
