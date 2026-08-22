@@ -8,6 +8,7 @@ It does not enable any broker or Live Trading capability.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Callable
 
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
@@ -28,17 +29,39 @@ class LegacyRiskSnapshot:
 SnapshotProvider = Callable[[OrderRequest, PlatformSettings], LegacyRiskSnapshot]
 
 
+def _today_ibkr_realized_pnl_currency_safe(records: list[dict]) -> bool:
+    """Return whether today's IBKR realized-PnL rows can be treated as JPY.
+
+    Only SELL fills dated today can contribute a realized PnL to today's loss
+    total. Historical USD buys alone must not permanently block future BUYs.
+    A today's IBKR SELL with missing/non-JPY currency makes the legacy JPY loss
+    comparison unsafe because no explicit FX conversion exists yet.
+    """
+    today = date.today()
+    for record in records:
+        if str(record.get("mode", "")).strip().upper() != "IBKR_PAPER":
+            continue
+        if str(record.get("side", "")).strip().upper() != "SELL":
+            continue
+        try:
+            created = datetime.fromisoformat(str(record["created_at"]))
+        except (KeyError, TypeError, ValueError):
+            # A malformed date means we cannot prove it is outside today's loss
+            # calculation. Fail closed rather than silently ignore uncertainty.
+            return False
+        if created.date() != today:
+            continue
+        currency = str(record.get("currency", "")).strip().upper()
+        if currency != "JPY":
+            return False
+    return True
+
+
 def load_legacy_risk_snapshot(
     order: OrderRequest,
     settings: PlatformSettings = SETTINGS,
 ) -> LegacyRiskSnapshot:
-    """Read safety state from the existing durable paper-order ledger.
-
-    The legacy realized-PnL helper has no FX conversion layer. Therefore any
-    accounting-effective IBKR Paper fill that is missing a currency or is not
-    JPY makes a yen-denominated daily-loss comparison unsafe. We report that
-    explicitly so the BUY gate can fail closed instead of comparing USD to JPY.
-    """
+    """Read safety state from the existing durable paper-order ledger."""
     from order_manager import (
         calculate_consecutive_losses,
         calculate_daily_buy_order_count,
@@ -55,22 +78,16 @@ def load_legacy_risk_snapshot(
             settings.repurchase_cooldown_minutes,
         )
 
-    currency_safe = True
-    for record in load_accounting_orders():
-        if str(record.get("mode", "")).strip().upper() != "IBKR_PAPER":
-            continue
-        currency = str(record.get("currency", "")).strip().upper()
-        if currency != "JPY":
-            currency_safe = False
-            break
-
+    accounting_orders = load_accounting_orders()
     return LegacyRiskSnapshot(
         daily_buy_orders=calculate_daily_buy_order_count(),
         daily_sell_orders=calculate_daily_sell_order_count(),
         daily_realized_pnl=calculate_daily_realized_pnl(),
         consecutive_losses=calculate_consecutive_losses(),
         repurchase_cooldown_minutes=cooldown,
-        daily_realized_pnl_currency_safe=currency_safe,
+        daily_realized_pnl_currency_safe=_today_ibkr_realized_pnl_currency_safe(
+            accounting_orders
+        ),
     )
 
 

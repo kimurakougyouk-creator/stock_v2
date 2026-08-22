@@ -1,9 +1,11 @@
 from dataclasses import replace
+from datetime import datetime, timedelta
 
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.shared_risk_gate import (
     LegacyRiskSnapshot,
+    _today_ibkr_realized_pnl_currency_safe,
     build_shared_risk_gate,
 )
 
@@ -15,6 +17,39 @@ def snapshot(**overrides):
 
 def provider(value):
     return lambda order, settings: value
+
+
+def _record(*, side, currency, created_at):
+    return {
+        "mode": "IBKR_PAPER",
+        "status": "FILLED",
+        "side": side,
+        "currency": currency,
+        "created_at": created_at,
+    }
+
+
+def test_historical_usd_fill_does_not_poison_todays_jpy_loss_gate():
+    yesterday = (datetime.now() - timedelta(days=1)).isoformat(timespec="seconds")
+    rows = [_record(side="SELL", currency="USD", created_at=yesterday)]
+    assert _today_ibkr_realized_pnl_currency_safe(rows) is True
+
+
+def test_todays_usd_sell_is_currency_unsafe_for_jpy_daily_loss():
+    today = datetime.now().isoformat(timespec="seconds")
+    rows = [_record(side="SELL", currency="USD", created_at=today)]
+    assert _today_ibkr_realized_pnl_currency_safe(rows) is False
+
+
+def test_todays_usd_buy_alone_does_not_affect_realized_loss_currency():
+    today = datetime.now().isoformat(timespec="seconds")
+    rows = [_record(side="BUY", currency="USD", created_at=today)]
+    assert _today_ibkr_realized_pnl_currency_safe(rows) is True
+
+
+def test_malformed_ibkr_sell_date_fails_closed():
+    rows = [_record(side="SELL", currency="USD", created_at="not-a-date")]
+    assert _today_ibkr_realized_pnl_currency_safe(rows) is False
 
 
 def test_allows_safe_buy():
