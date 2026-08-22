@@ -15,13 +15,15 @@ class IbkrPaperOrderGuardResult:
     message: str
 
 
-def validate_ibkr_paper_test_order(symbol: str, quantity: int, *, verified_test_quantity: int = 1, preflight: IbkrPreflightResult | None = None, use_gateway: bool = False) -> IbkrPaperOrderGuardResult:
-    """Fail-closed Paper guard. Default verified quantity remains 1."""
+def validate_ibkr_paper_test_order(symbol: str, quantity: int, *, verified_test_quantity: int | None = None, preflight: IbkrPreflightResult | None = None, use_gateway: bool = False) -> IbkrPaperOrderGuardResult:
+    """Fail-closed Paper guard. A product-specific verified quantity is required."""
     symbol = symbol.strip().upper()
     if not symbol:
         return IbkrPaperOrderGuardResult("BLOCKED", False, symbol, quantity, "銘柄コードが空のため停止しました。")
     if quantity <= 0:
         return IbkrPaperOrderGuardResult("BLOCKED", False, symbol, quantity, "注文数量は1以上にしてください。")
+    if verified_test_quantity is None:
+        return IbkrPaperOrderGuardResult("BLOCKED", False, symbol, quantity, "商品別の検証済みPaperテスト数量が未設定のため停止しました。")
     if verified_test_quantity <= 0:
         return IbkrPaperOrderGuardResult("BLOCKED", False, symbol, quantity, "検証済みPaperテスト数量が不正なため停止しました。")
     if quantity != verified_test_quantity:
@@ -40,7 +42,7 @@ def validate_ibkr_paper_test_order(symbol: str, quantity: int, *, verified_test_
 
 
 def main() -> None:
-    result = validate_ibkr_paper_test_order("AAPL", 1)
+    result = validate_ibkr_paper_test_order("AAPL", 1, verified_test_quantity=1)
     print("===== IBKR PAPER ORDER GUARD =====")
     print(f"STATUS  : {result.status}")
     print(f"ALLOWED : {result.allowed}")
