@@ -22,6 +22,7 @@ class LegacyRiskSnapshot:
     daily_realized_pnl: float
     consecutive_losses: int
     repurchase_cooldown_minutes: int
+    daily_realized_pnl_currency_safe: bool = True
 
 
 SnapshotProvider = Callable[[OrderRequest, PlatformSettings], LegacyRiskSnapshot]
@@ -31,13 +32,20 @@ def load_legacy_risk_snapshot(
     order: OrderRequest,
     settings: PlatformSettings = SETTINGS,
 ) -> LegacyRiskSnapshot:
-    """Read safety state from the existing durable paper-order ledger."""
+    """Read safety state from the existing durable paper-order ledger.
+
+    The legacy realized-PnL helper has no FX conversion layer. Therefore any
+    accounting-effective IBKR Paper fill that is missing a currency or is not
+    JPY makes a yen-denominated daily-loss comparison unsafe. We report that
+    explicitly so the BUY gate can fail closed instead of comparing USD to JPY.
+    """
     from order_manager import (
         calculate_consecutive_losses,
         calculate_daily_buy_order_count,
         calculate_daily_realized_pnl,
         calculate_daily_sell_order_count,
         calculate_repurchase_cooldown_remaining_minutes,
+        load_accounting_orders,
     )
 
     cooldown = 0
@@ -47,12 +55,22 @@ def load_legacy_risk_snapshot(
             settings.repurchase_cooldown_minutes,
         )
 
+    currency_safe = True
+    for record in load_accounting_orders():
+        if str(record.get("mode", "")).strip().upper() != "IBKR_PAPER":
+            continue
+        currency = str(record.get("currency", "")).strip().upper()
+        if currency != "JPY":
+            currency_safe = False
+            break
+
     return LegacyRiskSnapshot(
         daily_buy_orders=calculate_daily_buy_order_count(),
         daily_sell_orders=calculate_daily_sell_order_count(),
         daily_realized_pnl=calculate_daily_realized_pnl(),
         consecutive_losses=calculate_consecutive_losses(),
         repurchase_cooldown_minutes=cooldown,
+        daily_realized_pnl_currency_safe=currency_safe,
     )
 
 
@@ -87,6 +105,14 @@ def build_shared_risk_gate(
             return RiskGateResult(False, f"Risk状態を確認できないため注文を拒否しました: {exc}")
 
         if order.side is OrderSide.BUY:
+            if (
+                settings.daily_loss_limit_yen > 0
+                and not snapshot.daily_realized_pnl_currency_safe
+            ):
+                return RiskGateResult(
+                    False,
+                    "IBKR損益を円換算できないため新規BUYを拒否しました",
+                )
             if (
                 settings.daily_loss_limit_yen > 0
                 and snapshot.daily_realized_pnl <= -settings.daily_loss_limit_yen

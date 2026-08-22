@@ -1,6 +1,6 @@
 """Reconcile already-confirmed IBKR Paper fill evidence into reporting state.
 
-This module NEVER connects to IBKR and NEVER sends orders.  It exists only for
+This module NEVER connects to IBKR and NEVER sends orders. It exists only for
 post-fill recovery/audit when a real Paper fill was persisted by IbkrFillRuntime
 but the higher-level reporting callback was not used by the diagnostic command.
 """
@@ -18,6 +18,7 @@ def reconcile_confirmed_fill(
     order_id: int,
     ticker: str,
     side: str,
+    currency: str,
     order_intent_id: str,
     order_log_path: Path,
 ) -> dict:
@@ -47,6 +48,7 @@ def reconcile_confirmed_fill(
         side=side,
         filled_quantity=processed,
         avg_fill_price=total_value / total_qty,
+        currency=currency,
         order_intent_id=order_intent_id,
         order_log_path=order_log_path,
     )

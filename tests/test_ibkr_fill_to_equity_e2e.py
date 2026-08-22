@@ -25,7 +25,8 @@ def test_confirmed_ibkr_fill_updates_trade_equity_and_drawdown_reporting(monkeyp
         from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
         record_confirmed_fill(
             ticker=kwargs["ticker"], side=kwargs["signal"], filled_quantity=1,
-            avg_fill_price=100.0, order_intent_id=kwargs["order_intent_id"],
+            avg_fill_price=100.0, currency="USD",
+            order_intent_id=kwargs["order_intent_id"],
             order_log_path=kwargs["order_log_path"],
         )
         return _filled_result()
@@ -49,7 +50,8 @@ def test_reexecution_same_intent_does_not_double_count(monkeypatch, tmp_path):
         from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
         record_confirmed_fill(
             ticker=kwargs["ticker"], side=kwargs["signal"], filled_quantity=1,
-            avg_fill_price=100.0, order_intent_id=kwargs["order_intent_id"],
+            avg_fill_price=100.0, currency="USD",
+            order_intent_id=kwargs["order_intent_id"],
             order_log_path=kwargs["order_log_path"],
         )
         return _filled_result()
