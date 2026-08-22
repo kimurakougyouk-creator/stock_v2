@@ -2,7 +2,7 @@
 
 This module requests a short historical MIDPOINT series for a CASH/IDEALPRO
 pair. It never creates, changes, cancels, or transmits an order. A usable rate
-requires a positive, timestamped, sufficiently fresh bar returned by IBKR;
+requires a positive, timestamped bar close to the requested reference time;
 otherwise it fails closed.
 """
 from __future__ import annotations
@@ -103,10 +103,14 @@ def preview_ibkr_paper_historical_fx_rate(
     timeout: float = 10.0,
     max_age_seconds: float = DEFAULT_MAX_HISTORICAL_FX_AGE_SECONDS,
     now_fn: Callable[[], float] = time.time,
+    end_datetime: str = "",
+    reference_timestamp: float | None = None,
 ) -> IbkrHistoricalFxResult:
-    """Return the freshest recent broker historical MIDPOINT close, fail closed."""
+    """Return a broker MIDPOINT close near now or a supplied historical fill time."""
     if max_age_seconds <= 0:
         raise ValueError("max_age_seconds must be positive")
+    if end_datetime and reference_timestamp is None:
+        raise ValueError("reference_timestamp is required with end_datetime")
 
     contract: Contract = build_fx_discovery_contract(
         base_currency=base_currency,
@@ -114,6 +118,7 @@ def preview_ibkr_paper_historical_fx_rate(
         exchange=exchange,
     )
     errors: list[str] = []
+    reference = float(reference_timestamp) if reference_timestamp is not None else None
 
     for use_gateway in (True, False):
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
@@ -133,7 +138,7 @@ def preview_ibkr_paper_historical_fx_rate(
             probe.reqHistoricalData(
                 1,
                 contract,
-                "",
+                str(end_datetime),
                 "1 D",
                 "5 mins",
                 "MIDPOINT",
@@ -145,7 +150,7 @@ def preview_ibkr_paper_historical_fx_rate(
             probe.history_ready.wait(timeout)
             if probe.bars:
                 timestamp, close = max(probe.bars, key=lambda item: item[0])
-                age = float(now_fn()) - timestamp
+                age = (reference if reference is not None else float(now_fn())) - timestamp
                 if age < -_FUTURE_CLOCK_TOLERANCE_SECONDS:
                     errors.extend(probe.errors)
                     errors.append(
@@ -173,7 +178,7 @@ def preview_ibkr_paper_historical_fx_rate(
                 )
             errors.extend(probe.errors)
             errors.append(
-                f"{cfg.port}: fresh timestamped historical MIDPOINT for "
+                f"{cfg.port}: timestamped historical MIDPOINT for "
                 f"{contract.symbol}->{contract.currency} unavailable"
             )
         finally:
