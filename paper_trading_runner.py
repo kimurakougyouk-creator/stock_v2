@@ -2,6 +2,9 @@
 import json
 from config import TRADING_CAPITAL
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.execution.confirmed_fill_evidence import (
+    confirmed_fill_from_broker_result,
+)
 from ai_asset_platform.execution.ibkr_signal_runtime import execute_approved_signal_via_ibkr_paper
 from ai_asset_platform.execution.paper_trading_loop import run_paper_trading_loop
 from ai_asset_platform.execution.signal_order_bridge import (
@@ -101,25 +104,21 @@ def _execute_confirmed_ibkr_paper_order(
         order_log_path=order_manager.ORDER_LOG_PATH,
     )
     result = execution.broker_result
-    filled = (
-        execution.attempted
-        and result is not None
-        and getattr(result, "sent", False)
-        and getattr(result, "reached_terminal", False)
-        and getattr(result, "last_known_status", None) == "Filled"
-        and float(getattr(result, "filled_quantity", 0.0)) > 0
-        and getattr(result, "avg_fill_price", None) is not None
-        and float(result.avg_fill_price) > 0
+    confirmed = (
+        confirmed_fill_from_broker_result(result, normalized_shares)
+        if execution.attempted
+        else None
     )
-    if not filled:
+    if confirmed is None:
         raise RuntimeError(_describe_unconfirmed_ibkr_result(execution))
+    confirmed_quantity, confirmed_price = confirmed
     _sync_confirmed_fill_to_reporting()
     return {
         "mode": "IBKR_PAPER",
         "ticker": str(ticker),
         "side": normalized_signal,
-        "shares": int(float(result.filled_quantity)),
-        "reference_price": float(result.avg_fill_price),
+        "shares": int(confirmed_quantity),
+        "reference_price": float(confirmed_price),
         "status": "FILLED",
         "order_intent_id": order_intent_id,
         "strategy_requested_shares": requested_shares,
