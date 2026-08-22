@@ -25,7 +25,9 @@ def test_reconcile_execution_snapshot_is_idempotent(tmp_path: Path):
     second = reconcile_execution_snapshot_to_ledger(snapshot, order_log_path=log)
 
     assert first.reconciled_count == 1
-    assert second.reconciled_count == 1
+    assert first.skipped_count == 0
+    assert second.reconciled_count == 0
+    assert second.skipped_count == 1
     lines = [line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 1
     assert "broker-recovery:E1" in lines[0]
