@@ -126,6 +126,16 @@ class ExecutionService:
             poll_interval_seconds=poll_interval_seconds,
         )
 
+        # The current Account model is integer-quantity only. Preserve the
+        # existing fail-closed behavior even when an explicit terminal Filled
+        # callback reports a fractional quantity that is too small to satisfy
+        # the requested integer order. Silently returning/truncating it would
+        # hide an accounting-model incompatibility.
+        if str(getattr(result, "last_known_status", "") or "") == "Filled":
+            observed_quantity = float(getattr(result, "filled_quantity", 0.0) or 0.0)
+            if observed_quantity > 0 and float(int(observed_quantity)) != observed_quantity:
+                raise RuntimeError("端数株の約定は現在のAccountモデルへ反映できません")
+
         confirmed = confirmed_fill_from_broker_result(result, order.quantity)
         if confirmed is None or result.order_id is None:
             return result
