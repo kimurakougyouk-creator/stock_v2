@@ -66,10 +66,8 @@ def is_ibkr_overnight_session_open(now: datetime | None = None) -> bool:
     weekday = current.weekday()  # Monday=0 ... Sunday=6
     clock = current.timetz().replace(tzinfo=None)
 
-    # Evening starts: Sunday(6), Monday(0), Tuesday(1), Wednesday(2), Thursday(3)
     if weekday in {6, 0, 1, 2, 3} and clock >= _OVERNIGHT_START:
         return True
-    # Morning continuation: Monday-Friday.
     if weekday in {0, 1, 2, 3, 4} and clock < _OVERNIGHT_END:
         return True
     return False
@@ -93,7 +91,7 @@ def run_spy_overnight_paper_e2e(
     order_log_path: Path = Path("results/paper_orders.jsonl"),
     now: datetime | None = None,
 ) -> OvernightPaperE2EResult:
-    """Submit at most one explicitly approved SPY Overnight Paper pilot."""
+    """Submit at most one explicitly approved SPY Overnight Paper pilot per session."""
     if not SETTINGS.enable_paper_trading or not SETTINGS.enable_ibkr_paper:
         return OvernightPaperE2EResult(
             False,
@@ -141,10 +139,10 @@ def run_spy_overnight_paper_e2e(
             False,
         )
 
-    intent_id = (
-        "overnight-paper-e2e:SPY:BUY:1:"
-        f"{overnight_session_key(now)}:{float(limit_price):.4f}"
-    )
+    # Deliberately exclude price from the durable intent id. If an attempt has
+    # an uncertain/timeout result, changing the limit price in the same session
+    # must not create a new identity that could bypass duplicate protection.
+    intent_id = f"overnight-paper-e2e:SPY:BUY:1:{overnight_session_key(now)}"
     instrument = InstrumentSpec(
         symbol="SPY",
         asset_class=AssetClass.ETF,
