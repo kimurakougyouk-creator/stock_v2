@@ -4,7 +4,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config import STOP_LOSS_RATE, TRADING_CAPITAL
-from ai_asset_platform.brokers.ibkr_fx_snapshot import preview_ibkr_paper_fx_rate
+from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
+from ai_asset_platform.core.account_clock import account_now
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.confirmed_fill_evidence import (
     confirmed_fill_from_broker_result,
@@ -80,7 +81,7 @@ def _write_account_currency_trade_history(trades, *, account_currency: str) -> N
     path = order_manager.ORDER_LOG_DIR / "paper_trade_pnls_account_currency.json"
     records = [trade.as_record() for trade in trades]
     payload = {
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": account_now().isoformat(timespec="seconds"),
         "account_currency": account_currency,
         "realized_trade_pnls": [record["realized_pnl_account"] for record in records],
         "realized_trades": records,
@@ -170,22 +171,22 @@ def _describe_unconfirmed_ibkr_result(execution) -> str:
 
 
 def _preflight_fx_rate(*, instrument_currency: str, side: str) -> float | None:
-    """Get read-only FX evidence only when a new BUY needs account valuation."""
+    """Get broker-only FX evidence only when a new BUY needs account valuation."""
     if str(side).upper() == "SELL":
         return None
     account_currency = str(SETTINGS.account_currency).strip().upper()
     instrument_currency = str(instrument_currency).strip().upper()
     if instrument_currency == account_currency:
         return 1.0
-    snapshot = preview_ibkr_paper_fx_rate(
+    evidence = resolve_ibkr_paper_fx_evidence(
         base_currency=instrument_currency,
         quote_currency=account_currency,
     )
-    if not snapshot.ready or snapshot.rate is None or float(snapshot.rate) <= 0:
+    if not evidence.ready or evidence.rate is None or float(evidence.rate) <= 0:
         raise RuntimeError(
-            f"{instrument_currency}->{account_currency} FX snapshot is unavailable; BUY blocked"
+            f"{instrument_currency}->{account_currency} broker FX evidence is unavailable; BUY blocked"
         )
-    return float(snapshot.rate)
+    return float(evidence.rate)
 
 
 def _execute_confirmed_ibkr_paper_order(
@@ -278,10 +279,6 @@ def run_paper_trading() -> dict:
         raise RuntimeError("Live Tradingが解除されているため、安全のためPaper試運転を中止しました。")
 
     ai_provider = signal_runner._create_configured_ai_provider()
-    # The IBKR Paper pilot scans only instruments whose broker quantity has
-    # already been evidenced.  This also guarantees AAPL/SPY are analyzed even
-    # while the legacy tickers.csv remains JP-only. Unverified symbols cannot
-    # accidentally become Paper orders through this runner.
     scan_result = signal_runner.run_signal_scan(
         tickers=list(verified_paper_tickers()),
         ai_provider=ai_provider,
