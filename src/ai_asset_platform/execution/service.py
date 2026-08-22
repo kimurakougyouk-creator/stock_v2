@@ -13,6 +13,9 @@ from ai_asset_platform.brokers.orders import (
     OrderType,
 )
 from ai_asset_platform.brokers.base import BrokerAdapter
+from ai_asset_platform.execution.confirmed_fill_evidence import (
+    confirmed_fill_from_broker_result,
+)
 
 
 @dataclass(frozen=True)
@@ -123,19 +126,13 @@ class ExecutionService:
             poll_interval_seconds=poll_interval_seconds,
         )
 
-        if (
-            not result.sent
-            or not result.reached_terminal
-            or result.last_known_status != "Filled"
-            or result.order_id is None
-            or result.filled_quantity <= 0
-            or result.avg_fill_price is None
-            or result.avg_fill_price <= 0
-        ):
+        confirmed = confirmed_fill_from_broker_result(result, order.quantity)
+        if confirmed is None or result.order_id is None:
             return result
 
-        filled_quantity = int(result.filled_quantity)
-        if float(filled_quantity) != result.filled_quantity:
+        confirmed_quantity, confirmed_price = confirmed
+        filled_quantity = int(confirmed_quantity)
+        if float(filled_quantity) != confirmed_quantity:
             raise RuntimeError("端数株の約定は現在のAccountモデルへ反映できません")
 
         if apply_account_fill:
@@ -144,7 +141,7 @@ class ExecutionService:
                 symbol=order.symbol,
                 side=order.side,
                 quantity=filled_quantity,
-                fill_price=result.avg_fill_price,
+                fill_price=confirmed_price,
             )
             self._account.apply_fill(fill)
         return result
