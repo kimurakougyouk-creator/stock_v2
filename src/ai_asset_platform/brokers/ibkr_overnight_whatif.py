@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from threading import Event, Thread
 
@@ -69,6 +70,25 @@ class _WhatIfProbe(EWrapper, EClient):
             self.preview_ready.set()
 
 
+def _resolve_overnight_contract_with_readonly_retry(
+    symbol: str,
+    cfg: IbkrConnectionConfig,
+    *,
+    timeout: float,
+    attempts: int = 2,
+    retry_delay: float = 1.0,
+):
+    """Retry only the read-only ContractDetails audit, never an order request."""
+    last = None
+    for attempt in range(max(1, attempts)):
+        last = audit_ibkr_paper_overnight_contract(symbol, config=cfg, timeout=timeout)
+        if last.overnight_contract_ready and last.primary_exchange:
+            return last
+        if attempt + 1 < max(1, attempts):
+            time.sleep(max(0.0, retry_delay))
+    return last
+
+
 def preview_ibkr_paper_overnight_order(
     *,
     symbol: str = "SPY",
@@ -79,10 +99,9 @@ def preview_ibkr_paper_overnight_order(
 ) -> IbkrOvernightWhatIfResult:
     """Ask IBKR for an Overnight Paper what-if preview without placing an order.
 
-    IBKR requires ``transmit=True`` on what-if requests, but ``whatIf=True``
-    instructs the server to return margin/commission information instead of
-    routing the order to a destination. This function remains Paper-only and
-    never treats the preview as a real submitted order.
+    Only the preceding read-only ContractDetails audit may retry once. The
+    what-if order request itself is attempted at most once and is never
+    automatically resent.
     """
     cfg = config or create_ibkr_paper_config(use_gateway=False)
     cfg.validate()
@@ -95,9 +114,12 @@ def preview_ibkr_paper_overnight_order(
     if float(limit_price) <= 0:
         raise ValueError("limit_price must be positive")
 
-    audit = audit_ibkr_paper_overnight_contract(symbol, config=cfg, timeout=timeout)
-    if not audit.overnight_contract_ready or not audit.primary_exchange:
-        raise RuntimeError(f"Overnight directed contract is not broker-resolved: {audit.message}")
+    audit = _resolve_overnight_contract_with_readonly_retry(
+        symbol, cfg, timeout=timeout
+    )
+    if audit is None or not audit.overnight_contract_ready or not audit.primary_exchange:
+        message = getattr(audit, "message", "no audit result")
+        raise RuntimeError(f"Overnight directed contract is not broker-resolved: {message}")
 
     prepared = prepare_ibkr_overnight_paper_limit_order(
         OvernightPaperOrderSpec(
@@ -111,8 +133,6 @@ def preview_ibkr_paper_overnight_order(
         verified_paper_test_quantity=1,
     )
     prepared.order.whatIf = True
-    # IBKR error 413 requires transmit=True for what-if requests. With whatIf=True
-    # the server previews margin/commission and does not route the order.
     prepared.order.transmit = True
 
     probe = _WhatIfProbe()
@@ -152,19 +172,11 @@ def preview_ibkr_paper_overnight_order(
                 commission = None
 
         return IbkrOvernightWhatIfResult(
-            True,
-            True,
-            symbol.upper(),
-            audit.primary_exchange,
-            "OVERNIGHT",
-            quantity,
-            float(limit_price),
-            False,
-            getattr(state, "maintMarginChange", None),
-            commission,
+            True, True, symbol.upper(), audit.primary_exchange, "OVERNIGHT",
+            quantity, float(limit_price), False,
+            getattr(state, "maintMarginChange", None), commission,
             getattr(state, "commissionCurrency", None),
-            getattr(state, "warningText", None),
-            tuple(probe.errors),
+            getattr(state, "warningText", None), tuple(probe.errors),
         )
     finally:
         if probe.isConnected():
