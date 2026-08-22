@@ -4,13 +4,14 @@ This module can submit one real *Paper* order only when every gate is satisfied:
 - general IBKR Paper opt-in is enabled for the process;
 - a dedicated Overnight E2E opt-in is enabled;
 - the official Overnight session is currently open in America/New_York;
-- server-side what-if succeeds for SPY quantity 1;
-- the broker-resolved OVERNIGHT contract/primary exchange is available;
-- the shared Risk Gate allows the request.
+- the integrated non-order operator checkpoint passes (what-if, broker FX
+  evidence, accounting, confirmed holdings, allocation/risk/daily-notional);
+- the shared Risk Gate still allows the final request.
 
 The order is LIMIT/DAY, quantity 1, and uses a durable session-scoped intent id.
 Timeout or uncertain state is never automatically resent. Live Trading is not
-implemented here.
+implemented here. A confirmed cross-currency fill persists the exact FX evidence
+used by the checkpoint so account-currency accounting remains reproducible.
 """
 from __future__ import annotations
 
@@ -21,10 +22,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ai_asset_platform.account import Account
-from ai_asset_platform.brokers.ibkr_overnight_whatif import (
-    IbkrOvernightWhatIfResult,
-    preview_ibkr_paper_overnight_order,
+from ai_asset_platform.brokers.ibkr_operator_checkpoint import (
+    run_ibkr_operator_checkpoint,
 )
+from ai_asset_platform.brokers.ibkr_overnight_whatif import IbkrOvernightWhatIfResult
 from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide, OrderType
 from ai_asset_platform.core.asset_classes import AssetClass
@@ -57,11 +58,7 @@ def _env_enabled(name: str) -> bool:
 
 
 def is_ibkr_overnight_session_open(now: datetime | None = None) -> bool:
-    """Return whether the documented US Overnight session is open.
-
-    The venue runs Sunday-Thursday from 20:00 ET through 03:50 ET the following
-    day. ZoneInfo handles EDT/EST conversion; no fixed UTC/JST offset is used.
-    """
+    """Return whether the documented US Overnight session is open."""
     current = now.astimezone(_ET) if now is not None else datetime.now(_ET)
     weekday = current.weekday()
     clock = current.timetz().replace(tzinfo=None)
@@ -94,12 +91,7 @@ def run_spy_overnight_paper_e2e(
     """Submit at most one explicitly approved SPY Overnight Paper pilot per session."""
     if not SETTINGS.enable_paper_trading or not SETTINGS.enable_ibkr_paper:
         return OvernightPaperE2EResult(
-            False,
-            "IBKR Paper is not explicitly enabled for this process",
-            None,
-            None,
-            None,
-            False,
+            False, "IBKR Paper is not explicitly enabled for this process", None, None, None, False
         )
     if SETTINGS.enable_live_trading or SETTINGS.live_trading_unlocked:
         return OvernightPaperE2EResult(
@@ -107,36 +99,30 @@ def run_spy_overnight_paper_e2e(
         )
     if not _env_enabled("AI_ASSET_ENABLE_IBKR_OVERNIGHT_E2E"):
         return OvernightPaperE2EResult(
-            False,
-            "dedicated Overnight Paper E2E opt-in is disabled",
-            None,
-            None,
-            None,
-            False,
+            False, "dedicated Overnight Paper E2E opt-in is disabled", None, None, None, False
         )
     if float(limit_price) <= 0:
         raise ValueError("limit_price must be positive")
     if not is_ibkr_overnight_session_open(now):
         return OvernightPaperE2EResult(
-            False,
-            "IBKR Overnight session is closed; no order was attempted",
-            None,
-            None,
-            None,
-            False,
+            False, "IBKR Overnight session is closed; no order was attempted", None, None, None, False
         )
 
-    whatif = preview_ibkr_paper_overnight_order(
-        symbol="SPY", quantity=1, limit_price=float(limit_price)
-    )
+    # One integrated, non-real-order gate immediately before transmission.
+    # This includes what-if, explicit broker FX evidence, durable accounting,
+    # existing-position detection and verified account-currency preflight.
+    checkpoint = run_ibkr_operator_checkpoint(limit_price=float(limit_price))
+    whatif = checkpoint.whatif
+    if not checkpoint.ready_for_paper_e2e_review:
+        reason = checkpoint.preflight_error or checkpoint.accounting_error or "operator checkpoint did not pass"
+        return OvernightPaperE2EResult(False, reason, None, whatif, None, False)
+    if checkpoint.fx is None or not checkpoint.fx.ready or checkpoint.fx.rate is None:
+        return OvernightPaperE2EResult(
+            False, "operator checkpoint has no usable FX evidence", None, whatif, None, False
+        )
     if not whatif.ready or not whatif.primary_exchange:
         return OvernightPaperE2EResult(
-            False,
-            "Overnight server-side what-if did not pass",
-            None,
-            whatif,
-            None,
-            False,
+            False, "Overnight server-side what-if did not pass", None, whatif, None, False
         )
 
     intent_id = f"overnight-paper-e2e:SPY:BUY:1:{overnight_session_key(now)}"
@@ -181,6 +167,7 @@ def run_spy_overnight_paper_e2e(
                 currency=instrument.currency,
                 order_intent_id=intent_id,
                 order_log_path=order_log_path,
+                fx_to_account_rate=float(checkpoint.fx.rate),
             )
             persisted = True
         return OvernightPaperE2EResult(
