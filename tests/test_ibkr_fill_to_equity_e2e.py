@@ -42,6 +42,7 @@ def test_usd_confirmed_fill_with_fx_updates_jpy_equity_reporting(monkeypatch, tm
     assert result["currency"] == "USD"
     assert result["reporting_safe"] is True
     assert not (tmp_path / "paper_trade_pnls.json").exists()
+    assert (tmp_path / "paper_trade_pnls_account_currency.json").exists()
     assert (tmp_path / "equity_history.csv").exists()
     assert (tmp_path / "paper_drawdown.json").exists()
     summary = json.loads((tmp_path / "paper_accounting_summary.json").read_text(encoding="utf-8"))
@@ -50,8 +51,41 @@ def test_usd_confirmed_fill_with_fx_updates_jpy_equity_reporting(monkeypatch, tm
     assert summary["ending_cash"] == 985000.0
     assert summary["ending_holdings"] == 15000.0
     assert summary["ending_equity"] == 1000000.0
+    trade_history = json.loads((tmp_path / "paper_trade_pnls_account_currency.json").read_text(encoding="utf-8"))
+    assert trade_history["account_currency"] == "JPY"
+    assert trade_history["realized_trades"] == []
     status = json.loads((tmp_path / "paper_accounting_status.json").read_text(encoding="utf-8"))
     assert status == {"safe": True, "reason": None}
+
+
+def test_usd_confirmed_round_trip_writes_converted_realized_trade(monkeypatch, tmp_path):
+    _set_paths(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def fake_execute(**kwargs):
+        from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
+        calls["n"] += 1
+        side = kwargs["signal"]
+        price = 100.0 if side == "BUY" else 110.0
+        fx = 150.0 if side == "BUY" else 151.0
+        record_confirmed_fill(
+            ticker=kwargs["ticker"], side=side, filled_quantity=1,
+            avg_fill_price=price, currency="USD", fx_to_account_rate=fx,
+            order_intent_id=kwargs["order_intent_id"],
+            order_log_path=kwargs["order_log_path"],
+        )
+        return _filled_result(price=price)
+
+    monkeypatch.setattr(paper_trading_runner, "execute_approved_signal_via_ibkr_paper", fake_execute)
+    monkeypatch.setattr(paper_trading_runner, "_paper_signal_session_key", lambda ticker: "2026-08-22-buy" if calls["n"] == 0 else "2026-08-22-sell")
+    paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
+    paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "SELL", 1, 110.0)
+
+    history = json.loads((tmp_path / "paper_trade_pnls_account_currency.json").read_text(encoding="utf-8"))
+    assert history["account_currency"] == "JPY"
+    assert history["realized_trade_pnls"] == [1610.0]
+    assert history["realized_trades"][0]["ticker"] == "AAPL"
+    assert history["realized_trades"][0]["realized_pnl_account"] == 1610.0
 
 
 def test_usd_confirmed_fill_without_fx_remains_fail_closed(monkeypatch, tmp_path):
@@ -71,6 +105,7 @@ def test_usd_confirmed_fill_without_fx_remains_fail_closed(monkeypatch, tmp_path
     result = paper_trading_runner._execute_confirmed_ibkr_paper_order("AAPL", "BUY", 1, 100.0)
     assert result["reporting_safe"] is False
     assert not (tmp_path / "equity_history.csv").exists()
+    assert not (tmp_path / "paper_trade_pnls_account_currency.json").exists()
     status = json.loads((tmp_path / "paper_accounting_status.json").read_text(encoding="utf-8"))
     assert status["safe"] is False
     assert "fx_to_account_rate" in status["reason"]
@@ -95,6 +130,7 @@ def test_jpy_confirmed_fill_still_updates_legacy_and_new_summary(monkeypatch, tm
     assert result["reporting_safe"] is True
     assert result["currency"] == "JPY"
     assert (tmp_path / "paper_trade_pnls.json").exists()
+    assert (tmp_path / "paper_trade_pnls_account_currency.json").exists()
     assert (tmp_path / "paper_accounting_summary.json").exists()
     assert (tmp_path / "equity_history.csv").exists()
     drawdown = json.loads((tmp_path / "paper_drawdown.json").read_text(encoding="utf-8"))
