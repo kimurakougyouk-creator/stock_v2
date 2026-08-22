@@ -41,10 +41,11 @@ def test_checkpoint_combines_local_accounting_and_single_whatif(monkeypatch):
         assert limit_price == 768.0
         return _whatif()
 
-    def fake_accounting(path, *, initial_capital):
+    def fake_accounting(path, *, initial_capital, account_currency):
         seen["accounting"] += 1
         assert path == module.order_manager.ORDER_LOG_PATH
         assert initial_capital == float(module.TRADING_CAPITAL)
+        assert account_currency == "JPY"
         return _accounting()
 
     monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", fake_preview)
@@ -54,7 +55,9 @@ def test_checkpoint_combines_local_accounting_and_single_whatif(monkeypatch):
     assert seen == {"preview": 1, "accounting": 1}
     assert result.ready_for_paper_e2e_review is True
     assert result.whatif.order_sent is False
+    assert result.accounting is not None
     assert result.accounting.confirmed_fill_count == 2
+    assert result.accounting_error is None
 
 
 def test_checkpoint_never_marks_ready_when_whatif_fails(monkeypatch):
@@ -72,3 +75,26 @@ def test_checkpoint_never_marks_ready_when_whatif_fails(monkeypatch):
     result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
     assert result.ready_for_paper_e2e_review is False
     assert result.whatif.order_sent is False
+
+
+def test_checkpoint_still_runs_safe_whatif_but_blocks_readiness_on_currency_error(monkeypatch):
+    seen = {"preview": 0}
+
+    def fake_preview(**kwargs):
+        seen["preview"] += 1
+        return _whatif(ready=True)
+
+    def unsafe_accounting(*args, **kwargs):
+        raise module.ConfirmedAccountingCurrencyError(
+            "confirmed fill currency USD cannot be combined with account currency JPY"
+        )
+
+    monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", fake_preview)
+    monkeypatch.setattr(module, "audit_confirmed_accounting_file", unsafe_accounting)
+
+    result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
+    assert seen["preview"] == 1
+    assert result.whatif.order_sent is False
+    assert result.accounting is None
+    assert "USD" in result.accounting_error
+    assert result.ready_for_paper_e2e_review is False
