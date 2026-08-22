@@ -25,23 +25,21 @@ def run_ibkr_paper_test_flow(
     symbol: str = "AAPL",
     quantity: int = 1,
     *,
+    verified_test_quantity: int | None = 1,
     preflight: IbkrPreflightResult | None = None,
 ) -> IbkrPaperTestFlowResult:
-    """
-    IBKR Paperテストの安全な実行フロー。
+    """Run the legacy verified US-stock Paper readiness flow without sending an order.
 
-    1. API/TWS事前診断
-    2. Paper注文安全ガード
-    まで自動実行する。
-
-    このフロー自体は注文を送信せず、
-    Paper注文を安全に実行できる状態かを判定する。
+    New products and markets must pass their product-specific verified quantity
+    explicitly. The default of one is retained only for this historical US-stock
+    test-flow entry point, whose one-share path was already broker-verified.
     """
     preflight = preflight or run_ibkr_paper_preflight()
 
     guard = validate_ibkr_paper_test_order(
         symbol,
         quantity,
+        verified_test_quantity=verified_test_quantity,
         preflight=preflight,
     )
 
@@ -52,10 +50,7 @@ def run_ibkr_paper_test_flow(
             order_sent=False,
             preflight_status=preflight.status,
             guard_status=guard.status,
-            message=(
-                "IBKR Paper接続準備待ちです。"
-                "実注文は送信していません。"
-            ),
+            message="IBKR Paper接続準備待ちです。実注文は送信していません。",
         )
 
     if not guard.allowed:
@@ -65,10 +60,7 @@ def run_ibkr_paper_test_flow(
             order_sent=False,
             preflight_status=preflight.status,
             guard_status=guard.status,
-            message=(
-                "安全ガードにより停止しました。"
-                "実注文は送信していません。"
-            ),
+            message="安全ガードにより停止しました。実注文は送信していません。",
         )
 
     return IbkrPaperTestFlowResult(
@@ -86,7 +78,6 @@ def run_ibkr_paper_test_flow(
 
 def main() -> None:
     result = run_ibkr_paper_test_flow()
-
     print("===== IBKR PAPER TEST FLOW =====")
     print(f"STATUS          : {result.status}")
     print(f"READY           : {result.ready}")
