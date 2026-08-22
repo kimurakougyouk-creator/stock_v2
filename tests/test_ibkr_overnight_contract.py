@@ -43,39 +43,36 @@ def test_blank_primary_exchange_is_rejected():
         )
 
 
-def test_probe_collects_contract_details():
+def test_probe_tracks_contract_details_per_request():
     probe = _OvernightContractProbe()
-    details = SimpleNamespace(contract=SimpleNamespace(symbol="SPY"))
-    probe.contractDetails(1, details)
+    base = SimpleNamespace(contract=SimpleNamespace(symbol="SPY"))
+    overnight = SimpleNamespace(contract=SimpleNamespace(symbol="SPY"))
+    probe.contractDetails(1, base)
     probe.contractDetailsEnd(1)
-    assert probe.details == [details]
-    assert probe.ready.is_set()
+    probe.contractDetails(2, overnight)
+    probe.contractDetailsEnd(2)
+    assert probe.details_by_req_id[1] == [base]
+    assert probe.details_by_req_id[2] == [overnight]
+    assert probe.done_by_req_id[1].is_set()
+    assert probe.done_by_req_id[2].is_set()
 
 
 def test_audit_never_sends_and_fails_closed_without_primary_exchange(monkeypatch):
     def fake_connect(self, host, port, client_id):
         self.connected_ready.set()
 
-    def fake_req_contract_details(self, req_id, contract):
-        self.details.append(
-            SimpleNamespace(
-                contract=SimpleNamespace(
-                    symbol="SPY",
-                    primaryExchange="",
-                )
-            )
-        )
-        self.ready.set()
+    def fake_request(self, req_id, contract, timeout):
+        if req_id == 1:
+            return [SimpleNamespace(contract=SimpleNamespace(symbol="SPY", primaryExchange=""))]
+        raise AssertionError("overnight lookup must not run without primaryExchange")
 
     monkeypatch.setattr(_OvernightContractProbe, "connect", fake_connect)
     monkeypatch.setattr(_OvernightContractProbe, "run", lambda self: None)
-    monkeypatch.setattr(
-        _OvernightContractProbe, "reqContractDetails", fake_req_contract_details
-    )
+    monkeypatch.setattr(_OvernightContractProbe, "request_contract_details", fake_request)
     monkeypatch.setattr(_OvernightContractProbe, "isConnected", lambda self: False)
 
     result = audit_ibkr_paper_overnight_contract(
-        "SPY", config=IbkrConnectionConfig(), timeout=0.0
+        "SPY", config=IbkrConnectionConfig(port=7497), timeout=0.0
     )
     assert result.connected is True
     assert result.base_contract_resolved is True
@@ -83,31 +80,54 @@ def test_audit_never_sends_and_fails_closed_without_primary_exchange(monkeypatch
     assert result.order_sent is False
 
 
-def test_audit_builds_overnight_contract_from_broker_primary_exchange(monkeypatch):
+def test_audit_requires_broker_to_resolve_directed_overnight_contract(monkeypatch):
+    seen = []
+
     def fake_connect(self, host, port, client_id):
         self.connected_ready.set()
 
-    def fake_req_contract_details(self, req_id, contract):
-        self.details.append(
-            SimpleNamespace(
-                contract=SimpleNamespace(
-                    symbol="SPY",
-                    primaryExchange="ARCA",
-                )
-            )
-        )
-        self.ready.set()
+    def fake_request(self, req_id, contract, timeout):
+        seen.append((req_id, contract.exchange, getattr(contract, "primaryExchange", "")))
+        if req_id == 1:
+            return [SimpleNamespace(contract=SimpleNamespace(symbol="SPY", primaryExchange="ARCA"))]
+        return []
 
     monkeypatch.setattr(_OvernightContractProbe, "connect", fake_connect)
     monkeypatch.setattr(_OvernightContractProbe, "run", lambda self: None)
-    monkeypatch.setattr(
-        _OvernightContractProbe, "reqContractDetails", fake_req_contract_details
-    )
+    monkeypatch.setattr(_OvernightContractProbe, "request_contract_details", fake_request)
     monkeypatch.setattr(_OvernightContractProbe, "isConnected", lambda self: False)
 
     result = audit_ibkr_paper_overnight_contract(
-        "SPY", config=IbkrConnectionConfig(), timeout=0.0
+        "SPY", config=IbkrConnectionConfig(port=7497), timeout=0.0
     )
+    assert seen == [(1, "SMART", ""), (2, "OVERNIGHT", "ARCA")]
+    assert result.base_contract_resolved is True
+    assert result.overnight_contract_ready is False
+    assert result.destination == "OVERNIGHT"
+    assert result.order_sent is False
+
+
+def test_audit_marks_ready_only_after_broker_resolves_overnight(monkeypatch):
+    seen = []
+
+    def fake_connect(self, host, port, client_id):
+        self.connected_ready.set()
+
+    def fake_request(self, req_id, contract, timeout):
+        seen.append((req_id, contract.exchange, getattr(contract, "primaryExchange", "")))
+        if req_id == 1:
+            return [SimpleNamespace(contract=SimpleNamespace(symbol="SPY", primaryExchange="ARCA"))]
+        return [SimpleNamespace(contract=SimpleNamespace(symbol="SPY", primaryExchange="ARCA"))]
+
+    monkeypatch.setattr(_OvernightContractProbe, "connect", fake_connect)
+    monkeypatch.setattr(_OvernightContractProbe, "run", lambda self: None)
+    monkeypatch.setattr(_OvernightContractProbe, "request_contract_details", fake_request)
+    monkeypatch.setattr(_OvernightContractProbe, "isConnected", lambda self: False)
+
+    result = audit_ibkr_paper_overnight_contract(
+        "SPY", config=IbkrConnectionConfig(port=7497), timeout=0.0
+    )
+    assert seen == [(1, "SMART", ""), (2, "OVERNIGHT", "ARCA")]
     assert result.connected is True
     assert result.base_contract_resolved is True
     assert result.overnight_contract_ready is True
