@@ -38,11 +38,19 @@ class MarketCapability:
 
 
 # ここには実証済みの能力だけを書く。
-# AAPLのIBKR Paper実Fillは確認済みだが、Liveは未解禁。
+# AAPL (US stock) と SPY (US ETF) はIBKR Paper実Fillまで確認済み。
+# Liveは未解禁。Overnightは別ゲートのため、通常US_ETFの検証と混同しない。
 VERIFIED_CAPABILITIES: tuple[MarketCapability, ...] = (
     MarketCapability(
         market="US_STOCK",
         asset_class=AssetClass.STOCK,
+        broker="IBKR",
+        paper_supported=True,
+        live_supported=False,
+    ),
+    MarketCapability(
+        market="US_ETF",
+        asset_class=AssetClass.ETF,
         broker="IBKR",
         paper_supported=True,
         live_supported=False,
