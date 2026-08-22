@@ -15,7 +15,11 @@ class TestPlatformSettings(unittest.TestCase):
         self.assertTrue(SETTINGS.enable_paper_trading)
         self.assertFalse(SETTINGS.enable_live_trading)
         self.assertIn("JP_STOCK", SETTINGS.supported_markets)
+        self.assertIn("US_STOCK", SETTINGS.supported_markets)
+        self.assertIn("US_ETF", SETTINGS.supported_markets)
+        self.assertNotIn("US_OVERNIGHT", SETTINGS.supported_markets)
         self.assertIn("SBI", SETTINGS.supported_brokers)
+        self.assertIn("IBKR", SETTINGS.supported_brokers)
 
     def test_ibkr_paper_defaults_off_without_explicit_opt_in(self):
         with patch.dict("os.environ", {}, clear=True):
