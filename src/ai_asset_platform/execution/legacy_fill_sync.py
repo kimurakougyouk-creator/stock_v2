@@ -22,14 +22,14 @@ def record_confirmed_fill(
     currency: str,
     order_intent_id: str,
     order_log_path: Path,
+    fx_to_account_rate: float | None = None,
 ) -> dict[str, Any]:
     """Append one confirmed fill, idempotently by ``order_intent_id``.
 
-    Currency is mandatory because the legacy ledger historically assumed JPY.
-    Persisting an IBKR fill without its broker/product currency would let later
-    risk/accounting code compare unlike monetary units. Existing records with
-    the same intent id are returned unchanged, preventing duplicate accounting
-    after retries/restarts.
+    Currency is mandatory. An explicit FX conversion rate may be persisted when
+    it was independently observed; missing FX never blocks preservation of the
+    confirmed broker fill itself. Existing records with the same intent id are
+    returned unchanged, preventing duplicate accounting after retries/restarts.
     """
     normalized_side = str(side).upper()
     if normalized_side not in {"BUY", "SELL"}:
@@ -49,6 +49,12 @@ def record_confirmed_fill(
         raise ValueError("legacy state requires whole-share fills")
     if price <= 0:
         raise ValueError("avg_fill_price must be positive")
+
+    normalized_fx: float | None = None
+    if fx_to_account_rate is not None:
+        normalized_fx = float(fx_to_account_rate)
+        if normalized_fx <= 0:
+            raise ValueError("fx_to_account_rate must be positive when provided")
 
     if order_log_path.exists():
         with order_log_path.open("r", encoding="utf-8") as file:
@@ -74,6 +80,8 @@ def record_confirmed_fill(
         "status": "FILLED",
         "order_intent_id": order_intent_id,
     }
+    if normalized_fx is not None:
+        record["fx_to_account_rate"] = normalized_fx
 
     order_log_path.parent.mkdir(parents=True, exist_ok=True)
     with order_log_path.open("a", encoding="utf-8") as file:
