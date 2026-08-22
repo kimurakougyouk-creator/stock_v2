@@ -1,9 +1,11 @@
 """One-command, no-real-order checkpoint for the current IBKR Paper milestone.
 
-The checkpoint combines the broker Overnight what-if, a read-only USD/account
-currency FX snapshot, explicit-FX durable-ledger accounting, and the same pure
-verified-Paper BUY preflight used by the normal pilot path.  It never sends,
-changes, or cancels a real Paper or Live order.
+The checkpoint combines the broker Overnight what-if, broker-provided
+USD/account-currency FX evidence, explicit-FX durable-ledger accounting, and the
+same pure verified-Paper BUY preflight used by the normal pilot path. It also
+reconstructs confirmed position quantity without needing FX so an old
+cross-currency fill can still block an accidental duplicate BUY. It never
+sends, changes, or cancels a real Paper or Live order.
 """
 from __future__ import annotations
 
@@ -41,6 +43,8 @@ class IbkrOperatorCheckpointResult:
     preflight: VerifiedPaperPreflightResult | None
     accounting_error: str | None = None
     preflight_error: str | None = None
+    spy_confirmed_held_quantity: int | None = None
+    legacy_evidence_blockers: tuple[str, ...] = ()
 
     @property
     def ready_for_paper_e2e_review(self) -> bool:
@@ -52,11 +56,13 @@ class IbkrOperatorCheckpointResult:
             and self.preflight_error is None
             and self.preflight is not None
             and self.preflight.allowed
+            and not self.legacy_evidence_blockers
+            and (self.spy_confirmed_held_quantity or 0) == 0
         )
 
 
-def _missing_fx_evidence(records: list[dict], *, account_currency: str) -> tuple[str, ...]:
-    missing: list[str] = []
+def _legacy_evidence_blockers(records: list[dict], *, account_currency: str) -> tuple[str, ...]:
+    blockers: list[str] = []
     account = str(account_currency).strip().upper()
     seen: set[str] = set()
     for index, record in enumerate(records, start=1):
@@ -66,29 +72,69 @@ def _missing_fx_evidence(records: list[dict], *, account_currency: str) -> tuple
             continue
         if str(record.get("status", "")).strip().upper() != "FILLED":
             continue
+        intent = str(record.get("order_intent_id", "")).strip() or f"row-{index}"
+        ticker = str(record.get("ticker", "")).strip().upper() or "UNKNOWN"
         currency = str(record.get("currency", "")).strip().upper()
-        if not currency or currency == account:
+        if not currency:
+            key = f"{ticker}:{intent}:missing-currency"
+            if key not in seen:
+                seen.add(key)
+                blockers.append(key)
+            continue
+        if currency == account:
             continue
         raw = record.get("fx_to_account_rate")
         try:
             rate = float(raw)
         except (TypeError, ValueError):
             rate = 0.0
-        if rate > 0:
+        if rate <= 0:
+            key = f"{ticker}:{intent}:missing-historical-fx"
+            if key not in seen:
+                seen.add(key)
+                blockers.append(key)
+    return tuple(blockers)
+
+
+def _confirmed_held_quantity(records: list[dict], *, ticker: str) -> int | None:
+    """Reconstruct quantity from confirmed evidence only, independent of FX valuation."""
+    target = str(ticker).strip().upper()
+    held = 0
+    seen_intents: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
             continue
-        intent = str(record.get("order_intent_id", "")).strip() or f"row-{index}"
-        ticker = str(record.get("ticker", "")).strip() or "UNKNOWN"
-        key = f"{ticker}:{intent}"
-        if key not in seen:
-            seen.add(key)
-            missing.append(key)
-    return tuple(missing)
+        if str(record.get("status", "")).strip().upper() != "FILLED":
+            continue
+        if str(record.get("ticker", "")).strip().upper() != target:
+            continue
+        intent = str(record.get("order_intent_id", "")).strip()
+        if intent and intent in seen_intents:
+            continue
+        side = str(record.get("side", "")).strip().upper()
+        try:
+            shares = int(record.get("shares"))
+        except (TypeError, ValueError):
+            return None
+        if shares <= 0 or side not in {"BUY", "SELL"}:
+            return None
+        if side == "BUY":
+            held += shares
+        else:
+            if shares > held:
+                return None
+            held -= shares
+        if intent:
+            seen_intents.add(intent)
+    return held
 
 
 def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpointResult:
     """Run all safe checks needed before considering one Overnight Paper E2E."""
     account_currency = str(SETTINGS.account_currency).strip().upper()
     records = order_manager.load_accounting_orders()
+    blockers = _legacy_evidence_blockers(records, account_currency=account_currency)
+    spy_held = _confirmed_held_quantity(records, ticker="SPY")
 
     accounting = None
     accounting_error = None
@@ -99,16 +145,14 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
             account_currency=account_currency,
         )
     except MulticurrencyConfirmedAccountingError as exc:
-        missing = _missing_fx_evidence(records, account_currency=account_currency)
         accounting_error = str(exc)
-        if missing:
-            accounting_error += " | missing FX evidence: " + ", ".join(missing)
+        if blockers:
+            accounting_error += " | legacy evidence blockers: " + ", ".join(blockers)
 
     # These are broker reads only. What-if is explicitly non-transmitting; FX is
-    # a market-data snapshot. They remain useful diagnostics even when local
-    # accounting is unsafe.
+    # either market-data or account-data evidence. They remain useful diagnostics
+    # even when local accounting is unsafe.
     whatif = preview_ibkr_paper_overnight_order(limit_price=float(limit_price))
-    fx = None
     if account_currency == "USD":
         fx = IbkrFxSnapshotResult(
             connected=True,
@@ -119,6 +163,7 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
             bid=1.0,
             ask=1.0,
             rate=1.0,
+            source="IDENTITY",
             order_sent=False,
             errors=(),
         )
@@ -130,7 +175,17 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
 
     preflight = None
     preflight_error = None
-    if accounting_error is None and fx.ready and fx.rate is not None:
+    if spy_held is None:
+        preflight_error = "SPY confirmed position quantity cannot be reconstructed safely"
+    elif spy_held > 0:
+        preflight_error = f"SPY already has {spy_held} confirmed share(s); duplicate BUY is blocked"
+    elif blockers:
+        preflight_error = "legacy confirmed-fill evidence is incomplete; BUY preflight remains blocked"
+    elif accounting_error is not None:
+        preflight_error = "accounting is unsafe; BUY preflight remains blocked"
+    elif not fx.ready or fx.rate is None:
+        preflight_error = "USD account-currency FX evidence is unavailable"
+    else:
         try:
             preflight = evaluate_verified_paper_preflight(
                 records=records,
@@ -148,8 +203,6 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
                 preflight_error = preflight.reason
         except VerifiedPaperPreflightError as exc:
             preflight_error = str(exc)
-    elif accounting_error is None:
-        preflight_error = "USD account-currency FX snapshot is unavailable"
 
     return IbkrOperatorCheckpointResult(
         whatif=whatif,
@@ -158,6 +211,8 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
         preflight=preflight,
         accounting_error=accounting_error,
         preflight_error=preflight_error,
+        spy_confirmed_held_quantity=spy_held,
+        legacy_evidence_blockers=blockers,
     )
 
 
@@ -197,11 +252,14 @@ def main() -> int:
     print("WHATIF ERRORS          :", list(whatif.errors))
     print("FX READY               :", bool(fx and fx.ready))
     print("FX PAIR                :", f"USD/{SETTINGS.account_currency}")
+    print("FX SOURCE              :", fx.source if fx else None)
     print("FX BID                 :", fx.bid if fx else None)
     print("FX ASK                 :", fx.ask if fx else None)
     print("FX RATE                :", fx.rate if fx else None)
     print("FX ORDER SENT          :", fx.order_sent if fx else False)
     print("FX ERRORS              :", list(fx.errors) if fx else [])
+    print("LEGACY EVIDENCE BLOCKERS:", list(result.legacy_evidence_blockers))
+    print("SPY CONFIRMED HELD QTY :", result.spy_confirmed_held_quantity)
     print("ACCOUNTING SAFE        :", result.accounting_error is None)
     print("ACCOUNTING ERROR       :", result.accounting_error)
     if accounting is not None:
