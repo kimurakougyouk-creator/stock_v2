@@ -23,20 +23,24 @@ from ai_asset_platform.execution.signal_order_bridge import (
 OrderExecutor = Callable[[str, str, int, float], dict]
 
 
+def _safe_position_holding_days(ticker: str, settings: PlatformSettings) -> int | None:
+    """Use explicit account calendar for real settings; keep legacy test adapters compatible."""
+    if not getattr(settings, "account_timezone", None):
+        return order_manager.calculate_position_holding_days(ticker)
+    return position_holding_days(
+        order_manager.load_accounting_orders(),
+        ticker=ticker,
+        settings=settings,
+    )
+
+
 def execute_verified_actions_from_scan(
     scan_result: dict,
     *,
     execute_order: OrderExecutor,
     settings: PlatformSettings = SETTINGS,
 ) -> dict:
-    """Execute only verified BUY/SELL actions from an analysis-only scan.
-
-    The function recomputes confirmed holdings before every action. Existing
-    positions block new BUY exposure. SELL requires enough confirmed holdings
-    for the broker-verified pilot quantity. Trailing/time stops are retained as
-    position-reducing overrides, but unverified quantities are never invented.
-    Per-order failures are collected and do not trigger automatic resubmission.
-    """
+    """Execute only verified BUY/SELL actions from an analysis-only scan."""
     result = dict(scan_result)
     paper_orders: list[dict] = []
     execution_errors: list[dict[str, str]] = []
@@ -83,11 +87,7 @@ def execute_verified_actions_from_scan(
                 held_shares=held_shares,
             )
             try:
-                holding_days = position_holding_days(
-                    order_manager.load_accounting_orders(),
-                    ticker=ticker,
-                    settings=settings,
-                )
+                holding_days = _safe_position_holding_days(ticker, settings)
             except Exception as exc:
                 execution_errors.append({
                     "ticker": ticker,
