@@ -9,7 +9,7 @@ from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
 from ai_asset_platform.brokers.ibkr_connection import probe_ibkr_paper_connection
-from ai_asset_platform.brokers.ibkr_contracts import instrument_to_ibkr_contract
+from ai_asset_platform.brokers.ibkr_contracts import build_ibkr_contract_spec, to_ibapi_contract
 from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.core.asset_classes import AssetClass
 
@@ -57,13 +57,7 @@ def audit_ibkr_paper_etf(
     config: IbkrConnectionConfig | None = None,
     timeout: float = 8.0,
 ) -> IbkrEtfAuditResult:
-    """Resolve an ETF through the real Paper API without ever creating or placing an order.
-
-    Contract discovery is intentionally independent of verified order quantity:
-    quantity verification is required only before an order can enter the order
-    preparation/transmission path. This audit therefore remains safe for an
-    unverified product while preserving fail-closed order handling.
-    """
+    """Resolve an ETF through Paper API without creating or placing an order."""
     cfg = config or IbkrConnectionConfig()
     cfg.validate()
     if not cfg.paper_trading or cfg.allow_live_trading:
@@ -71,7 +65,7 @@ def audit_ibkr_paper_etf(
 
     normalized = symbol.strip().upper()
     instrument = InstrumentSpec(normalized, AssetClass.ETF)
-    contract = instrument_to_ibkr_contract(instrument)
+    contract = to_ibapi_contract(build_ibkr_contract_spec(instrument))
 
     connection = probe_ibkr_paper_connection(cfg, timeout=timeout)
     if not connection.connected:
@@ -83,9 +77,7 @@ def audit_ibkr_paper_etf(
     probe = _ContractDetailsProbe()
     try:
         probe.connect(contract_cfg.host, contract_cfg.port, contract_cfg.client_id)
-        thread = Thread(target=probe.run, daemon=True)
-        thread.start()
-
+        Thread(target=probe.run, daemon=True).start()
         if not probe.connected_ready.wait(timeout):
             return IbkrEtfAuditResult(
                 True, False, normalized, None, None, None, False,
@@ -98,7 +90,6 @@ def audit_ibkr_paper_etf(
 
         probe.reqContractDetails(1, contract)
         probe.ready.wait(timeout)
-
         if probe.fatal_error:
             return IbkrEtfAuditResult(
                 True, False, normalized, None, None, None, False, probe.fatal_error
