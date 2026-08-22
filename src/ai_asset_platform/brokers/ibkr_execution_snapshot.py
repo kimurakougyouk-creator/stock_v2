@@ -169,3 +169,25 @@ def preview_ibkr_paper_execution_snapshot(*, timeout: float = 10.0) -> IbkrPaper
         order_sent=False,
         errors=tuple(collected),
     )
+
+
+def main() -> int:
+    result = preview_ibkr_paper_execution_snapshot()
+    print("===== IBKR PAPER EXECUTION SNAPSHOT =====")
+    print("CONNECTED       :", result.connected)
+    print("ENDPOINT PORT   :", result.endpoint_port)
+    print("EXECUTION COUNT :", len(result.executions))
+    print("ORDER SENT      :", result.order_sent)
+    for index, item in enumerate(result.executions, start=1):
+        print(
+            f"EXECUTION {index}: symbol={item.symbol} side={item.side} qty={item.quantity:g} "
+            f"price={item.price:g} currency={item.currency or 'UNKNOWN'} exchange={item.exchange or 'UNKNOWN'} "
+            f"order_id={item.order_id} perm_id={item.perm_id} exec_id={item.exec_id or 'UNKNOWN'} time={item.time or 'UNKNOWN'}"
+        )
+    print("ERRORS          :", list(result.errors))
+    print("REAL ORDER SENT : False")
+    return 0 if result.ready else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

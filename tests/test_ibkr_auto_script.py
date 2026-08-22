@@ -21,6 +21,10 @@ def test_ibkr_auto_script_preserves_fail_closed_operator_flow():
     assert "git clean" not in text
     assert "git stash" not in text
     assert "ai_asset_platform.brokers.ibkr_operator_checkpoint" in text
+    assert "ai_asset_platform.brokers.ibkr_execution_snapshot" in text
     assert "IBKR_OVERNIGHT_WHATIF_LIMIT_PRICE" in text
+    assert "ibkr_execution_snapshot_latest.log" in text
     assert "4002" in text
     assert "7497" in text
+    assert "placeOrder" not in text
+    assert "cancelOrder" not in text

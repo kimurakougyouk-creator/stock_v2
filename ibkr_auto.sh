@@ -6,6 +6,7 @@ LIMIT_PRICE="${IBKR_OVERNIGHT_WHATIF_LIMIT_PRICE:-760}"
 WAIT_SECONDS="${IBKR_TWS_WAIT_SECONDS:-180}"
 LOG_DIR="$REPO_DIR/results"
 LATEST_LOG="$LOG_DIR/ibkr_operator_checkpoint_latest.log"
+EXECUTION_LOG="$LOG_DIR/ibkr_execution_snapshot_latest.log"
 
 cd "$REPO_DIR"
 
@@ -44,13 +45,20 @@ while True:
     time.sleep(2)
 PY
 
-# Run exactly one non-real-order checkpoint and save the complete evidence log.
-# The checkpoint itself is fail-closed and does not create/transmit/cancel a real order.
+# Run one non-real-order checkpoint, then a read-only broker execution-history
+# snapshot. The second stage still runs when the checkpoint correctly blocks so
+# one operator action gathers the evidence needed to reconcile broker/local state.
 set +e
 IBKR_OVERNIGHT_WHATIF_LIMIT_PRICE="$LIMIT_PRICE" \
 python -m ai_asset_platform.brokers.ibkr_operator_checkpoint 2>&1 | tee "$LATEST_LOG"
-status=${PIPESTATUS[0]}
+checkpoint_status=${PIPESTATUS[0]}
+python -m ai_asset_platform.brokers.ibkr_execution_snapshot 2>&1 | tee "$EXECUTION_LOG"
+execution_status=${PIPESTATUS[0]}
 set -e
 
 echo "CHECKPOINT LOG: $LATEST_LOG"
-exit "$status"
+echo "EXECUTION LOG : $EXECUTION_LOG"
+if [[ "$execution_status" -ne 0 ]]; then
+  exit "$execution_status"
+fi
+exit "$checkpoint_status"
