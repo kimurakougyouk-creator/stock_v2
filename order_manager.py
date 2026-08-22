@@ -182,6 +182,47 @@ def load_paper_orders() -> list[dict]:
     return orders
 
 
+def is_accounting_effective_order(order: dict) -> bool:
+    """資産・損益・保有状態へ反映してよい記録だけを許可する。
+
+    IBKR Paperはbroker側でFilledが確認された記録だけを反映する。
+    旧来のローカルPAPERシミュレーションはRECORDEDを有効とし、
+    modeを持たない古いローカル履歴も後方互換のため維持する。
+    明示された未知のmodeはFilled証拠がある場合だけ許可する。
+    """
+    if not isinstance(order, dict):
+        return False
+
+    mode = str(order.get("mode", "")).strip().upper()
+    status = str(order.get("status", "")).strip().upper()
+
+    if mode == "IBKR_PAPER":
+        return status == "FILLED"
+    if mode == "PAPER":
+        return status in {"", "RECORDED", "FILLED"}
+    if not mode:
+        return status not in {
+            "READY",
+            "READY_NOT_SENT",
+            "SENT",
+            "OPEN",
+            "PENDING",
+            "SUBMITTED",
+            "PARTIALLY_FILLED",
+            "REJECTED",
+            "BLOCKED",
+            "WAITING",
+            "CANCELLED",
+            "CANCELED",
+        }
+    return status == "FILLED"
+
+
+def load_accounting_orders() -> list[dict]:
+    """会計・保有・損益計算へ反映可能な注文履歴だけを返す。"""
+    return [order for order in load_paper_orders() if is_accounting_effective_order(order)]
+
+
 OPEN_ORDER_STATUSES = {
     "OPEN",
     "PENDING",
@@ -244,7 +285,7 @@ def calculate_realized_trade_pnls() -> list[float]:
     average_costs: dict[str, float] = {}
     realized_trade_pnls: list[float] = []
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         try:
             ticker = str(order["ticker"])
             side = str(order["side"]).upper()
@@ -291,7 +332,7 @@ def calculate_realized_trades() -> list[dict]:
     average_costs: dict[str, float] = {}
     realized_trades: list[dict] = []
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         try:
             ticker = str(order["ticker"])
             side = str(order["side"]).upper()
@@ -386,7 +427,7 @@ def calculate_available_cash(initial_capital: float) -> float:
             "initial_capitalは0以上の数値を指定してください。"
         )
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         try:
             side = str(order["side"]).upper()
             shares = int(order["shares"])
@@ -412,7 +453,7 @@ def get_open_positions() -> dict[str, int]:
 
     positions = {}
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         ticker = order["ticker"]
         shares = int(order["shares"])
 
@@ -443,7 +484,7 @@ def calculate_position_holding_days(
     current_time = current_time or datetime.now()
     open_lots: list[list[object]] = []
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         if str(order.get("ticker", "")) != ticker:
             continue
 
@@ -620,7 +661,7 @@ def calculate_repurchase_cooldown_remaining_minutes(
     current_time = current_time or datetime.now()
     latest_sell_time: datetime | None = None
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         if str(order.get("ticker", "")) != ticker:
             continue
 
@@ -672,7 +713,7 @@ def calculate_daily_realized_pnl(
     average_costs: dict[str, float] = {}
     daily_realized_pnl = 0.0
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         try:
             created_at = datetime.fromisoformat(str(order["created_at"]))
             ticker = str(order["ticker"])
@@ -726,7 +767,7 @@ def calculate_consecutive_losses() -> int:
     average_costs: dict[str, float] = {}
     realized_trade_pnls: list[float] = []
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         try:
             ticker = str(order["ticker"])
             side = str(order["side"]).upper()
@@ -779,7 +820,7 @@ def calculate_unrealized_pnl(current_prices: dict[str, float]) -> dict[str, floa
 
     pnl = {}
 
-    for order in load_paper_orders():
+    for order in load_accounting_orders():
         if order["side"] != "BUY":
             continue
 
@@ -847,7 +888,6 @@ def save_portfolio_report(current_prices: dict[str, float], filename: str = "por
 
         f.write(report)
         f.write("\n" + "=" * 40 + "\n")
-
 def generate_order_list():
     """保存されているペーパー注文を見やすい一覧にする。"""
     orders = load_paper_orders()
