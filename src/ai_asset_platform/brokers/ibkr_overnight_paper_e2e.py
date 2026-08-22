@@ -3,15 +3,15 @@
 This module can submit one real *Paper* order only when every gate is satisfied:
 - general IBKR Paper opt-in is enabled for the process;
 - a dedicated Overnight E2E opt-in is enabled;
-- the official Overnight session is currently open in America/New_York;
-- the integrated non-order operator checkpoint passes (what-if, broker FX
-  evidence, accounting, confirmed holdings, allocation/risk/daily-notional);
+- the documented broad Overnight window is plausible locally;
+- the integrated non-order operator checkpoint passes;
+- IBKR server time is inside the directed OVERNIGHT contract's broker-reported
+  tradingHours (holiday/special-session aware, fail-closed);
 - the shared Risk Gate still allows the final request.
 
 The order is LIMIT/DAY, quantity 1, and uses a durable session-scoped intent id.
 Timeout or uncertain state is never automatically resent. Live Trading is not
-implemented here. A confirmed cross-currency fill persists the exact FX evidence
-used by the checkpoint so account-currency accounting remains reproducible.
+implemented here.
 """
 from __future__ import annotations
 
@@ -22,8 +22,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ai_asset_platform.account import Account
-from ai_asset_platform.brokers.ibkr_operator_checkpoint import (
-    run_ibkr_operator_checkpoint,
+from ai_asset_platform.brokers.ibkr_operator_checkpoint import run_ibkr_operator_checkpoint
+from ai_asset_platform.brokers.ibkr_overnight_session import (
+    IbkrOvernightSessionResult,
+    preview_ibkr_paper_overnight_session,
 )
 from ai_asset_platform.brokers.ibkr_overnight_whatif import IbkrOvernightWhatIfResult
 from ai_asset_platform.brokers.instruments import InstrumentSpec
@@ -51,6 +53,7 @@ class OvernightPaperE2EResult:
     whatif: IbkrOvernightWhatIfResult | None
     broker_result: object | None
     confirmed_fill_persisted: bool
+    broker_session: IbkrOvernightSessionResult | None = None
 
 
 def _env_enabled(name: str) -> bool:
@@ -58,11 +61,10 @@ def _env_enabled(name: str) -> bool:
 
 
 def is_ibkr_overnight_session_open(now: datetime | None = None) -> bool:
-    """Return whether the documented US Overnight session is open."""
+    """Cheap documented broad-window precheck; broker hours are authoritative."""
     current = now.astimezone(_ET) if now is not None else datetime.now(_ET)
     weekday = current.weekday()
     clock = current.timetz().replace(tzinfo=None)
-
     if weekday in {6, 0, 1, 2, 3} and clock >= _OVERNIGHT_START:
         return True
     if weekday in {0, 1, 2, 3, 4} and clock < _OVERNIGHT_END:
@@ -71,14 +73,9 @@ def is_ibkr_overnight_session_open(now: datetime | None = None) -> bool:
 
 
 def overnight_session_key(now: datetime | None = None) -> str:
-    """Stable key for the current Overnight session start date in ET."""
     current = now.astimezone(_ET) if now is not None else datetime.now(_ET)
     clock = current.timetz().replace(tzinfo=None)
-    session_start_date = (
-        current.date() - timedelta(days=1)
-        if clock < _OVERNIGHT_END
-        else current.date()
-    )
+    session_start_date = current.date() - timedelta(days=1) if clock < _OVERNIGHT_END else current.date()
     return session_start_date.isoformat()
 
 
@@ -90,39 +87,41 @@ def run_spy_overnight_paper_e2e(
 ) -> OvernightPaperE2EResult:
     """Submit at most one explicitly approved SPY Overnight Paper pilot per session."""
     if not SETTINGS.enable_paper_trading or not SETTINGS.enable_ibkr_paper:
-        return OvernightPaperE2EResult(
-            False, "IBKR Paper is not explicitly enabled for this process", None, None, None, False
-        )
+        return OvernightPaperE2EResult(False, "IBKR Paper is not explicitly enabled for this process", None, None, None, False)
     if SETTINGS.enable_live_trading or SETTINGS.live_trading_unlocked:
-        return OvernightPaperE2EResult(
-            False, "Live Trading safety lock is not intact", None, None, None, False
-        )
+        return OvernightPaperE2EResult(False, "Live Trading safety lock is not intact", None, None, None, False)
     if not _env_enabled("AI_ASSET_ENABLE_IBKR_OVERNIGHT_E2E"):
-        return OvernightPaperE2EResult(
-            False, "dedicated Overnight Paper E2E opt-in is disabled", None, None, None, False
-        )
+        return OvernightPaperE2EResult(False, "dedicated Overnight Paper E2E opt-in is disabled", None, None, None, False)
     if float(limit_price) <= 0:
         raise ValueError("limit_price must be positive")
     if not is_ibkr_overnight_session_open(now):
-        return OvernightPaperE2EResult(
-            False, "IBKR Overnight session is closed; no order was attempted", None, None, None, False
-        )
+        return OvernightPaperE2EResult(False, "documented Overnight broad window is closed; no order was attempted", None, None, None, False)
 
-    # One integrated, non-real-order gate immediately before transmission.
-    # This includes what-if, explicit broker FX evidence, durable accounting,
-    # existing-position detection and verified account-currency preflight.
     checkpoint = run_ibkr_operator_checkpoint(limit_price=float(limit_price))
     whatif = checkpoint.whatif
     if not checkpoint.ready_for_paper_e2e_review:
         reason = checkpoint.preflight_error or checkpoint.accounting_error or "operator checkpoint did not pass"
         return OvernightPaperE2EResult(False, reason, None, whatif, None, False)
     if checkpoint.fx is None or not checkpoint.fx.ready or checkpoint.fx.rate is None:
-        return OvernightPaperE2EResult(
-            False, "operator checkpoint has no usable FX evidence", None, whatif, None, False
-        )
+        return OvernightPaperE2EResult(False, "operator checkpoint has no usable FX evidence", None, whatif, None, False)
     if not whatif.ready or not whatif.primary_exchange:
+        return OvernightPaperE2EResult(False, "Overnight server-side what-if did not pass", None, whatif, None, False)
+
+    # Holiday/special-session gate based on the directed contract and IBKR server
+    # clock, immediately before the only possible transmission.
+    broker_session = preview_ibkr_paper_overnight_session(
+        symbol="SPY",
+        primary_exchange=whatif.primary_exchange,
+    )
+    if not broker_session.ready:
         return OvernightPaperE2EResult(
-            False, "Overnight server-side what-if did not pass", None, whatif, None, False
+            False,
+            "IBKR broker-reported OVERNIGHT tradingHours are closed or unavailable; no order was attempted",
+            None,
+            whatif,
+            None,
+            False,
+            broker_session,
         )
 
     intent_id = f"overnight-paper-e2e:SPY:BUY:1:{overnight_session_key(now)}"
@@ -177,6 +176,7 @@ def run_spy_overnight_paper_e2e(
             whatif,
             broker_result,
             persisted,
+            broker_session,
         )
     finally:
         broker.disconnect()
