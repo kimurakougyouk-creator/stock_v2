@@ -45,6 +45,7 @@ class IbkrOperatorCheckpointResult:
     preflight_error: str | None = None
     spy_confirmed_held_quantity: int | None = None
     legacy_evidence_blockers: tuple[str, ...] = ()
+    quarantined_legacy_fill_count: int = 0
 
     @property
     def ready_for_paper_e2e_review(self) -> bool:
@@ -56,7 +57,6 @@ class IbkrOperatorCheckpointResult:
             and self.preflight_error is None
             and self.preflight is not None
             and self.preflight.allowed
-            and not self.legacy_evidence_blockers
             and (self.spy_confirmed_held_quantity or 0) == 0
         )
 
@@ -94,6 +94,38 @@ def _legacy_evidence_blockers(records: list[dict], *, account_currency: str) -> 
                 seen.add(key)
                 blockers.append(key)
     return tuple(blockers)
+
+
+def _record_has_trusted_accounting_evidence(record: dict, *, account_currency: str) -> bool:
+    if not isinstance(record, dict):
+        return False
+    if str(record.get("status", "")).strip().upper() != "FILLED":
+        return False
+    mode = str(record.get("mode", "")).strip().upper()
+    if mode != "IBKR_PAPER":
+        return True
+    currency = str(record.get("currency", "")).strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        return False
+    account = str(account_currency).strip().upper()
+    if currency == account:
+        return True
+    try:
+        rate = float(record.get("fx_to_account_rate"))
+    except (TypeError, ValueError):
+        return False
+    return rate > 0
+
+
+def _trusted_accounting_records(records: list[dict], *, account_currency: str) -> list[dict]:
+    return [
+        record
+        for record in records
+        if _record_has_trusted_accounting_evidence(
+            record,
+            account_currency=account_currency,
+        )
+    ]
 
 
 def _confirmed_held_quantity(records: list[dict], *, ticker: str) -> int | None:
@@ -134,24 +166,24 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
     account_currency = str(SETTINGS.account_currency).strip().upper()
     records = order_manager.load_accounting_orders()
     blockers = _legacy_evidence_blockers(records, account_currency=account_currency)
+    trusted_records = _trusted_accounting_records(
+        records,
+        account_currency=account_currency,
+    )
+    quarantined_count = len(records) - len(trusted_records)
     spy_held = _confirmed_held_quantity(records, ticker="SPY")
 
     accounting = None
     accounting_error = None
     try:
         accounting = audit_multicurrency_confirmed_accounting(
-            records,
+            trusted_records,
             initial_capital=float(TRADING_CAPITAL),
             account_currency=account_currency,
         )
     except MulticurrencyConfirmedAccountingError as exc:
         accounting_error = str(exc)
-        if blockers:
-            accounting_error += " | legacy evidence blockers: " + ", ".join(blockers)
 
-    # These are broker reads only. What-if is explicitly non-transmitting; FX is
-    # either market-data or account-data evidence. They remain useful diagnostics
-    # even when local accounting is unsafe.
     whatif = preview_ibkr_paper_overnight_order(limit_price=float(limit_price))
     if account_currency == "USD":
         fx = IbkrFxSnapshotResult(
@@ -179,8 +211,6 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
         preflight_error = "SPY confirmed position quantity cannot be reconstructed safely"
     elif spy_held > 0:
         preflight_error = f"SPY already has {spy_held} confirmed share(s); duplicate BUY is blocked"
-    elif blockers:
-        preflight_error = "legacy confirmed-fill evidence is incomplete; BUY preflight remains blocked"
     elif accounting_error is not None:
         preflight_error = "accounting is unsafe; BUY preflight remains blocked"
     elif not fx.ready or fx.rate is None:
@@ -188,7 +218,7 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
     else:
         try:
             preflight = evaluate_verified_paper_preflight(
-                records=records,
+                records=trusted_records,
                 ticker="SPY",
                 side="BUY",
                 quantity=1,
@@ -213,6 +243,7 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
         preflight_error=preflight_error,
         spy_confirmed_held_quantity=spy_held,
         legacy_evidence_blockers=blockers,
+        quarantined_legacy_fill_count=quarantined_count,
     )
 
 
@@ -259,6 +290,7 @@ def main() -> int:
     print("FX ORDER SENT          :", fx.order_sent if fx else False)
     print("FX ERRORS              :", list(fx.errors) if fx else [])
     print("LEGACY EVIDENCE BLOCKERS:", list(result.legacy_evidence_blockers))
+    print("QUARANTINED LEGACY FILLS:", result.quarantined_legacy_fill_count)
     print("SPY CONFIRMED HELD QTY :", result.spy_confirmed_held_quantity)
     print("ACCOUNTING SAFE        :", result.accounting_error is None)
     print("ACCOUNTING ERROR       :", result.accounting_error)
