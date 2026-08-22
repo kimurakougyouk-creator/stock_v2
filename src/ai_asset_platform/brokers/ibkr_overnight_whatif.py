@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from threading import Event, Thread
 
@@ -80,6 +81,38 @@ class _WhatIfProbe(EWrapper, EClient):
             self.preview_ready.set()
 
 
+def _connect_probe_before_any_request(
+    cfg: IbkrConnectionConfig,
+    *,
+    timeout: float,
+    attempts: int = 4,
+    retry_delay: float = 2.0,
+) -> tuple[_WhatIfProbe | None, tuple[str, ...]]:
+    """Retry only the initial TWS connection, before any broker request is made.
+
+    This helper is deliberately limited to connection establishment. No
+    ContractDetails request and no what-if/order request is retried here.
+    """
+    collected_errors: list[str] = []
+    total_attempts = max(1, int(attempts))
+    for attempt in range(total_attempts):
+        probe = _WhatIfProbe()
+        client_id = cfg.client_id + 103
+        probe.connect(cfg.host, cfg.port, client_id)
+        Thread(target=probe.run, daemon=True).start()
+        ready = probe.connected_ready.wait(timeout)
+        if ready and probe.next_order_id is not None and not probe.fatal_error:
+            return probe, tuple(collected_errors + probe.errors)
+
+        collected_errors.extend(probe.errors)
+        if probe.isConnected():
+            probe.disconnect()
+        if attempt + 1 < total_attempts:
+            time.sleep(max(0.0, retry_delay))
+
+    return None, tuple(collected_errors)
+
+
 def _resolve_contract_on_connected_probe(
     probe: _WhatIfProbe,
     contract: Contract,
@@ -106,12 +139,15 @@ def preview_ibkr_paper_overnight_order(
     limit_price: float,
     config: IbkrConnectionConfig | None = None,
     timeout: float = 10.0,
+    connect_attempts: int = 4,
+    connect_retry_delay: float = 2.0,
 ) -> IbkrOvernightWhatIfResult:
     """Resolve Overnight and request one Paper what-if preview in one TWS session.
 
-    ContractDetails lookups and the what-if request share a single API connection.
-    This avoids connection churn while keeping the what-if request single-shot.
-    No real Paper order is reported as sent and Live Trading remains disabled.
+    Initial TWS connection establishment may retry because no broker request has
+    happened yet. Once connected, both ContractDetails lookups and the single
+    what-if request use that same session. The what-if request itself is never
+    retried or automatically resent. Live Trading remains disabled.
     """
     cfg = config or create_ibkr_paper_config(use_gateway=False)
     cfg.validate()
@@ -125,24 +161,20 @@ def preview_ibkr_paper_overnight_order(
         raise ValueError("limit_price must be positive")
 
     normalized = symbol.strip().upper()
-    probe = _WhatIfProbe()
-    try:
-        client_id = cfg.client_id + 103
-        probe.connect(cfg.host, cfg.port, client_id)
-        Thread(target=probe.run, daemon=True).start()
-        if not probe.connected_ready.wait(timeout) or probe.next_order_id is None:
-            return IbkrOvernightWhatIfResult(
-                False, False, normalized, None, None,
-                quantity, float(limit_price), False, None, None, None, None,
-                tuple(probe.errors),
-            )
-        if probe.fatal_error:
-            return IbkrOvernightWhatIfResult(
-                True, False, normalized, None, None,
-                quantity, float(limit_price), False, None, None, None, None,
-                tuple(probe.errors),
-            )
+    probe, connection_errors = _connect_probe_before_any_request(
+        cfg,
+        timeout=timeout,
+        attempts=connect_attempts,
+        retry_delay=connect_retry_delay,
+    )
+    if probe is None:
+        return IbkrOvernightWhatIfResult(
+            False, False, normalized, None, None,
+            quantity, float(limit_price), False, None, None, None, None,
+            connection_errors,
+        )
 
+    try:
         base_instrument = InstrumentSpec(
             normalized,
             AssetClass.ETF,
@@ -157,7 +189,7 @@ def preview_ibkr_paper_overnight_order(
             return IbkrOvernightWhatIfResult(
                 True, False, normalized, None, None,
                 quantity, float(limit_price), False, None, None, None, None,
-                tuple(probe.errors),
+                tuple(connection_errors + tuple(probe.errors)),
             )
 
         primary = (getattr(resolved_base, "primaryExchange", "") or "").strip().upper()
@@ -165,7 +197,7 @@ def preview_ibkr_paper_overnight_order(
             return IbkrOvernightWhatIfResult(
                 True, False, normalized, None, None,
                 quantity, float(limit_price), False, None, None, None, None,
-                tuple(probe.errors),
+                tuple(connection_errors + tuple(probe.errors)),
             )
 
         overnight_instrument = InstrumentSpec(
@@ -185,7 +217,7 @@ def preview_ibkr_paper_overnight_order(
             return IbkrOvernightWhatIfResult(
                 True, False, normalized, primary, "OVERNIGHT",
                 quantity, float(limit_price), False, None, None, None, None,
-                tuple(probe.errors),
+                tuple(connection_errors + tuple(probe.errors)),
             )
 
         resolved_primary = (
@@ -205,6 +237,7 @@ def preview_ibkr_paper_overnight_order(
         prepared.order.whatIf = True
         prepared.order.transmit = True
 
+        # The what-if request is intentionally single-shot. Never retry it.
         probe.placeOrder(probe.next_order_id, prepared.contract, prepared.order)
         probe.preview_ready.wait(timeout)
 
@@ -213,7 +246,7 @@ def preview_ibkr_paper_overnight_order(
             return IbkrOvernightWhatIfResult(
                 True, False, normalized, resolved_primary, "OVERNIGHT",
                 quantity, float(limit_price), False, None, None, None, None,
-                tuple(probe.errors),
+                tuple(connection_errors + tuple(probe.errors)),
             )
 
         commission = getattr(state, "commission", None)
@@ -228,7 +261,8 @@ def preview_ibkr_paper_overnight_order(
             quantity, float(limit_price), False,
             getattr(state, "maintMarginChange", None), commission,
             getattr(state, "commissionCurrency", None),
-            getattr(state, "warningText", None), tuple(probe.errors),
+            getattr(state, "warningText", None),
+            tuple(connection_errors + tuple(probe.errors)),
         )
     finally:
         if probe.isConnected():
