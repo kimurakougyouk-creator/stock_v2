@@ -13,7 +13,7 @@ from pathlib import Path
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
-from ai_asset_platform.brokers.ibkr_fx_snapshot import preview_ibkr_paper_fx_rate
+from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.confirmed_fill_evidence import (
     confirmed_fill_from_broker_result,
@@ -59,9 +59,10 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
 def _capture_account_fx_rate(instrument_currency: str) -> float | None:
     """Return broker-observed instrument->account FX, or None fail-closed.
 
-    A confirmed fill must always be preserved even when the secondary read-only
-    FX snapshot is unavailable. Missing FX simply keeps multi-currency reporting
-    unavailable until explicit conversion evidence exists.
+    A confirmed fill must always be preserved even when secondary read-only FX
+    evidence is unavailable. The resolver uses broker market/account evidence
+    first and a broker historical MIDPOINT only as a final read-only fallback.
+    Missing FX keeps multi-currency reporting unavailable; no rate is guessed.
     """
     instrument = str(instrument_currency).strip().upper()
     account = str(SETTINGS.account_currency).strip().upper()
@@ -70,7 +71,7 @@ def _capture_account_fx_rate(instrument_currency: str) -> float | None:
     if instrument == account:
         return 1.0
     try:
-        snapshot = preview_ibkr_paper_fx_rate(
+        snapshot = resolve_ibkr_paper_fx_evidence(
             base_currency=instrument,
             quote_currency=account,
         )
