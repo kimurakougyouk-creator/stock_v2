@@ -44,6 +44,11 @@ class SignalExecutionResult:
     broker_result: object | None = None
 
 
+def verified_paper_tickers() -> tuple[str, ...]:
+    """Return only tickers with broker-evidenced Paper pilot quantities."""
+    return tuple(_VERIFIED_PAPER_INSTRUMENTS.keys())
+
+
 def _instrument_for_ticker(ticker: str) -> InstrumentSpec:
     normalized = str(ticker).strip().upper()
     if not normalized:
@@ -68,8 +73,6 @@ def _instrument_for_ticker(ticker: str) -> InstrumentSpec:
     if "." in normalized:
         raise ValueError(f"IBKR instrument mapping is not verified for ticker: {ticker}")
 
-    # Generic US symbol shape is mapped only far enough for no-send/validation use.
-    # Its Paper pilot quantity remains unverified until broker evidence exists.
     return InstrumentSpec(
         symbol=normalized,
         asset_class=AssetClass.STOCK,
