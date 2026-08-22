@@ -4,6 +4,9 @@ from config import TRADING_CAPITAL
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.ibkr_signal_runtime import execute_approved_signal_via_ibkr_paper
 from ai_asset_platform.execution.paper_trading_loop import run_paper_trading_loop
+from ai_asset_platform.execution.signal_order_bridge import (
+    verified_paper_test_quantity_for_ticker,
+)
 from ai_asset_platform.reports.equity_history import (
     append_equity_history,
     calculate_equity_curve,
@@ -12,12 +15,6 @@ from ai_asset_platform.reports.equity_history import (
 from ai_asset_platform.reports.paper_trading_health import evaluate_paper_trading_health
 import order_manager
 import signal_runner
-
-
-# IBKR ContractDetailsの実機監査で9432/TSEJは
-# minSize=100, sizeIncrement=100, suggestedSizeIncrement=100を確認済み。
-# 初回PaperパイロットもIBKRが受理可能な最小数量100株に合わせる。
-PAPER_PILOT_SHARES = 100
 
 
 def _sync_confirmed_fill_to_reporting() -> None:
@@ -69,12 +66,24 @@ def _describe_unconfirmed_ibkr_result(execution) -> str:
     )
 
 
-def _execute_confirmed_ibkr_paper_order(ticker: str, signal: str, shares: int, reference_price: float) -> dict:
+def _execute_confirmed_ibkr_paper_order(
+    ticker: str,
+    signal: str,
+    shares: int,
+    reference_price: float,
+) -> dict:
     normalized_signal = str(signal).upper()
     requested_shares = int(shares)
     if requested_shares <= 0:
         raise RuntimeError("IBKR Paperパイロット注文数量は1以上である必要があります。")
-    normalized_shares = PAPER_PILOT_SHARES
+
+    verified_quantity = verified_paper_test_quantity_for_ticker(ticker)
+    if verified_quantity is None:
+        raise RuntimeError(
+            f"{ticker}: broker-verified Paper pilot quantity is not registered; order blocked."
+        )
+
+    normalized_shares = int(verified_quantity)
     normalized_price = float(reference_price)
     order_intent_id = (
         "signal-runner:paper-pilot:"
@@ -142,10 +151,13 @@ def main() -> None:
     print("AI Asset Platform - IBKR PAPER TRADING")
     print("Live Trading : OFF")
     print("IBKR Paper   : ON")
-    print(f"IBKR Pilot Qty: {PAPER_PILOT_SHARES} shares")
+    print("IBKR Pilot Qty: broker-verified per instrument")
     print("=" * 50)
     result = run_paper_trading()
-    health = evaluate_paper_trading_health(signal_count=len(result["records"]), error_count=len(result["errors"]))
+    health = evaluate_paper_trading_health(
+        signal_count=len(result["records"]),
+        error_count=len(result["errors"]),
+    )
     print("=" * 50)
     print("IBKR Paper Trading実行結果")
     print(f"診断結果    : {health.status}")

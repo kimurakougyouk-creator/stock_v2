@@ -41,7 +41,7 @@ def test_paper_runner_main_prints_normal_health(monkeypatch, capsys):
     assert "Paper Tradingは正常です。" in output
     assert "シグナル件数: 10" in output
     assert "エラー件数  : 0" in output
-    assert "IBKR Pilot Qty: 100 shares" in output
+    assert "IBKR Pilot Qty: broker-verified per instrument" in output
 
 
 def test_paper_runner_main_prints_error_health(monkeypatch, capsys):
@@ -76,20 +76,23 @@ def test_unconfirmed_ibkr_result_exposes_pre_send_stop_reason():
     assert message == "IBKR Paper注文は送信前に停止しました: risk blocked"
 
 
-def test_integrated_paper_pilot_uses_verified_minimum_lot(monkeypatch):
-    calls = []
+def _filled_execution(quantity: float, price: float = 150.0):
     broker_result = SimpleNamespace(
         sent=True,
         reached_terminal=True,
         last_known_status="Filled",
-        filled_quantity=100.0,
-        avg_fill_price=150.0,
+        filled_quantity=quantity,
+        avg_fill_price=price,
     )
-    execution = SimpleNamespace(attempted=True, reason="submitted", broker_result=broker_result)
+    return SimpleNamespace(attempted=True, reason="submitted", broker_result=broker_result)
+
+
+def test_integrated_paper_pilot_uses_verified_9432_lot(monkeypatch):
+    calls = []
     monkeypatch.setattr(
         paper_trading_runner,
         "execute_approved_signal_via_ibkr_paper",
-        lambda **kwargs: calls.append(kwargs) or execution,
+        lambda **kwargs: calls.append(kwargs) or _filled_execution(100.0),
     )
     monkeypatch.setattr(paper_trading_runner, "_sync_confirmed_fill_to_reporting", lambda: None)
 
@@ -101,6 +104,53 @@ def test_integrated_paper_pilot_uses_verified_minimum_lot(monkeypatch):
     assert result["shares"] == 100
     assert result["strategy_requested_shares"] == 100
     assert result["paper_pilot_shares"] == 100
+
+
+def test_integrated_paper_pilot_uses_verified_aapl_one_share(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "execute_approved_signal_via_ibkr_paper",
+        lambda **kwargs: calls.append(kwargs) or _filled_execution(1.0, 300.0),
+    )
+    monkeypatch.setattr(paper_trading_runner, "_sync_confirmed_fill_to_reporting", lambda: None)
+
+    result = paper_trading_runner._execute_confirmed_ibkr_paper_order(
+        "AAPL", "BUY", 100, 300.0
+    )
+
+    assert calls[0]["shares"] == 1
+    assert result["strategy_requested_shares"] == 100
+    assert result["paper_pilot_shares"] == 1
+
+
+def test_integrated_paper_pilot_uses_verified_spy_one_share(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "execute_approved_signal_via_ibkr_paper",
+        lambda **kwargs: calls.append(kwargs) or _filled_execution(1.0, 700.0),
+    )
+    monkeypatch.setattr(paper_trading_runner, "_sync_confirmed_fill_to_reporting", lambda: None)
+
+    result = paper_trading_runner._execute_confirmed_ibkr_paper_order(
+        "SPY", "BUY", 100, 700.0
+    )
+
+    assert calls[0]["shares"] == 1
+    assert result["paper_pilot_shares"] == 1
+
+
+def test_integrated_paper_pilot_blocks_unverified_symbol(monkeypatch):
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "execute_approved_signal_via_ibkr_paper",
+        lambda **kwargs: pytest.fail("must not reach broker runtime"),
+    )
+    with pytest.raises(RuntimeError, match="not registered"):
+        paper_trading_runner._execute_confirmed_ibkr_paper_order(
+            "MSFT", "BUY", 100, 500.0
+        )
 
 
 def test_integrated_paper_pilot_rejects_non_positive_requested_quantity():

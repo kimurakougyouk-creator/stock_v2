@@ -7,7 +7,10 @@ from ibapi.client import EClient
 from ibapi.contract import ContractDetails
 from ibapi.wrapper import EWrapper
 
-from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
+from ai_asset_platform.brokers.ibkr_config import (
+    IbkrConnectionConfig,
+    create_ibkr_paper_config,
+)
 from ai_asset_platform.brokers.ibkr_connection import probe_ibkr_paper_connection
 from ai_asset_platform.brokers.ibkr_contracts import build_ibkr_contract_spec, to_ibapi_contract
 from ai_asset_platform.brokers.instruments import InstrumentSpec
@@ -63,8 +66,10 @@ def audit_ibkr_paper_etf(
     config: IbkrConnectionConfig | None = None,
     timeout: float = 8.0,
 ) -> IbkrEtfAuditResult:
-    """Resolve an ETF through Paper API without creating or placing an order."""
-    cfg = config or IbkrConnectionConfig()
+    """Resolve an ETF through the current TWS Paper API without placing an order."""
+    # Current operator environment is TWS Paper on 127.0.0.1:7497.
+    # Callers may still pass an explicit config for Gateway or tests.
+    cfg = config or create_ibkr_paper_config(use_gateway=False)
     cfg.validate()
     if not cfg.paper_trading or cfg.allow_live_trading:
         raise RuntimeError("ETF audit requires Paper Trading with Live disabled.")
@@ -79,7 +84,6 @@ def audit_ibkr_paper_etf(
             False, False, normalized, None, None, None, False, connection.message
         )
 
-    # Keep this read-only contract lookup isolated from the ordinary API client id.
     contract_cfg = replace(cfg, client_id=cfg.client_id + 101)
     probe = _ContractDetailsProbe()
     try:

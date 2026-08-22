@@ -7,7 +7,10 @@ from ibapi.client import EClient
 from ibapi.contract import ContractDetails
 from ibapi.wrapper import EWrapper
 
-from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig
+from ai_asset_platform.brokers.ibkr_config import (
+    IbkrConnectionConfig,
+    create_ibkr_paper_config,
+)
 from ai_asset_platform.brokers.ibkr_contracts import build_ibkr_contract_spec, to_ibapi_contract
 from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.core.asset_classes import AssetClass
@@ -64,7 +67,9 @@ def audit_ibkr_paper_overnight_contract(
     timeout: float = 8.0,
 ) -> IbkrOvernightAuditResult:
     """Build an OVERNIGHT contract from broker-resolved listing data, read-only."""
-    cfg = config or IbkrConnectionConfig()
+    # Current operator environment is TWS Paper on 127.0.0.1:7497.
+    # An explicit config can still select Gateway in tests or future deployments.
+    cfg = config or create_ibkr_paper_config(use_gateway=False)
     cfg.validate()
     if not cfg.paper_trading or cfg.allow_live_trading:
         raise RuntimeError("Overnight audit requires Paper Trading with Live disabled.")
@@ -73,7 +78,6 @@ def audit_ibkr_paper_overnight_contract(
     base_instrument = InstrumentSpec(normalized, asset_class, exchange="SMART", currency="USD")
     base_contract = to_ibapi_contract(build_ibkr_contract_spec(base_instrument))
 
-    # Isolate this diagnostic session from normal order/connection client ids.
     audit_cfg = replace(cfg, client_id=cfg.client_id + 102)
     probe = _OvernightContractProbe()
     try:
