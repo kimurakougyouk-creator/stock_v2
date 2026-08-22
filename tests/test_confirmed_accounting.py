@@ -1,6 +1,9 @@
 import json
 
+import pytest
+
 from ai_asset_platform.reports.confirmed_accounting import (
+    ConfirmedAccountingCurrencyError,
     audit_confirmed_accounting,
     audit_confirmed_accounting_file,
     confirmed_fill_records,
@@ -8,10 +11,20 @@ from ai_asset_platform.reports.confirmed_accounting import (
 )
 
 
-def fill(side, shares, price, *, status="FILLED", intent="x", ticker="AAPL"):
-    return {
+def fill(
+    side,
+    shares,
+    price,
+    *,
+    status="FILLED",
+    intent="x",
+    ticker="AAPL",
+    currency="JPY",
+    mode="IBKR_PAPER",
+):
+    row = {
         "created_at": "2026-08-22T00:00:00",
-        "mode": "IBKR_PAPER",
+        "mode": mode,
         "ticker": ticker,
         "side": side,
         "shares": shares,
@@ -19,6 +32,9 @@ def fill(side, shares, price, *, status="FILLED", intent="x", ticker="AAPL"):
         "status": status,
         "order_intent_id": intent,
     }
+    if currency is not None:
+        row["currency"] = currency
+    return row
 
 
 def test_only_explicit_filled_records_are_accounted():
@@ -37,7 +53,7 @@ def test_accounting_rebuilds_realized_unrealized_equity_and_drawdown():
         fill("BUY", 2, 100, intent="buy"),
         fill("SELL", 1, 120, intent="sell"),
     ]
-    result = audit_confirmed_accounting(rows, initial_capital=1000)
+    result = audit_confirmed_accounting(rows, initial_capital=1000, account_currency="JPY")
     assert result.confirmed_fill_count == 2
     assert result.equity_point_count == 2
     assert result.ending_cash == 920
@@ -46,6 +62,34 @@ def test_accounting_rebuilds_realized_unrealized_equity_and_drawdown():
     assert result.realized_pnl == 20
     assert result.unrealized_pnl == 20
     assert result.maximum_drawdown == 0
+
+
+def test_usd_ibkr_fill_cannot_be_mixed_into_jpy_accounting():
+    with pytest.raises(ConfirmedAccountingCurrencyError, match="USD"):
+        audit_confirmed_accounting(
+            [fill("BUY", 1, 100, currency="USD")],
+            initial_capital=1_000_000,
+            account_currency="JPY",
+        )
+
+
+def test_ibkr_fill_missing_currency_fails_closed():
+    with pytest.raises(ConfirmedAccountingCurrencyError, match="missing currency"):
+        audit_confirmed_accounting(
+            [fill("BUY", 1, 100, currency=None)],
+            initial_capital=1_000_000,
+            account_currency="JPY",
+        )
+
+
+def test_legacy_local_paper_row_without_currency_remains_backward_compatible():
+    result = audit_confirmed_accounting(
+        [fill("BUY", 1, 100, currency=None, mode="PAPER")],
+        initial_capital=1000,
+        account_currency="JPY",
+    )
+    assert result.confirmed_fill_count == 1
+    assert result.ending_equity == 1000
 
 
 def test_duplicate_confirmed_intent_is_not_double_accounted():
@@ -79,7 +123,11 @@ def test_jsonl_loader_ignores_malformed_and_unconfirmed_lines(tmp_path):
     assert len(loaded) == 1
     assert loaded[0]["order_intent_id"] == "filled"
 
-    result = audit_confirmed_accounting_file(path, initial_capital=1000)
+    result = audit_confirmed_accounting_file(
+        path,
+        initial_capital=1000,
+        account_currency="JPY",
+    )
     assert result.confirmed_fill_count == 1
     assert result.ending_equity == 1000
 
