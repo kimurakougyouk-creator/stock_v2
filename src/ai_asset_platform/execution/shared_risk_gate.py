@@ -153,7 +153,7 @@ def build_shared_risk_gate(
             ):
                 return RiskGateResult(
                     False,
-                    "IBKR損益を口座通貨へ安全に換算できないため新規BUYを拒否しました",
+                    "IBKR損益を口座通貨へ安全に換算（円換算を含む）できないため新規BUYを拒否しました",
                 )
             if (
                 settings.daily_loss_limit_yen > 0
