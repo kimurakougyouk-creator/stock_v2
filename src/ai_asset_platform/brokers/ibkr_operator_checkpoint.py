@@ -14,10 +14,8 @@ from dataclasses import dataclass
 
 import order_manager
 from config import STOP_LOSS_RATE, TRADING_CAPITAL
-from ai_asset_platform.brokers.ibkr_fx_snapshot import (
-    IbkrFxSnapshotResult,
-    preview_ibkr_paper_fx_rate,
-)
+from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
+from ai_asset_platform.brokers.ibkr_fx_snapshot import IbkrFxSnapshotResult
 from ai_asset_platform.brokers.ibkr_overnight_whatif import (
     IbkrOvernightWhatIfResult,
     preview_ibkr_paper_overnight_order,
@@ -200,7 +198,7 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
             errors=(),
         )
     else:
-        fx = preview_ibkr_paper_fx_rate(
+        fx = resolve_ibkr_paper_fx_evidence(
             base_currency="USD",
             quote_currency=account_currency,
         )
