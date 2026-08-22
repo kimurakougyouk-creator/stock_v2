@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
+from ai_asset_platform.core.account_clock import account_today
 from ai_asset_platform.core.settings import PlatformSettings
 from ai_asset_platform.reports.multicurrency_confirmed_accounting import (
     MulticurrencyConfirmedAccountingError,
@@ -144,11 +146,30 @@ def _position_quantities(records: Iterable[dict]) -> dict[str, int]:
     return {ticker: qty for ticker, qty in positions.items() if qty > 0}
 
 
+def _account_date(created: datetime, *, account_timezone: str) -> date:
+    """Map a stored fill timestamp to the configured account calendar.
+
+    New broker fills are timezone-aware. Legacy naive rows are interpreted in the
+    explicitly configured account timezone rather than the host timezone so a UTC
+    Linux host cannot silently move the trading day.
+    """
+    try:
+        zone = ZoneInfo(str(account_timezone))
+    except Exception as exc:
+        raise VerifiedPaperPreflightError("account_timezone is invalid") from exc
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=zone)
+    else:
+        created = created.astimezone(zone)
+    return created.date()
+
+
 def _daily_trading_amount_account(
     records: Iterable[dict],
     *,
     target_date: date,
     account_currency: str,
+    account_timezone: str,
 ) -> Decimal:
     total = Decimal("0")
     for record in _deduped_accounting_records(records):
@@ -159,7 +180,7 @@ def _daily_trading_amount_account(
             created = datetime.fromisoformat(str(raw_created))
         except (TypeError, ValueError) as exc:
             raise VerifiedPaperPreflightError("accounting fill has invalid created_at") from exc
-        if created.date() != target_date:
+        if _account_date(created, account_timezone=account_timezone) != target_date:
             continue
         try:
             shares = int(record.get("shares"))
@@ -210,11 +231,6 @@ def evaluate_verified_paper_preflight(
     held_quantity = int(positions.get(normalized_ticker, 0))
     position_count = len(positions)
 
-    # A protective/position-reducing SELL must not depend on FX valuation.  The
-    # only pre-send question needed here is whether confirmed holdings prove the
-    # requested quantity can be reduced. Account-currency reporting is rebuilt
-    # separately after a confirmed fill and may remain fail-closed if FX evidence
-    # is unavailable.
     if normalized_side == "SELL":
         if held_quantity < qty:
             return VerifiedPaperPreflightResult(
@@ -272,8 +288,9 @@ def evaluate_verified_paper_preflight(
     planned = Decimal(qty) * price * fx
     daily = _daily_trading_amount_account(
         materialized,
-        target_date=target_date or date.today(),
+        target_date=target_date or account_today(settings),
         account_currency=account_currency,
+        account_timezone=settings.account_timezone,
     )
 
     base = dict(
@@ -299,19 +316,27 @@ def evaluate_verified_paper_preflight(
     if max_positions > 0 and position_count >= max_positions:
         return VerifiedPaperPreflightResult(False, "maximum position count reached", **base)
 
-    capital = _positive_decimal(initial_capital, field="initial_capital")
+    initial = _positive_decimal(initial_capital, field="initial_capital")
+    current_equity = Decimal(str(summary.ending_equity))
+    if not current_equity.is_finite() or current_equity <= 0:
+        raise VerifiedPaperPreflightError("current account equity must be positive")
+    # Never size new risk from a larger historical starting balance after a
+    # drawdown. For a profitable account, current equity may expand the risk base;
+    # after losses, it contracts immediately.
+    risk_capital = min(initial, current_equity) if current_equity < initial else current_equity
+
     max_position_allocation = Decimal(str(max(0.0, min(1.0, float(settings.max_position_allocation)))))
     max_portfolio_allocation = Decimal(str(max(0.0, min(1.0, float(settings.max_portfolio_allocation)))))
     max_portfolio_risk_rate = Decimal(str(max(0.0, min(1.0, float(settings.max_portfolio_risk_rate)))))
 
-    if max_position_allocation <= 0 or planned > capital * max_position_allocation:
+    if max_position_allocation <= 0 or planned > risk_capital * max_position_allocation:
         return VerifiedPaperPreflightResult(False, "position allocation limit would be exceeded", **base)
 
     projected_holdings = Decimal(str(summary.ending_holdings)) + planned
-    if max_portfolio_allocation <= 0 or projected_holdings > capital * max_portfolio_allocation:
+    if max_portfolio_allocation <= 0 or projected_holdings > risk_capital * max_portfolio_allocation:
         return VerifiedPaperPreflightResult(False, "portfolio allocation limit would be exceeded", **base)
 
-    minimum_cash_reserve = capital * (Decimal("1") - max_portfolio_allocation)
+    minimum_cash_reserve = risk_capital * (Decimal("1") - max_portfolio_allocation)
     if Decimal(str(summary.ending_cash)) - planned < minimum_cash_reserve:
         return VerifiedPaperPreflightResult(False, "minimum cash reserve would be breached", **base)
 
@@ -322,7 +347,7 @@ def evaluate_verified_paper_preflight(
     if not stop_rate.is_finite() or stop_rate <= 0:
         raise VerifiedPaperPreflightError("stop_loss_rate must be positive")
     projected_risk = projected_holdings * stop_rate
-    if max_portfolio_risk_rate <= 0 or projected_risk > capital * max_portfolio_risk_rate:
+    if max_portfolio_risk_rate <= 0 or projected_risk > risk_capital * max_portfolio_risk_rate:
         return VerifiedPaperPreflightResult(False, "portfolio risk limit would be exceeded", **base)
 
     max_daily_amount = Decimal(str(max(0.0, float(settings.max_daily_trading_amount_yen))))
