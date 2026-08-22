@@ -15,6 +15,7 @@ from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.execution.broker_position_guard import evaluate_broker_position_guard
 from ai_asset_platform.execution.confirmed_fill_evidence import (
     confirmed_fill_from_broker_result,
 )
@@ -100,6 +101,15 @@ def execute_approved_signal_via_ibkr_paper(
     if not SETTINGS.enable_ibkr_paper:
         return SignalExecutionResult(False, "IBKR Paper disabled")
 
+    normalized_signal = str(signal).strip().upper()
+    position_guard = evaluate_broker_position_guard(
+        ticker=ticker,
+        side=normalized_signal,
+        quantity=int(shares),
+    )
+    if not position_guard.allowed:
+        return SignalExecutionResult(False, f"broker position guard blocked: {position_guard.reason}")
+
     instrument = _instrument_for_ticker(ticker)
     broker = _connect_first_available_paper_broker()
     service = ExecutionService(
@@ -112,7 +122,7 @@ def execute_approved_signal_via_ibkr_paper(
         execution = execute_signal_via_ibkr_paper(
             service=service,
             ticker=ticker,
-            signal=signal,
+            signal=normalized_signal,
             shares=shares,
             order_intent_id=order_intent_id,
             apply_account_fill=False,
@@ -128,7 +138,7 @@ def execute_approved_signal_via_ibkr_paper(
             fx_rate = _capture_account_fx_rate(instrument.currency)
             record_confirmed_fill(
                 ticker=ticker,
-                side=signal,
+                side=normalized_signal,
                 filled_quantity=confirmed_quantity,
                 avg_fill_price=confirmed_price,
                 currency=instrument.currency,
