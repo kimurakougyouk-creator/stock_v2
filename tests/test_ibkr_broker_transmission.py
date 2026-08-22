@@ -5,11 +5,7 @@ from ai_asset_platform.brokers.ibkr_paper_order_guard import (
     IbkrPaperOrderGuardResult,
 )
 from ai_asset_platform.brokers.instruments import AssetClass, InstrumentSpec
-from ai_asset_platform.brokers.orders import (
-    OrderRequest,
-    OrderSide,
-    OrderStatus,
-)
+from ai_asset_platform.brokers.orders import OrderRequest, OrderSide, OrderStatus
 
 
 @dataclass
@@ -40,11 +36,7 @@ def _ready_guard(*args, **kwargs):
     symbol = args[0]
     quantity = args[1]
     return IbkrPaperOrderGuardResult(
-        status="READY",
-        allowed=True,
-        symbol=symbol,
-        quantity=quantity,
-        message="ready",
+        status="READY", allowed=True, symbol=symbol, quantity=quantity, message="ready"
     )
 
 
@@ -58,20 +50,14 @@ def _connect_broker(monkeypatch, *, enable_transmission=False):
         "ai_asset_platform.brokers.ibkr_paper_transmitter.validate_ibkr_paper_test_order",
         _ready_guard,
     )
-    broker = IbkrBrokerAdapter(
-        enable_paper_order_transmission=enable_transmission,
-    )
+    broker = IbkrBrokerAdapter(enable_paper_order_transmission=enable_transmission)
     assert broker.connect() is True
     return broker, session
 
 
 def test_broker_keeps_paper_order_unsent_by_default(monkeypatch):
     broker, session = _connect_broker(monkeypatch)
-
-    result = broker.place_order(
-        OrderRequest("AAPL", OrderSide.BUY, 1),
-    )
-
+    result = broker.place_order(OrderRequest("AAPL", OrderSide.BUY, 1))
     assert result.status is OrderStatus.REJECTED
     assert result.order_id == "123"
     assert session.client.orders == []
@@ -79,15 +65,8 @@ def test_broker_keeps_paper_order_unsent_by_default(monkeypatch):
 
 
 def test_broker_can_send_paper_order_only_when_explicitly_enabled(monkeypatch):
-    broker, session = _connect_broker(
-        monkeypatch,
-        enable_transmission=True,
-    )
-
-    result = broker.place_order(
-        OrderRequest("AAPL", OrderSide.BUY, 1),
-    )
-
+    broker, session = _connect_broker(monkeypatch, enable_transmission=True)
+    result = broker.place_order(OrderRequest("AAPL", OrderSide.BUY, 1))
     assert result.status is OrderStatus.ACCEPTED
     assert result.order_id == "123"
     assert len(session.client.orders) == 1
@@ -96,22 +75,17 @@ def test_broker_can_send_paper_order_only_when_explicitly_enabled(monkeypatch):
 
 
 def test_broker_preserves_etf_instrument_to_contract(monkeypatch):
-    broker, session = _connect_broker(
-        monkeypatch,
-        enable_transmission=True,
-    )
+    broker, session = _connect_broker(monkeypatch, enable_transmission=True)
     instrument = InstrumentSpec(
         "SPY",
         AssetClass.ETF,
         exchange="SMART",
         currency="USD",
+        verified_paper_test_quantity=1,
     )
-
     result = broker.place_order(
-        OrderRequest("SPY", OrderSide.BUY, 1),
-        instrument=instrument,
+        OrderRequest("SPY", OrderSide.BUY, 1), instrument=instrument
     )
-
     assert result.status is OrderStatus.ACCEPTED
     assert len(session.client.orders) == 1
     _, contract, order = session.client.orders[0]
@@ -124,9 +98,7 @@ def test_broker_preserves_etf_instrument_to_contract(monkeypatch):
 
 def test_broker_does_not_consume_order_id_when_order_is_not_sent(monkeypatch):
     broker, session = _connect_broker(monkeypatch)
-
     broker.place_order(OrderRequest("AAPL", OrderSide.BUY, 1))
     broker.place_order(OrderRequest("AAPL", OrderSide.BUY, 1))
-
     assert session.next_order_id == 123
     assert session.client.orders == []
