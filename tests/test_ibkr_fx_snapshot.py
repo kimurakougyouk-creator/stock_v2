@@ -24,6 +24,7 @@ class FakeProbe:
         self.connected = False
         self.market_data_calls = []
         self.market_data_types = []
+        self.market_data_type = None
         FakeProbe.instances.append(self)
 
     def connect(self, host, port, client_id):
@@ -36,6 +37,7 @@ class FakeProbe:
 
     def reqMarketDataType(self, market_data_type):
         self.market_data_types.append(market_data_type)
+        self.market_data_type = market_data_type
 
     def reqMktData(self, req_id, contract, generic_ticks, snapshot, regulatory, options):
         self.market_data_calls.append(
@@ -104,6 +106,15 @@ def test_midpoint_requires_two_valid_sides():
     assert module._midpoint(0, 150.1) is None
 
 
+def test_tick_price_accepts_delayed_bid_ask_tick_types():
+    probe = module._FxSnapshotProbe()
+    probe.tickPrice(1, 66, 149.8, None)
+    probe.tickPrice(1, 67, 150.2, None)
+    assert probe.bid == 149.8
+    assert probe.ask == 150.2
+    assert module._midpoint(probe.bid, probe.ask) == 150.0
+
+
 def test_live_snapshot_uses_read_only_market_data_and_returns_midpoint(monkeypatch):
     FakeProbe.instances.clear()
     monkeypatch.setattr(module, "_FxSnapshotProbe", FakeProbe)
@@ -152,6 +163,33 @@ def test_delayed_snapshot_is_second_broker_only_fallback(monkeypatch):
     assert result.rate == 150.0
     assert any(instance.market_data_types == [3] for instance in FakeProbe.instances)
     assert any("10197" in error for error in result.errors)
+    assert result.order_sent is False
+
+
+def test_delayed_frozen_is_third_market_data_fallback(monkeypatch):
+    class FrozenOnlyProbe(FakeProbe):
+        def reqMktData(self, *args):
+            self.market_data_calls.append(args)
+            if self.market_data_types == [4]:
+                self.bid = 149.70
+                self.ask = 150.30
+            else:
+                self.bid = None
+                self.ask = None
+                self.errors = ["10197: competing live session"]
+
+    FakeProbe.instances.clear()
+    monkeypatch.setattr(module, "_FxSnapshotProbe", FrozenOnlyProbe)
+    monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
+
+    result = module.preview_ibkr_paper_fx_rate(
+        base_currency="USD", quote_currency="JPY"
+    )
+
+    assert result.ready is True
+    assert result.source == "DELAYED_FROZEN_MARKET_DATA"
+    assert result.rate == 150.0
+    assert any(instance.market_data_types == [4] for instance in FakeProbe.instances)
     assert result.order_sent is False
 
 
