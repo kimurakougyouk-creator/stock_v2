@@ -307,7 +307,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
         reached_terminal = False
 
         while now_fn() < deadline:
-            order_status = client.order_statuses.get(order_id)
+            order_status = getattr(client, "order_statuses", {}).get(order_id)
             open_order = client.open_orders.get(order_id)
             status_text = (
                 order_status.get("status")
@@ -330,7 +330,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
             sleep_fn(poll_interval_seconds)
 
         filled_quantity = self.processed_filled(order_id)
-        order_status = client.order_statuses.get(order_id)
+        order_status = getattr(client, "order_statuses", {}).get(order_id)
         open_order = client.open_orders.get(order_id)
         last_known_status = (
             order_status.get("status")
