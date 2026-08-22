@@ -85,7 +85,7 @@ def _execution_fx_to_account(execution: IbkrExecutionEvidence) -> float | None:
     return float(evidence.rate) if evidence.ready and evidence.rate and float(evidence.rate) > 0 else None
 
 
-def _enrich_existing_exec(path: Path, *, exec_id: str, rate: float | None) -> bool:
+def _enrich_existing(path: Path, *, exec_id: str, intent: str, rate: float | None) -> bool:
     if not path.exists():
         return False
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -98,10 +98,19 @@ def _enrich_existing_exec(path: Path, *, exec_id: str, rate: float | None) -> bo
             output.append(line)
             continue
         ids = [str(v or "").strip() for v in list(record.get("broker_exec_ids") or [])]
-        if exec_id in ids and rate is not None and not record.get("fx_to_account_rate"):
-            record["fx_to_account_rate"] = float(rate)
-            output.append(json.dumps(record, ensure_ascii=False))
-            changed = True
+        record_intent = str(record.get("order_intent_id", "")).strip()
+        if exec_id in ids or record_intent == intent:
+            if exec_id not in ids:
+                ids.append(exec_id)
+                record["broker_exec_ids"] = ids
+                changed = True
+            if rate is not None and not record.get("fx_to_account_rate"):
+                record["fx_to_account_rate"] = float(rate)
+                changed = True
+            if changed:
+                output.append(json.dumps(record, ensure_ascii=False))
+            else:
+                output.append(line)
         else:
             output.append(line)
     if changed:
@@ -126,23 +135,23 @@ def reconcile_execution_snapshot_to_ledger(
             if not exec_id:
                 skipped += 1
                 continue
+            intent = _recovery_intent(execution)
             fx_rate = _execution_fx_to_account(execution)
-            if exec_id in known_exec_ids:
-                if _enrich_existing_exec(order_log_path, exec_id=exec_id, rate=fx_rate):
+            if exec_id in known_exec_ids or intent in intents:
+                if _enrich_existing(order_log_path, exec_id=exec_id, intent=intent, rate=fx_rate):
                     reconciled += 1
+                    known_exec_ids.add(exec_id)
                 else:
                     skipped += 1
                 continue
-            intent = _recovery_intent(execution)
-            if intent in intents:
-                skipped += 1
-                continue
+            raw_order_id = getattr(execution, "order_id", None)
             record_confirmed_fill(
                 ticker=execution.symbol, side=execution.side,
                 filled_quantity=execution.quantity, avg_fill_price=execution.price,
                 currency=execution.currency, order_intent_id=intent,
                 order_log_path=order_log_path, fx_to_account_rate=fx_rate,
-                broker_exec_ids=[exec_id], broker_order_id=execution.order_id,
+                broker_exec_ids=[exec_id],
+                broker_order_id=int(raw_order_id) if raw_order_id not in (None, 0, "") else None,
             )
             intents.add(intent)
             known_exec_ids.add(exec_id)
