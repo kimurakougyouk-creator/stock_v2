@@ -2,14 +2,16 @@
 
 The preferred source is a CASH/IDEALPRO bid/ask snapshot. Paper market data can
 be unavailable with IBKR error 10197 when another session owns live market data.
-This module therefore tries three broker-only read paths, in order:
+This module therefore tries broker-only read paths in order:
 
 1. live market-data snapshot,
-2. delayed market-data snapshot (still read-only and broker-provided),
-3. account ExchangeRate data (AccountSummary, then legacy account updates).
+2. delayed market-data snapshot,
+3. delayed-frozen market-data snapshot,
+4. account ExchangeRate data (AccountSummary, then legacy account updates).
 
-No path creates, changes, cancels, or transmits an Order. If no positive broker-
-provided rate is available, the result fails closed.
+Delayed quotes arrive on delayed tick types (66=bid, 67=ask). No path creates,
+changes, cancels, or transmits an Order. If no positive broker-provided rate is
+available, the result fails closed.
 """
 from __future__ import annotations
 
@@ -68,9 +70,13 @@ class _FxSnapshotProbe(EWrapper, EClient):
         self.ask: float | None = None
         self.errors: list[str] = []
         self.fatal_error: str | None = None
+        self.market_data_type: int | None = None
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.connected_ready.set()
+
+    def marketDataType(self, reqId: int, marketDataType: int) -> None:  # noqa: N802
+        self.market_data_type = int(marketDataType)
 
     def tickPrice(self, reqId, tickType, price, attrib):  # noqa: N802
         try:
@@ -79,7 +85,7 @@ class _FxSnapshotProbe(EWrapper, EClient):
             return
         if value <= 0:
             return
-        # bid/ask plus delayed bid/ask tick types
+        # Live/frozen bid/ask: 1/2. Delayed bid/ask: 66/67.
         if int(tickType) in {1, 66}:
             self.bid = value
         elif int(tickType) in {2, 67}:
@@ -209,17 +215,23 @@ def _midpoint(bid: float | None, ask: float | None) -> float | None:
 def _request_market_snapshot(
     contract: Contract,
     *,
-    delayed: bool,
+    market_data_type: int,
     timeout: float,
 ) -> IbkrFxSnapshotResult:
+    source = {
+        1: "MARKET_DATA",
+        3: "DELAYED_MARKET_DATA",
+        4: "DELAYED_FROZEN_MARKET_DATA",
+    }.get(int(market_data_type), f"MARKET_DATA_TYPE_{market_data_type}")
     errors: list[str] = []
-    source = "DELAYED_MARKET_DATA" if delayed else "MARKET_DATA"
+    client_offset = {1: 260, 3: 263, 4: 264}.get(int(market_data_type), 265)
+
     for use_gateway in (True, False):
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
         probe = _FxSnapshotProbe()
         try:
             try:
-                probe.connect(cfg.host, cfg.port, cfg.client_id + (263 if delayed else 260))
+                probe.connect(cfg.host, cfg.port, cfg.client_id + client_offset)
             except OSError as exc:
                 errors.append(f"{cfg.port}: {exc}")
                 continue
@@ -227,25 +239,42 @@ def _request_market_snapshot(
             if not probe.connected_ready.wait(timeout) or probe.fatal_error:
                 errors.extend(probe.errors)
                 continue
-            if delayed:
-                # 3 = delayed market data. Read-only; does not create an order.
-                probe.reqMarketDataType(3)
+            if int(market_data_type) != 1:
+                probe.reqMarketDataType(int(market_data_type))
             probe.reqMktData(1, contract, "", True, False, [])
             probe.snapshot_ready.wait(timeout)
             rate = _midpoint(probe.bid, probe.ask)
             if rate is not None:
                 return IbkrFxSnapshotResult(
-                    True, cfg.port, contract.symbol, contract.currency,
-                    contract.exchange, probe.bid, probe.ask, rate, source, False,
+                    True,
+                    cfg.port,
+                    contract.symbol,
+                    contract.currency,
+                    contract.exchange,
+                    probe.bid,
+                    probe.ask,
+                    rate,
+                    source,
+                    False,
                     tuple(errors + probe.errors),
                 )
             errors.extend(probe.errors)
         finally:
             if probe.isConnected():
                 probe.disconnect()
+
     return IbkrFxSnapshotResult(
-        False, None, contract.symbol, contract.currency, contract.exchange,
-        None, None, None, source, False, tuple(errors),
+        False,
+        None,
+        contract.symbol,
+        contract.currency,
+        contract.exchange,
+        None,
+        None,
+        None,
+        source,
+        False,
+        tuple(errors),
     )
 
 
@@ -326,11 +355,12 @@ def preview_ibkr_paper_account_fx_rate(*, base_currency: str, quote_currency: st
 
 def preview_ibkr_paper_fx_rate(*, base_currency: str, quote_currency: str, exchange: str = "IDEALPRO", timeout: float = 10.0) -> IbkrFxSnapshotResult:
     contract: Contract = build_fx_discovery_contract(base_currency=base_currency, quote_currency=quote_currency, exchange=exchange)
-    live = _request_market_snapshot(contract, delayed=False, timeout=timeout)
+
+    live = _request_market_snapshot(contract, market_data_type=1, timeout=timeout)
     if live.ready:
         return live
 
-    delayed = _request_market_snapshot(contract, delayed=True, timeout=timeout)
+    delayed = _request_market_snapshot(contract, market_data_type=3, timeout=timeout)
     if delayed.ready:
         return IbkrFxSnapshotResult(
             delayed.connected, delayed.endpoint_port, delayed.base_currency,
@@ -339,9 +369,37 @@ def preview_ibkr_paper_fx_rate(*, base_currency: str, quote_currency: str, excha
             tuple(list(live.errors) + list(delayed.errors)),
         )
 
-    summary = preview_ibkr_paper_account_summary_fx_rate(base_currency=contract.symbol, quote_currency=contract.currency, timeout=timeout)
-    if summary.ready:
-        return IbkrFxSnapshotResult(summary.connected, summary.endpoint_port, summary.base_currency, summary.quote_currency, summary.exchange, summary.bid, summary.ask, summary.rate, summary.source, False, tuple(list(live.errors) + list(delayed.errors) + list(summary.errors)))
+    delayed_frozen = _request_market_snapshot(contract, market_data_type=4, timeout=timeout)
+    if delayed_frozen.ready:
+        return IbkrFxSnapshotResult(
+            delayed_frozen.connected, delayed_frozen.endpoint_port,
+            delayed_frozen.base_currency, delayed_frozen.quote_currency,
+            delayed_frozen.exchange, delayed_frozen.bid, delayed_frozen.ask,
+            delayed_frozen.rate, delayed_frozen.source, False,
+            tuple(list(live.errors) + list(delayed.errors) + list(delayed_frozen.errors)),
+        )
 
-    legacy = preview_ibkr_paper_account_fx_rate(base_currency=contract.symbol, quote_currency=contract.currency, timeout=timeout)
-    return IbkrFxSnapshotResult(legacy.connected, legacy.endpoint_port, legacy.base_currency, legacy.quote_currency, legacy.exchange, legacy.bid, legacy.ask, legacy.rate, legacy.source, False, tuple(list(live.errors) + list(delayed.errors) + list(summary.errors) + list(legacy.errors)))
+    summary = preview_ibkr_paper_account_summary_fx_rate(
+        base_currency=contract.symbol,
+        quote_currency=contract.currency,
+        timeout=timeout,
+    )
+    if summary.ready:
+        return IbkrFxSnapshotResult(
+            summary.connected, summary.endpoint_port, summary.base_currency,
+            summary.quote_currency, summary.exchange, summary.bid, summary.ask,
+            summary.rate, summary.source, False,
+            tuple(list(live.errors) + list(delayed.errors) + list(delayed_frozen.errors) + list(summary.errors)),
+        )
+
+    legacy = preview_ibkr_paper_account_fx_rate(
+        base_currency=contract.symbol,
+        quote_currency=contract.currency,
+        timeout=timeout,
+    )
+    return IbkrFxSnapshotResult(
+        legacy.connected, legacy.endpoint_port, legacy.base_currency,
+        legacy.quote_currency, legacy.exchange, legacy.bid, legacy.ask,
+        legacy.rate, legacy.source, False,
+        tuple(list(live.errors) + list(delayed.errors) + list(delayed_frozen.errors) + list(summary.errors) + list(legacy.errors)),
+    )
