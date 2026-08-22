@@ -52,11 +52,13 @@ class PlatformSettings:
     enable_ibkr_paper: bool = field(
         default_factory=lambda: _env_flag("AI_ASSET_ENABLE_IBKR_PAPER", default=False)
     )
+    # Declare only established base-market capabilities here. OVERNIGHT remains
+    # a separate validation gate until its Paper E2E is completed.
     supported_markets: tuple[str, ...] = field(
-        default_factory=lambda: ("JP_STOCK",)
+        default_factory=lambda: ("JP_STOCK", "US_STOCK", "US_ETF")
     )
     supported_brokers: tuple[str, ...] = field(
-        default_factory=lambda: ("SBI",)
+        default_factory=lambda: ("SBI", "IBKR")
     )
 
     @property
