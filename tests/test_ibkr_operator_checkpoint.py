@@ -169,7 +169,8 @@ def test_broker_spy_position_blocks_duplicate_buy_even_when_local_ledger_is_empt
     result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
     assert result.broker_spy_held_quantity == 1.0
     assert result.ready_for_paper_e2e_review is False
-    assert "broker Paper account already holds" in result.preflight_error
+    assert "broker/local position reconciliation" in result.preflight_error
+    assert "local/broker SPY position mismatch" in result.reconciliation_error
     assert called["preflight"] == 0
 
 
@@ -183,23 +184,30 @@ def test_configured_currency_must_match_broker_base_currency(monkeypatch):
     result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
     assert result.ready_for_paper_e2e_review is False
     assert "does not match" in result.reconciliation_error
-    assert "reconciliation" in result.preflight_error
+    assert "broker/local position reconciliation" in result.preflight_error
 
 
-def test_existing_local_spy_confirmed_fill_blocks_duplicate_buy(monkeypatch):
+def test_existing_local_spy_confirmed_fill_requires_broker_match_then_blocks_duplicate_buy(monkeypatch):
     monkeypatch.setattr(module, "SETTINGS", _settings())
     rows = [{
         "mode": "IBKR_PAPER", "status": "FILLED", "ticker": "SPY",
         "side": "BUY", "shares": 1, "reference_price": 765.45,
+        "currency": "USD", "fx_to_account_rate": 150.0,
         "order_intent_id": "old-spy-fill",
     }]
     monkeypatch.setattr(module.order_manager, "load_accounting_orders", lambda: rows)
     monkeypatch.setattr(module, "preview_ibkr_paper_overnight_order", lambda **kwargs: _whatif())
     monkeypatch.setattr(module, "preview_ibkr_paper_fx_rate", lambda **kwargs: _fx())
-    _wire_safe_broker(monkeypatch)
+    monkeypatch.setattr(
+        module,
+        "preview_ibkr_paper_account_snapshot",
+        lambda: _broker_account(positions=(_position("SPY", 1.0),)),
+    )
     monkeypatch.setattr(module, "audit_multicurrency_confirmed_accounting", lambda *args, **kwargs: _accounting())
     result = module.run_ibkr_operator_checkpoint(limit_price=768.0)
     assert result.spy_confirmed_held_quantity == 1
+    assert result.broker_spy_held_quantity == 1.0
+    assert result.reconciliation_error is None
     assert result.ready_for_paper_e2e_review is False
     assert "already has 1 confirmed share" in result.preflight_error
 
