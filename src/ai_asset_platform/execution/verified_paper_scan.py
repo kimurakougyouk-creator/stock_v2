@@ -1,20 +1,20 @@
 """Execute analyzed signals through the broker-verified Paper path only.
 
 The legacy signal scanner remains responsible for data/technical/AI analysis and
-report generation, but this module owns IBKR Paper execution decisions.  It does
-not use the legacy JPY/100-share sizing arithmetic.  Quantity comes exclusively
+report generation, but this module owns IBKR Paper execution decisions. It does
+not use the legacy JPY/100-share sizing arithmetic. Quantity comes exclusively
 from broker-verified instrument metadata, while monetary limits are enforced by
 the account-currency preflight in the final order callback.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 import order_manager
 import signal_runner
 
 from ai_asset_platform.core.settings import PlatformSettings, SETTINGS
+from ai_asset_platform.execution.account_calendar_ledger import position_holding_days
 from ai_asset_platform.execution.signal_order_bridge import (
     verified_paper_test_quantity_for_ticker,
 )
@@ -31,9 +31,9 @@ def execute_verified_actions_from_scan(
 ) -> dict:
     """Execute only verified BUY/SELL actions from an analysis-only scan.
 
-    The function recomputes confirmed holdings before every action.  Existing
-    positions block new BUY exposure.  SELL requires enough confirmed holdings
-    for the broker-verified pilot quantity.  Trailing/time stops are retained as
+    The function recomputes confirmed holdings before every action. Existing
+    positions block new BUY exposure. SELL requires enough confirmed holdings
+    for the broker-verified pilot quantity. Trailing/time stops are retained as
     position-reducing overrides, but unverified quantities are never invented.
     Per-order failures are collected and do not trigger automatic resubmission.
     """
@@ -82,7 +82,18 @@ def execute_verified_actions_from_scan(
                 trailing_stop_percent=trailing_percent,
                 held_shares=held_shares,
             )
-            holding_days = order_manager.calculate_position_holding_days(ticker)
+            try:
+                holding_days = position_holding_days(
+                    order_manager.load_accounting_orders(),
+                    ticker=ticker,
+                    settings=settings,
+                )
+            except Exception as exc:
+                execution_errors.append({
+                    "ticker": ticker,
+                    "error": f"confirmed holding age cannot be reconstructed safely: {exc}",
+                })
+                continue
             max_holding_days = int(getattr(settings, "max_holding_days", 0))
             time_triggered = (
                 max_holding_days > 0
