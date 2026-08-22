@@ -14,6 +14,7 @@ from ibapi.wrapper import EWrapper
 from ai_asset_platform.brokers.ibkr_config import IbkrConnectionConfig, create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_contracts import build_ibkr_contract_spec, to_ibapi_contract
 from ai_asset_platform.brokers.ibkr_overnight_order import (
+    PAPER_API_PORTS,
     OvernightPaperOrderSpec,
     prepare_ibkr_overnight_paper_limit_order,
 )
@@ -37,6 +38,7 @@ class IbkrOvernightWhatIfResult:
     commission_currency: str | None
     warning_text: str | None
     errors: tuple[str, ...] = field(default_factory=tuple)
+    connected_port: int | None = None
 
     @property
     def ready(self) -> bool:
@@ -81,36 +83,65 @@ class _WhatIfProbe(EWrapper, EClient):
             self.preview_ready.set()
 
 
+def _paper_endpoint_candidates(
+    config: IbkrConnectionConfig | None,
+) -> tuple[IbkrConnectionConfig, ...]:
+    """Return safe Paper endpoints to try before any broker request exists.
+
+    An explicit config is honored exactly. Without one, prefer the repository's
+    historical Gateway Paper endpoint (4002), then fall back to TWS Paper (7497).
+    Both remain localhost, Paper-only, and Live-disabled.
+    """
+    if config is not None:
+        config.validate()
+        if config.port not in PAPER_API_PORTS:
+            raise RuntimeError("Overnight what-if requires IBKR Paper port 4002 or 7497.")
+        if not config.paper_trading or config.allow_live_trading:
+            raise RuntimeError("Overnight what-if requires Paper Trading with Live disabled.")
+        return (config,)
+
+    return (
+        create_ibkr_paper_config(use_gateway=True),
+        create_ibkr_paper_config(use_gateway=False),
+    )
+
+
 def _connect_probe_before_any_request(
-    cfg: IbkrConnectionConfig,
+    configs: tuple[IbkrConnectionConfig, ...],
     *,
     timeout: float,
-    attempts: int = 4,
-    retry_delay: float = 2.0,
-) -> tuple[_WhatIfProbe | None, tuple[str, ...]]:
-    """Retry only the initial TWS connection, before any broker request is made.
+    attempts_per_endpoint: int = 2,
+    retry_delay: float = 1.0,
+) -> tuple[_WhatIfProbe | None, IbkrConnectionConfig | None, tuple[str, ...]]:
+    """Auto-detect a reachable Paper endpoint before any broker request.
 
-    This helper is deliberately limited to connection establishment. No
-    ContractDetails request and no what-if/order request is retried here.
+    Connection attempts are safe to repeat because no ContractDetails request
+    and no what-if/order request has occurred yet. Once one endpoint connects,
+    all subsequent broker interactions use that single session and are never
+    automatically resent.
     """
     collected_errors: list[str] = []
-    total_attempts = max(1, int(attempts))
-    for attempt in range(total_attempts):
-        probe = _WhatIfProbe()
-        client_id = cfg.client_id + 103
-        probe.connect(cfg.host, cfg.port, client_id)
-        Thread(target=probe.run, daemon=True).start()
-        ready = probe.connected_ready.wait(timeout)
-        if ready and probe.next_order_id is not None and not probe.fatal_error:
-            return probe, tuple(collected_errors + probe.errors)
+    total_attempts = max(1, int(attempts_per_endpoint))
 
-        collected_errors.extend(probe.errors)
-        if probe.isConnected():
-            probe.disconnect()
-        if attempt + 1 < total_attempts:
-            time.sleep(max(0.0, retry_delay))
+    for cfg in configs:
+        cfg.validate()
+        if cfg.port not in PAPER_API_PORTS or not cfg.paper_trading or cfg.allow_live_trading:
+            continue
+        for attempt in range(total_attempts):
+            probe = _WhatIfProbe()
+            probe.connect(cfg.host, cfg.port, cfg.client_id + 103)
+            Thread(target=probe.run, daemon=True).start()
+            ready = probe.connected_ready.wait(timeout)
+            if ready and probe.next_order_id is not None and not probe.fatal_error:
+                return probe, cfg, tuple(collected_errors + probe.errors)
 
-    return None, tuple(collected_errors)
+            collected_errors.extend(f"port={cfg.port} {item}" for item in probe.errors)
+            if probe.isConnected():
+                probe.disconnect()
+            if attempt + 1 < total_attempts:
+                time.sleep(max(0.0, retry_delay))
+
+    return None, None, tuple(collected_errors)
 
 
 def _resolve_contract_on_connected_probe(
@@ -139,39 +170,34 @@ def preview_ibkr_paper_overnight_order(
     limit_price: float,
     config: IbkrConnectionConfig | None = None,
     timeout: float = 10.0,
-    connect_attempts: int = 4,
-    connect_retry_delay: float = 2.0,
+    connect_attempts_per_endpoint: int = 2,
+    connect_retry_delay: float = 1.0,
 ) -> IbkrOvernightWhatIfResult:
-    """Resolve Overnight and request one Paper what-if preview in one TWS session.
+    """Resolve Overnight and request one Paper what-if preview in one session.
 
-    Initial TWS connection establishment may retry because no broker request has
-    happened yet. Once connected, both ContractDetails lookups and the single
-    what-if request use that same session. The what-if request itself is never
-    retried or automatically resent. Live Trading remains disabled.
+    When config is omitted, Gateway Paper 4002 and TWS Paper 7497 are detected
+    automatically before any broker request is made. After connection, SMART
+    resolution, directed OVERNIGHT resolution, and the one what-if request use
+    the same session. The what-if request itself is never retried.
     """
-    cfg = config or create_ibkr_paper_config(use_gateway=False)
-    cfg.validate()
-    if cfg.port != 7497:
-        raise RuntimeError("Overnight what-if preview currently requires TWS Paper port 7497.")
-    if not cfg.paper_trading or cfg.allow_live_trading:
-        raise RuntimeError("Overnight what-if preview requires Paper Trading with Live disabled.")
     if quantity != 1:
         raise RuntimeError("SPY Overnight what-if preview is limited to the broker-verified quantity 1.")
     if float(limit_price) <= 0:
         raise ValueError("limit_price must be positive")
 
+    configs = _paper_endpoint_candidates(config)
     normalized = symbol.strip().upper()
-    probe, connection_errors = _connect_probe_before_any_request(
-        cfg,
+    probe, cfg, connection_errors = _connect_probe_before_any_request(
+        configs,
         timeout=timeout,
-        attempts=connect_attempts,
+        attempts_per_endpoint=connect_attempts_per_endpoint,
         retry_delay=connect_retry_delay,
     )
-    if probe is None:
+    if probe is None or cfg is None:
         return IbkrOvernightWhatIfResult(
             False, False, normalized, None, None,
             quantity, float(limit_price), False, None, None, None, None,
-            connection_errors,
+            connection_errors, None,
         )
 
     try:
@@ -189,7 +215,7 @@ def preview_ibkr_paper_overnight_order(
             return IbkrOvernightWhatIfResult(
                 True, False, normalized, None, None,
                 quantity, float(limit_price), False, None, None, None, None,
-                tuple(connection_errors + tuple(probe.errors)),
+                tuple(connection_errors + tuple(probe.errors)), cfg.port,
             )
 
         primary = (getattr(resolved_base, "primaryExchange", "") or "").strip().upper()
@@ -197,7 +223,7 @@ def preview_ibkr_paper_overnight_order(
             return IbkrOvernightWhatIfResult(
                 True, False, normalized, None, None,
                 quantity, float(limit_price), False, None, None, None, None,
-                tuple(connection_errors + tuple(probe.errors)),
+                tuple(connection_errors + tuple(probe.errors)), cfg.port,
             )
 
         overnight_instrument = InstrumentSpec(
@@ -217,7 +243,7 @@ def preview_ibkr_paper_overnight_order(
             return IbkrOvernightWhatIfResult(
                 True, False, normalized, primary, "OVERNIGHT",
                 quantity, float(limit_price), False, None, None, None, None,
-                tuple(connection_errors + tuple(probe.errors)),
+                tuple(connection_errors + tuple(probe.errors)), cfg.port,
             )
 
         resolved_primary = (
@@ -237,7 +263,6 @@ def preview_ibkr_paper_overnight_order(
         prepared.order.whatIf = True
         prepared.order.transmit = True
 
-        # The what-if request is intentionally single-shot. Never retry it.
         probe.placeOrder(probe.next_order_id, prepared.contract, prepared.order)
         probe.preview_ready.wait(timeout)
 
@@ -246,7 +271,7 @@ def preview_ibkr_paper_overnight_order(
             return IbkrOvernightWhatIfResult(
                 True, False, normalized, resolved_primary, "OVERNIGHT",
                 quantity, float(limit_price), False, None, None, None, None,
-                tuple(connection_errors + tuple(probe.errors)),
+                tuple(connection_errors + tuple(probe.errors)), cfg.port,
             )
 
         commission = getattr(state, "commission", None)
@@ -262,7 +287,7 @@ def preview_ibkr_paper_overnight_order(
             getattr(state, "maintMarginChange", None), commission,
             getattr(state, "commissionCurrency", None),
             getattr(state, "warningText", None),
-            tuple(connection_errors + tuple(probe.errors)),
+            tuple(connection_errors + tuple(probe.errors)), cfg.port,
         )
     finally:
         if probe.isConnected():
@@ -283,6 +308,7 @@ def main() -> int:
     result = preview_ibkr_paper_overnight_order(limit_price=price)
     print("===== IBKR PAPER OVERNIGHT WHAT-IF =====")
     print("CONNECTED          :", result.connected)
+    print("CONNECTED PORT     :", result.connected_port)
     print("PREVIEW RECEIVED   :", result.preview_received)
     print("SYMBOL             :", result.symbol)
     print("PRIMARY EXCHANGE   :", result.primary_exchange)
