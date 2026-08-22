@@ -25,6 +25,10 @@ from ai_asset_platform.execution.signal_order_bridge import (
     execute_signal_via_ibkr_paper,
 )
 
+# Backward-compatible private alias for existing tests/Overnight pilot while the
+# implementation itself lives in one shared fail-closed module.
+_confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
+
 
 def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
     """Connect to Gateway Paper 4002 or TWS Paper 7497 before any order exists.
