@@ -1,24 +1,30 @@
 """Shared fail-closed pre-send risk gate for migrated execution paths.
 
-The gate reads the durable Paper ledger but evaluates realized PnL and loss
-streaks in the configured account currency and account calendar. Cross-currency
-IBKR fills require explicit per-fill FX evidence. No FX rate is guessed and no
-broker order is created here.
+The gate reads the durable Paper ledger but evaluates realized PnL, daily order
+counts, cooldowns and loss streaks in the configured account currency/calendar.
+Cross-currency IBKR fills require explicit per-fill FX evidence. No FX rate is
+guessed and no broker order is created here.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Callable
 
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
 from ai_asset_platform.core.account_clock import account_today
 from ai_asset_platform.core.settings import PlatformSettings, SETTINGS
+from ai_asset_platform.execution.account_calendar_ledger import (
+    daily_order_count,
+    record_time_in_account_zone,
+    repurchase_cooldown_remaining_minutes,
+)
 from ai_asset_platform.execution.service import RiskGateResult
 from ai_asset_platform.reports.multicurrency_trade_history import (
     MulticurrencyTradeHistoryError,
+    calculate_realized_trade_history,
     consecutive_losses_account_currency,
-    realized_pnl_for_date,
 )
 
 
@@ -61,33 +67,60 @@ def _today_ibkr_realized_pnl_currency_safe(records: list[dict]) -> bool:
     return True
 
 
+def _realized_pnl_for_account_date(
+    records: list[dict],
+    *,
+    target_date: date,
+    settings: PlatformSettings,
+) -> float:
+    total = Decimal("0")
+    trades = calculate_realized_trade_history(
+        records,
+        account_currency=settings.account_currency,
+    )
+    for trade in trades:
+        if not trade.sold_at:
+            raise MulticurrencyTradeHistoryError("realized trade is missing sold_at")
+        try:
+            sold = record_time_in_account_zone(
+                {"created_at": trade.sold_at},
+                settings,
+            )
+        except Exception as exc:
+            raise MulticurrencyTradeHistoryError(
+                "realized trade cannot be mapped to account calendar"
+            ) from exc
+        if sold.date() == target_date:
+            total += Decimal(str(trade.realized_pnl_account))
+    return float(total)
+
+
 def load_legacy_risk_snapshot(
     order: OrderRequest,
     settings: PlatformSettings = SETTINGS,
 ) -> LegacyRiskSnapshot:
-    from order_manager import (
-        calculate_daily_buy_order_count,
-        calculate_daily_sell_order_count,
-        calculate_repurchase_cooldown_remaining_minutes,
-        load_accounting_orders,
-    )
+    from order_manager import load_accounting_orders, load_paper_orders
+
+    raw_orders = load_paper_orders()
+    accounting_orders = load_accounting_orders()
 
     cooldown = 0
     if order.side is OrderSide.BUY:
-        cooldown = calculate_repurchase_cooldown_remaining_minutes(
-            order.symbol,
-            settings.repurchase_cooldown_minutes,
+        cooldown = repurchase_cooldown_remaining_minutes(
+            accounting_orders,
+            ticker=order.symbol,
+            cooldown_minutes=settings.repurchase_cooldown_minutes,
+            settings=settings,
         )
 
-    accounting_orders = load_accounting_orders()
     currency_safe = True
     daily_realized = 0.0
     consecutive_losses = 0
     try:
-        daily_realized = realized_pnl_for_date(
+        daily_realized = _realized_pnl_for_account_date(
             accounting_orders,
             target_date=account_today(settings),
-            account_currency=settings.account_currency,
+            settings=settings,
         )
         consecutive_losses = consecutive_losses_account_currency(
             accounting_orders,
@@ -97,8 +130,16 @@ def load_legacy_risk_snapshot(
         currency_safe = False
 
     return LegacyRiskSnapshot(
-        daily_buy_orders=calculate_daily_buy_order_count(),
-        daily_sell_orders=calculate_daily_sell_order_count(),
+        daily_buy_orders=daily_order_count(
+            raw_orders,
+            side="BUY",
+            settings=settings,
+        ),
+        daily_sell_orders=daily_order_count(
+            raw_orders,
+            side="SELL",
+            settings=settings,
+        ),
         daily_realized_pnl=daily_realized,
         consecutive_losses=consecutive_losses,
         repurchase_cooldown_minutes=cooldown,
