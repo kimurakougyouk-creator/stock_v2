@@ -7,6 +7,7 @@ WAIT_SECONDS="${IBKR_TWS_WAIT_SECONDS:-180}"
 LOG_DIR="$REPO_DIR/results"
 LATEST_LOG="$LOG_DIR/ibkr_operator_checkpoint_latest.log"
 RECONCILE_LOG="$LOG_DIR/ibkr_execution_reconcile_latest.log"
+RECOVERY_LOG="$LOG_DIR/ibkr_execution_log_recovery_latest.log"
 
 cd "$REPO_DIR"
 
@@ -45,19 +46,29 @@ while True:
 PY
 
 # First reconcile broker-confirmed execution evidence into the durable local
-# ledger. This never creates/transmits/cancels broker orders. Then run the normal
-# fail-closed operator checkpoint against the reconciled local state.
+# ledger. Current-session execution queries may legitimately return no older
+# fills, so a second fail-closed local-log recovery pass is attempted. That pass
+# can only import one previously captured SPY BUY when the current broker-held
+# position and broker average cost agree with the logged broker execution. It
+# never creates/transmits/cancels broker orders. Then run the normal operator
+# checkpoint against the resulting durable state.
 set +e
 python -m ai_asset_platform.execution.ibkr_execution_reconcile 2>&1 | tee "$RECONCILE_LOG"
 reconcile_status=${PIPESTATUS[0]}
+python -m ai_asset_platform.execution.ibkr_execution_log_recovery 2>&1 | tee "$RECOVERY_LOG"
+recovery_status=${PIPESTATUS[0]}
 IBKR_OVERNIGHT_WHATIF_LIMIT_PRICE="$LIMIT_PRICE" \
 python -m ai_asset_platform.brokers.ibkr_operator_checkpoint 2>&1 | tee "$LATEST_LOG"
 checkpoint_status=${PIPESTATUS[0]}
 set -e
 
 echo "RECONCILIATION LOG: $RECONCILE_LOG"
+echo "RECOVERY LOG      : $RECOVERY_LOG"
 echo "CHECKPOINT LOG    : $LATEST_LOG"
 if [[ "$reconcile_status" -ne 0 ]]; then
   exit "$reconcile_status"
 fi
+# Recovery is intentionally non-fatal when it is not applicable. Any remaining
+# unsafe broker/local mismatch is fail-closed by the checkpoint itself.
+: "$recovery_status"
 exit "$checkpoint_status"
