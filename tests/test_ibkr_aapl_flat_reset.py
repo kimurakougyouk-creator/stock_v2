@@ -104,9 +104,11 @@ def test_plan_blocks_without_market_price():
     assert "market price" in plan.reason
 
 
-def test_one_shot_wrapper_explicitly_enables_ibkr_paper_only():
+def test_one_shot_wrapper_scopes_ibkr_paper_opt_in_to_reset_process_only():
     text = Path("ibkr_aapl_flat_reset_once.sh").read_text(encoding="utf-8")
-    assert "export AI_ASSET_ENABLE_IBKR_PAPER=1" in text
+    assert "python -m pytest -q" in text
+    assert "AI_ASSET_ENABLE_IBKR_PAPER=1 \\\npython -m ai_asset_platform.brokers.ibkr_aapl_flat_reset" in text
+    assert "export AI_ASSET_ENABLE_IBKR_PAPER=1" not in text
     assert "YES_SELL_EXACTLY_THREE_AAPL_PAPER_TO_FLAT" in text
     assert "AI_ASSET_ENABLE_LIVE_TRADING=1" not in text
     assert "AI_ASSET_LIVE_TRADING_UNLOCKED=1" not in text
