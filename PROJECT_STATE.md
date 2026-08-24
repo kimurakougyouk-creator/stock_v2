@@ -5,7 +5,7 @@ Last updated: 2026-08-24
 This file is the concise, evidence-based handoff ledger for AI agents. Update it after meaningful verified progress. Do not replace verified facts with guesses.
 
 ## Current phase
-Final IBKR Paper integrated runtime validation plus repository-only multi-asset foundation work. The previously pending SPY one-share Paper close lifecycle has now been observed end-to-end on the user's local IBKR Paper environment. The later AAPL broker/local mismatch has also been resolved by a dedicated, fail-closed Paper-only flatten reset with real broker execution evidence and no Live order. The post-reset normal read-only checkpoint has now also passed, confirming no remaining legacy evidence blocker and restoring Paper preflight readiness without transmitting a new order. Repository work continues on issue #56 without enabling unsupported asset classes or Live Trading.
+Final IBKR Paper integrated runtime validation plus repository-only multi-asset foundation work. The previously pending SPY one-share Paper close lifecycle has now been observed end-to-end on the user's local IBKR Paper environment. The later AAPL broker/local mismatch has also been resolved by a dedicated, fail-closed Paper-only flatten reset with real broker execution evidence and no Live order. The post-reset normal read-only checkpoint passed, and a subsequent bounded three-cycle read-only soak also passed consecutively with no order transmission, no reconciliation errors, no legacy blocker, and Paper E2E readiness remaining true. Repository work continues on issue #56 without enabling unsupported asset classes or Live Trading.
 
 ## Verified repository state
 - Repository: `kimurakougyouk-creator/stock_v2`
@@ -30,6 +30,7 @@ Final IBKR Paper integrated runtime validation plus repository-only multi-asset 
 - PR #168: dedicated fail-closed AAPL Paper three-share flatten reset, reconciliation pause/exclusion registry, targeted legacy retirement, and explicit human confirmation gate.
 - PR #169: dedicated AAPL reset wrapper explicitly enables IBKR Paper while leaving Live Trading locked.
 - PR #170: AAPL reset Paper opt-in is scoped only to the reset process, preserving default-safe pytest behavior.
+- PR #173: bounded read-only soak wrapper repeatedly runs the normal non-order IBKR audit path; no Paper/Live approval is supplied.
 - Live Trading remains prohibited.
 
 ## Verified real IBKR Paper evidence
@@ -51,6 +52,9 @@ Final IBKR Paper integrated runtime validation plus repository-only multi-asset 
 - Post-reset accounting remained `CONFIRMED FILLS=3`, `ENDING EQUITY=1000141.39875 JPY`, `REALIZED PNL=141.39875 JPY`, `UNREALIZED PNL=0.0`, `MAX DRAWDOWN=0.0`, confirming the AAPL reset was not injected into trusted PnL.
 - Post-reset broker account was ready in JPY, with one broker position remaining in the account; AAPL and SPY were both flat in the verified reset/checkpoint evidence.
 - Post-reset multi-asset read-only audit resolved global stock `9432/TSEJ/JPY` and FX `USD/JPY@IDEALPRO`, with `CORE_RESOLVED=True`, `CORE_CONTRACTS_READY=True`, and `ORDER SENT=False`.
+- Bounded read-only soak on 2026-08-24 completed `3/3` consecutive cycles successfully. Each cycle detected the Paper endpoint on port `4002`, observed the same three broker executions, reported `RECONCILED COUNT=0`, `ERRORS=[]`, `LEGACY EVIDENCE BLOCKERS=[]`, `ACCOUNTING SAFE=True`, `PREFLIGHT ALLOWED=True`, `READY FOR PAPER E2E REVIEW=True`, and `CORE_CONTRACTS READY=True`.
+- Across all three soak cycles, trusted accounting remained stable at `CONFIRMED FILLS=3`, `ENDING EQUITY=1000141.39875 JPY`, `REALIZED PNL=141.39875 JPY`, `UNREALIZED PNL=0.0`, and `MAX DRAWDOWN=0.0`.
+- The soak ended with `SOAK RESULT: PASS (3 consecutive read-only cycles)` and `REAL ORDER SENT BY SOAK WRAPPER: False`.
 - No Live order was sent by any verified flow above.
 
 ## Current verified Paper execution model
@@ -64,7 +68,7 @@ Final IBKR Paper integrated runtime validation plus repository-only multi-asset 
 - Timeout or uncertain order state is never automatically resent.
 - Read-only checkpoint repetition is automated locally by `ibkr_readonly_autopilot.sh`; order-transmitting scripts remain outside that autopilot.
 - Legacy-position reset executions with unproven opening basis are excluded from ordinary accounting reconciliation and require broker-flat proof before targeted legacy retirement.
-- After the verified AAPL reset and normal checkpoint, no remaining legacy evidence blocker is present and the normal verified Paper preflight is allowed again; this is readiness evidence only, not permission to transmit an order automatically.
+- After the verified AAPL reset, normal checkpoint, and three-cycle soak, no remaining legacy evidence blocker is present and the normal verified Paper preflight remains allowed; this is readiness evidence only, not permission to transmit an order automatically.
 
 ## Multi-asset issue #56 boundary
 - US stock and US ETF Paper foundations have real broker evidence. The SPY Overnight close route and the dedicated AAPL flatten reset now both have real Paper SELL evidence, but neither automatically promotes unrelated products, sessions, venues, or arbitrary SELL support.
@@ -78,9 +82,9 @@ Final IBKR Paper integrated runtime validation plus repository-only multi-asset 
 - The SPY broker/local position mismatch is resolved: both sides are now zero after the verified close.
 - The earlier SPY missing-historical-FX blocker is resolved for the uniquely matched closed round trip by fail-closed paired accounting.
 - The prior AAPL broker/local mismatch is resolved: the dedicated Paper-only reset filled exactly `3` AAPL shares, broker reported flat afterward, and the exact old identity-less AAPL row was retired/quarantined only after broker-flat proof.
-- The post-reset normal operator checkpoint reports `LEGACY EVIDENCE BLOCKERS=[]` and `PREFLIGHT ALLOWED=True`; the prior AAPL legacy blocker no longer blocks normal verified Paper readiness.
-- No broker/local AAPL or SPY mismatch is currently evidenced by the verified post-reset checkpoint.
-- Remaining work is no longer legacy-evidence repair. It is final integrated Paper validation/soak behavior plus issue #56 product-by-product verification. No additional Paper order should be sent merely to re-prove already verified fills.
+- The post-reset normal operator checkpoint and subsequent three-cycle soak report `LEGACY EVIDENCE BLOCKERS=[]` and `PREFLIGHT ALLOWED=True`; the prior AAPL legacy blocker no longer blocks normal verified Paper readiness.
+- No broker/local AAPL or SPY mismatch is currently evidenced by the verified post-reset checkpoint/soak.
+- Remaining work is no longer legacy-evidence repair or basic read-only soak proof. It is final evidence-based completion auditing plus issue #56 product-by-product verification. No additional Paper order should be sent merely to re-prove already verified fills.
 
 ## Accounting and reporting
 - Only accounting-effective records are included; IBKR Paper requires confirmed `FILLED` evidence.
@@ -88,18 +92,18 @@ Final IBKR Paper integrated runtime validation plus repository-only multi-asset 
 - Cross-currency confirmed fills require explicit per-fill FX evidence for account-currency accounting, except the narrowly verified closed-SPY pairing rule described above.
 - The verified SPY round trip reconstructs realized PnL and equity safely from broker-backed evidence.
 - The AAPL flatten reset is intentionally excluded from trusted PnL/accounting because the missing legacy opening basis was never reconstructed; broker flatness and auditability are preserved without fabricating cost basis.
-- The post-reset checkpoint confirms trusted accounting remained stable at `3` confirmed fills, ending equity `1000141.39875 JPY`, realized PnL `141.39875 JPY`, unrealized PnL `0`, and maximum drawdown `0`.
+- The post-reset checkpoint and three-cycle soak confirm trusted accounting remained stable at `3` confirmed fills, ending equity `1000141.39875 JPY`, realized PnL `141.39875 JPY`, unrealized PnL `0`, and maximum drawdown `0`.
 - Equity, realized/unrealized PnL, trade history, and maximum drawdown remain reconstructable only from records that pass currency/accounting safety rules.
 
 ## Verification boundary
 - GitHub CI cannot access the user's local TWS/Gateway or local runtime ledger.
 - Repository CI validates code paths and safety invariants but cannot substitute for real Paper broker evidence.
 - Read-only local monitoring is automated; user interaction should be requested only for local broker login, explicit Paper order approval, or other actions impossible from GitHub/CI.
-- `READY FOR PAPER E2E REVIEW=True` and `PREFLIGHT ALLOWED=True` mean safety/readiness gates passed in the verified checkpoint; they do not authorize unattended order transmission.
+- `READY FOR PAPER E2E REVIEW=True` and `PREFLIGHT ALLOWED=True` mean safety/readiness gates passed in the verified checkpoint/soak; they do not authorize unattended order transmission.
 - No Live Trading completion claim is permitted.
 
 ## Next work
-1. Keep the normal read-only autopilot/checkpoint running as the non-order soak/consistency monitor; do not ask the user to repeat manual checkpoint commands unless the autopilot itself fails.
+1. Treat the verified three-cycle read-only soak as completed evidence; do not ask the user to repeat it merely for proof.
 2. Do not send another SPY or AAPL order merely to re-prove already verified execution paths. Any future Paper transmission still requires an explicit product-specific reason and explicit human approval.
 3. Continue repository-only issue #56 verification in sequence, using the now-clean Paper baseline: ETF/global-stock reuse audit first, then FX, futures, options, and crypto product-specific gates.
 4. Before declaring the platform complete, require a final evidence-based completion audit covering integrated signals/backtest/trade-history/PnL/equity/drawdown/restart recovery plus the chosen scope of verified Paper capabilities.
