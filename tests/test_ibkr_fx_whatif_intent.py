@@ -39,12 +39,29 @@ def test_verified_fx_whatif_intent_is_explicit_and_never_real_order_permission()
     assert result.real_order_allowed is False
 
 
-def test_cash_quantity_mode_must_be_explicit_but_is_supported_as_an_intent_only():
+def test_cash_quantity_mode_must_be_explicit_but_is_intent_only():
     result = verify_fx_whatif_intent(
-        _spec(quantity_mode=FxQuantityMode.CASH_QUANTITY, quantity=100000.0)
+        _spec(
+            quantity_mode=FxQuantityMode.CASH_QUANTITY,
+            quantity=100000.0,
+            min_size=None,
+            size_increment=None,
+        )
     )
     assert result.quantity_mode is FxQuantityMode.CASH_QUANTITY
+    assert result.min_size is None
+    assert result.size_increment is None
     assert result.real_order_allowed is False
+
+
+def test_cash_quantity_does_not_reuse_total_quantity_size_constraints_by_assumption():
+    with pytest.raises(ValueError, match="CASH_QUANTITY.*semantics are unverified"):
+        verify_fx_whatif_intent(
+            _spec(
+                quantity_mode=FxQuantityMode.CASH_QUANTITY,
+                quantity=100000.0,
+            )
+        )
 
 
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
