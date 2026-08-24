@@ -19,6 +19,10 @@ fi
 
 source .venv/bin/activate
 export PYTHONPATH="$PWD/src:$PWD"
+# This dedicated wrapper is the explicit Paper-only opt-in. The platform's
+# Live Trading flags remain hard-disabled in PlatformSettings and are not
+# changed here.
+export AI_ASSET_ENABLE_IBKR_PAPER=1
 
 python -m pytest -q
 python -m ai_asset_platform.brokers.ibkr_aapl_flat_reset
