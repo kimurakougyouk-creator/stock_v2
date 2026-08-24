@@ -71,6 +71,7 @@ def test_nonpositive_or_unparseable_sizing_is_not_invented():
 def test_discovery_uses_contract_details_only(monkeypatch):
     details = _details()
     probes = []
+
     class FakeProbe:
         def __init__(self):
             self.connected_ready = Event(); self.connected_ready.set()
@@ -83,8 +84,21 @@ def test_discovery_uses_contract_details_only(monkeypatch):
             self.requested.append((req_id, requested_contract)); self.details.append(details); self.details_ready.set()
         def isConnected(self): return self.connected  # noqa: N802
         def disconnect(self): self.connected = False
+
+    class FakeThread:
+        def join(self, timeout=None): return None
+
     monkeypatch.setattr(discovery, "_FxDiscoveryProbe", FakeProbe)
-    monkeypatch.setattr(discovery, "create_ibkr_paper_config", lambda use_gateway: SimpleNamespace(host="127.0.0.1", port=4002 if use_gateway else 7497, client_id=0))
+    monkeypatch.setattr(
+        discovery,
+        "start_guarded_ibapi_loop",
+        lambda run_fn, name: (FakeThread(), SimpleNamespace(exception=None)),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "create_ibkr_paper_config",
+        lambda use_gateway: SimpleNamespace(host="127.0.0.1", port=4002 if use_gateway else 7497, client_id=0),
+    )
     result = discovery.discover_ibkr_paper_fx(base_currency="EUR", quote_currency="USD", exchange="IDEALPRO", timeout=0.01)
     assert result.connected is True
     assert result.endpoint_port == 4002
@@ -93,3 +107,74 @@ def test_discovery_uses_contract_details_only(monkeypatch):
     assert len(result.candidates) == 1
     assert probes[0].requested[0][1].secType == "CASH"
     assert not hasattr(probes[0], "placeOrder")
+
+
+def test_successful_gateway_handshake_does_not_fallback_to_closed_tws(monkeypatch):
+    probes = []
+
+    class FakeProbe:
+        def __init__(self):
+            self.connected_ready = Event(); self.connected_ready.set()
+            self.details_ready = Event(); self.details = []; self.errors = []
+            self.fatal_error = None; self.connected = False
+            probes.append(self)
+        def connect(self, host, port, client_id): self.connected = True
+        def run(self): return None
+        def reqContractDetails(self, req_id, requested_contract):  # noqa: N802
+            self.details_ready.set()
+        def isConnected(self): return self.connected  # noqa: N802
+        def disconnect(self): self.connected = False
+
+    class FakeThread:
+        def join(self, timeout=None): return None
+
+    monkeypatch.setattr(discovery, "_FxDiscoveryProbe", FakeProbe)
+    monkeypatch.setattr(
+        discovery,
+        "start_guarded_ibapi_loop",
+        lambda run_fn, name: (FakeThread(), SimpleNamespace(exception=None)),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "create_ibkr_paper_config",
+        lambda use_gateway: SimpleNamespace(host="127.0.0.1", port=4002 if use_gateway else 7497, client_id=0),
+    )
+    result = discovery.discover_ibkr_paper_fx(
+        base_currency="USD", quote_currency="JPY", exchange="IDEALPRO", timeout=0.01
+    )
+    assert result.connected is True
+    assert result.endpoint_port == 4002
+    assert result.candidates == ()
+    assert len(probes) == 1
+
+
+def test_discovery_records_guarded_loop_exception(monkeypatch):
+    class FakeProbe:
+        def __init__(self):
+            self.connected_ready = Event()
+            self.details_ready = Event(); self.details = []; self.errors = []
+            self.fatal_error = None; self.connected = False
+        def connect(self, host, port, client_id): self.connected = True
+        def run(self): return None
+        def isConnected(self): return self.connected  # noqa: N802
+        def disconnect(self): self.connected = False
+
+    class FakeThread:
+        def join(self, timeout=None): return None
+
+    monkeypatch.setattr(discovery, "_FxDiscoveryProbe", FakeProbe)
+    monkeypatch.setattr(
+        discovery,
+        "start_guarded_ibapi_loop",
+        lambda run_fn, name: (FakeThread(), SimpleNamespace(exception="TypeError: serverVersion None")),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "create_ibkr_paper_config",
+        lambda use_gateway: SimpleNamespace(host="127.0.0.1", port=4002 if use_gateway else 7497, client_id=0),
+    )
+    result = discovery.discover_ibkr_paper_fx(
+        base_currency="USD", quote_currency="JPY", exchange="IDEALPRO", timeout=0.0
+    )
+    assert result.connected is False
+    assert any("message-loop TypeError" in item for item in result.errors)
