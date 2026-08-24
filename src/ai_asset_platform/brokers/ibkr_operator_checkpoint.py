@@ -1,10 +1,4 @@
-"""One-command, no-real-order checkpoint for the current IBKR Paper milestone.
-
-The checkpoint combines broker Overnight what-if, broker FX evidence, durable-
-ledger accounting, broker account/portfolio reconciliation, and the same pure
-verified-Paper BUY preflight used by the normal pilot path. It never sends,
-changes, or cancels a real Paper or Live order.
-"""
+"""One-command, no-real-order checkpoint for the current IBKR Paper milestone."""
 from __future__ import annotations
 
 import os
@@ -32,6 +26,10 @@ from ai_asset_platform.reports.multicurrency_confirmed_accounting import (
     MulticurrencyConfirmedAccountingError,
     MulticurrencyConfirmedAccountingSummary,
     audit_multicurrency_confirmed_accounting,
+)
+from ai_asset_platform.reports.paired_spy_close_accounting import (
+    PairedSpyCloseAccountingError,
+    enrich_closed_spy_round_trip,
 )
 
 preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
@@ -93,9 +91,8 @@ def _legacy_evidence_blockers(records: list[dict], *, account_currency: str) -> 
             continue
         if currency == account:
             continue
-        raw = record.get("fx_to_account_rate")
         try:
-            rate = float(raw)
+            rate = float(record.get("fx_to_account_rate"))
         except (TypeError, ValueError):
             rate = 0.0
         if rate <= 0:
@@ -165,21 +162,14 @@ def _confirmed_held_quantity(records: list[dict], *, ticker: str) -> int | None:
 
 def _broker_symbol_quantity(account: IbkrPaperAccountSnapshot, symbol: str) -> float:
     target = str(symbol).strip().upper()
-    return sum(
-        float(position.quantity)
-        for position in account.positions
-        if str(position.symbol).strip().upper() == target
-    )
+    return sum(float(position.quantity) for position in account.positions if str(position.symbol).strip().upper() == target)
 
 
 def _reconciliation_error(account: IbkrPaperAccountSnapshot, *, account_currency: str) -> str | None:
     if not account.ready:
         return "broker Paper account snapshot is incomplete or not ready"
     if str(account.base_currency).strip().upper() != str(account_currency).strip().upper():
-        return (
-            f"configured account currency {account_currency} does not match "
-            f"broker base currency {account.base_currency}"
-        )
+        return f"configured account currency {account_currency} does not match broker base currency {account.base_currency}"
     if account.available_funds is None or account.available_funds < 0:
         return "broker AvailableFunds is unavailable"
     if account.gross_position_value is None or account.gross_position_value < 0:
@@ -190,10 +180,15 @@ def _reconciliation_error(account: IbkrPaperAccountSnapshot, *, account_currency
 def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpointResult:
     account_currency = str(SETTINGS.account_currency).strip().upper()
     records = order_manager.load_accounting_orders()
-    blockers = _legacy_evidence_blockers(records, account_currency=account_currency)
-    trusted_records = _trusted_accounting_records(records, account_currency=account_currency)
-    quarantined_count = len(records) - len(trusted_records)
     spy_held = _confirmed_held_quantity(records, ticker="SPY")
+    accounting_records = records
+    try:
+        accounting_records = enrich_closed_spy_round_trip(records)
+    except PairedSpyCloseAccountingError:
+        accounting_records = records
+    blockers = _legacy_evidence_blockers(accounting_records, account_currency=account_currency)
+    trusted_records = _trusted_accounting_records(accounting_records, account_currency=account_currency)
+    quarantined_count = len(accounting_records) - len(trusted_records)
 
     accounting = None
     accounting_error = None
@@ -212,11 +207,7 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
     broker_spy_held = _broker_symbol_quantity(account, "SPY") if account.connected else None
 
     if account_currency == "USD":
-        fx = IbkrFxSnapshotResult(
-            connected=True, endpoint_port=None, base_currency="USD", quote_currency="USD",
-            exchange="IDENTITY", bid=1.0, ask=1.0, rate=1.0, source="IDENTITY",
-            order_sent=False, errors=(),
-        )
+        fx = IbkrFxSnapshotResult(connected=True, endpoint_port=None, base_currency="USD", quote_currency="USD", exchange="IDENTITY", bid=1.0, ask=1.0, rate=1.0, source="IDENTITY", order_sent=False, errors=())
     else:
         fx = preview_ibkr_paper_fx_rate(base_currency="USD", quote_currency=account_currency)
 
@@ -231,8 +222,6 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
     elif reconcile_error is not None:
         preflight_error = "broker account reconciliation is unsafe; BUY preflight remains blocked"
     elif blockers:
-        # Quarantine is useful for diagnostics/accounting continuity, but it is
-        # not permission to ignore unknown historical exposure before new BUY.
         preflight_error = "legacy confirmed-fill evidence is incomplete; new BUY remains blocked"
     elif accounting_error is not None:
         preflight_error = "accounting is unsafe; BUY preflight remains blocked"
@@ -258,17 +247,10 @@ def run_ibkr_operator_checkpoint(*, limit_price: float) -> IbkrOperatorCheckpoin
             preflight_error = str(exc)
 
     return IbkrOperatorCheckpointResult(
-        whatif=whatif,
-        fx=fx,
-        account=account,
-        accounting=accounting,
-        preflight=preflight,
-        accounting_error=accounting_error,
-        preflight_error=preflight_error,
-        reconciliation_error=reconcile_error,
-        spy_confirmed_held_quantity=spy_held,
-        broker_spy_held_quantity=broker_spy_held,
-        legacy_evidence_blockers=blockers,
+        whatif=whatif, fx=fx, account=account, accounting=accounting, preflight=preflight,
+        accounting_error=accounting_error, preflight_error=preflight_error,
+        reconciliation_error=reconcile_error, spy_confirmed_held_quantity=spy_held,
+        broker_spy_held_quantity=broker_spy_held, legacy_evidence_blockers=blockers,
         quarantined_legacy_fill_count=quarantined_count,
     )
 
@@ -289,7 +271,6 @@ def main() -> int:
 
     result = run_ibkr_operator_checkpoint(limit_price=price)
     whatif, fx, account, accounting, preflight = result.whatif, result.fx, result.account, result.accounting, result.preflight
-
     print("===== IBKR PAPER OPERATOR CHECKPOINT =====")
     print("WHATIF CONNECTED       :", whatif.connected)
     print("WHATIF PREVIEW RECEIVED:", whatif.preview_received)
