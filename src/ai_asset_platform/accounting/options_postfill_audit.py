@@ -145,7 +145,6 @@ def evaluate_option_postfill_audit(
     buy_exec_ids = buy[3]
     sell_exec_ids = sell[3]
     selected_ids = tuple(sorted(buy_exec_ids + sell_exec_ids))
-    # A synthetic stable execution identity represents a possibly split one-contract order.
     buy_fill = _fill(buy[4], exec_id="+".join(buy_exec_ids), side="BUY", price=buy[2])
     sell_fill = _fill(sell[4], exec_id="+".join(sell_exec_ids), side="SELL", price=sell[2])
     accounting = account_closed_option_roundtrip(buy_fill, sell_fill)
@@ -154,9 +153,17 @@ def evaluate_option_postfill_audit(
     second_ids = tuple(sorted(row.exec_id for row in second_rows))
     restart_ok = second_ids == selected_ids
     if restart_ok:
-        first_identity = option_recovery_identity(buy_fill)
+        expected_identity = option_recovery_identity(buy_fill)
         for row in second_rows:
-            if option_recovery_identity(_fill(row, exec_id=row.exec_id, side=row.side, price=Decimal(str(row.price)))) != first_identity:
+            row_identity = option_recovery_identity(
+                _fill(
+                    row,
+                    exec_id=row.exec_id,
+                    side=row.side,
+                    price=Decimal(str(row.price)),
+                )
+            )
+            if row_identity != expected_identity:
                 restart_ok = False
                 break
 
