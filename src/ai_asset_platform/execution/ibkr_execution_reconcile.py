@@ -3,6 +3,11 @@
 Read-only with respect to IBKR. Broker execution ids are the cross-process
 identity used to prevent one confirmed execution being counted twice under
 both an application intent and a recovery intent.
+
+The durable legacy order ledger is stock/ETF-shaped. Derivative executions are
+therefore deliberately excluded here and must be handled by their dedicated
+multiplier-aware accounting/recovery audits instead of being flattened into a
+plain ticker row.
 """
 from __future__ import annotations
 
@@ -126,6 +131,12 @@ def _enrich_existing(path: Path, *, exec_id: str, intent: str, rate: float | Non
     return changed
 
 
+def _legacy_reconciliation_allowed(execution: IbkrExecutionEvidence) -> bool:
+    """Return False for derivatives; absent sec_type preserves old STK tests."""
+    security_type = str(getattr(execution, "sec_type", "STK") or "STK").strip().upper()
+    return security_type not in {"FUT", "OPT"}
+
+
 def reconcile_execution_snapshot_to_ledger(
     snapshot: IbkrPaperExecutionSnapshot,
     *,
@@ -161,6 +172,9 @@ def reconcile_execution_snapshot_to_ledger(
                 skipped += 1
                 continue
             if exec_id in excluded_exec_ids:
+                skipped += 1
+                continue
+            if not _legacy_reconciliation_allowed(execution):
                 skipped += 1
                 continue
             intent = _recovery_intent(execution)

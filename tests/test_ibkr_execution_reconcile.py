@@ -8,8 +8,8 @@ from ai_asset_platform.execution.ibkr_execution_reconcile import (
 )
 
 
-def _execution(exec_id: str = "E1"):
-    return SimpleNamespace(
+def _execution(exec_id: str = "E1", *, sec_type=None):
+    values = dict(
         exec_id=exec_id,
         symbol="SPY",
         side="BUY",
@@ -18,6 +18,9 @@ def _execution(exec_id: str = "E1"):
         currency="USD",
         time="20260821 16:33:06 US/Eastern",
     )
+    if sec_type is not None:
+        values["sec_type"] = sec_type
+    return SimpleNamespace(**values)
 
 
 def _ready_fx(**kwargs):
@@ -80,3 +83,33 @@ def test_reconcile_execution_snapshot_fails_closed_when_not_ready(tmp_path: Path
     result = reconcile_execution_snapshot_to_ledger(snapshot, order_log_path=tmp_path / "x.jsonl")
     assert result.reconciled_count == 0
     assert result.errors
+
+
+def test_option_execution_never_enters_legacy_stock_ledger(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "preview_ibkr_paper_historical_fx_rate",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("FX lookup must not run")),
+    )
+    log = tmp_path / "paper_orders.jsonl"
+    snapshot = SimpleNamespace(ready=True, executions=(_execution("OPT-1", sec_type="OPT"),))
+    result = reconcile_execution_snapshot_to_ledger(snapshot, order_log_path=log)
+    assert result.reconciled_count == 0
+    assert result.skipped_count == 1
+    assert result.errors == ()
+    assert not log.exists()
+
+
+def test_future_execution_never_enters_legacy_stock_ledger(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "preview_ibkr_paper_historical_fx_rate",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("FX lookup must not run")),
+    )
+    log = tmp_path / "paper_orders.jsonl"
+    snapshot = SimpleNamespace(ready=True, executions=(_execution("FUT-1", sec_type="FUT"),))
+    result = reconcile_execution_snapshot_to_ledger(snapshot, order_log_path=log)
+    assert result.reconciled_count == 0
+    assert result.skipped_count == 1
+    assert result.errors == ()
+    assert not log.exists()

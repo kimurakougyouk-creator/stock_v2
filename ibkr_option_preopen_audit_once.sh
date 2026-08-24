@@ -7,6 +7,3 @@ source .venv/bin/activate
 python -m pytest -q
 AI_ASSET_ENABLE_IBKR_PAPER=1 python -m ai_asset_platform.brokers.ibkr_option_preopen_audit
 AI_ASSET_ENABLE_IBKR_PAPER=1 python -m ai_asset_platform.brokers.ibkr_option_permission_preflight
-AI_ASSET_ENABLE_IBKR_PAPER=1 python -m ai_asset_platform.brokers.ibkr_option_session_gate
-AI_ASSET_ENABLE_IBKR_PAPER=1 IBKR_OPTION_E2E_CONFIRM="${IBKR_OPTION_E2E_CONFIRM:-}" python -m ai_asset_platform.brokers.ibkr_option_paper_roundtrip
-AI_ASSET_ENABLE_IBKR_PAPER=1 python -m ai_asset_platform.accounting.options_postfill_audit
