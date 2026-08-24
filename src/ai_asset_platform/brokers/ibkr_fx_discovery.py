@@ -8,14 +8,14 @@ product-specific no-transmit audit and real Paper E2E are completed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from threading import Event, Thread
+from threading import Event
 
 from ibapi.client import EClient
 from ibapi.contract import Contract, ContractDetails
 from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
-from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
+from ai_asset_platform.brokers.ibkr_probe_thread import start_guarded_ibapi_loop
 
 
 @dataclass(frozen=True)
@@ -140,32 +140,53 @@ def discover_ibkr_paper_fx(
     for use_gateway in (True, False):
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
         probe = _FxDiscoveryProbe()
+        thread = None
+        thread_state = None
         try:
             probe.connect(cfg.host, cfg.port, cfg.client_id + 240)
-            Thread(
-                target=run_ibapi_message_loop_safely,
-                kwargs={"client": probe, "errors": probe.errors},
-                daemon=True,
-            ).start()
+            thread, thread_state = start_guarded_ibapi_loop(
+                probe.run, name=f"ibkr-fx-discovery-{cfg.port}"
+            )
             ready = probe.connected_ready.wait(timeout)
             if not ready or probe.fatal_error:
                 connection_errors.extend(probe.errors)
+                if thread_state.exception:
+                    connection_errors.append(f"message-loop {thread_state.exception}")
                 continue
+
+            # Once the Paper API handshake succeeds, do not silently fall back to
+            # another endpoint. ContractDetails failure on the confirmed endpoint
+            # must be reported directly so a closed TWS port cannot overwrite the
+            # real broker evidence from Gateway Paper.
             probe.reqContractDetails(1, contract)
             probe.details_ready.wait(timeout)
             candidates = tuple(_candidate(item) for item in probe.details)
+            errors = connection_errors + probe.errors
+            if thread_state.exception:
+                errors.append(f"message-loop {thread_state.exception}")
             return IbkrFxDiscoveryResult(
-                connected=True, endpoint_port=cfg.port,
-                base_currency=contract.symbol, quote_currency=contract.currency,
-                exchange=contract.exchange, candidates=candidates, order_sent=False,
-                errors=tuple(connection_errors + probe.errors),
+                connected=True,
+                endpoint_port=cfg.port,
+                base_currency=contract.symbol,
+                quote_currency=contract.currency,
+                exchange=contract.exchange,
+                candidates=candidates,
+                order_sent=False,
+                errors=tuple(errors),
             )
         finally:
             if probe.isConnected():
                 probe.disconnect()
+            if thread is not None:
+                thread.join(timeout=1.0)
+
     return IbkrFxDiscoveryResult(
-        connected=False, endpoint_port=None,
-        base_currency=contract.symbol, quote_currency=contract.currency,
-        exchange=contract.exchange, candidates=(), order_sent=False,
+        connected=False,
+        endpoint_port=None,
+        base_currency=contract.symbol,
+        quote_currency=contract.currency,
+        exchange=contract.exchange,
+        candidates=(),
+        order_sent=False,
         errors=tuple(connection_errors),
     )
