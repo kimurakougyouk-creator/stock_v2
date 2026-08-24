@@ -1,9 +1,11 @@
 """Controlled one-contract SPY option Paper round-trip.
 
-Paper-only verification. Requires an exact confirmation string, resolves the
-same explicit option candidate proven by the What-If flow, requires a flat
-starting position and no matching open order, then BUY 1 and SELL 1 to flat.
-No retry after uncertain order outcome. Live Trading is never enabled.
+Paper-only verification for the exact SPY option already proven by What-If.
+The flow is fail-closed: Paper must be explicitly enabled, Live locks must be
+intact, the exact confirmation string must be present, the broker-resolved
+contract identity must match the pinned evidence, the starting broker position
+must be flat, and no matching open order may exist. It never automatically
+retries an uncertain order outcome.
 """
 from __future__ import annotations
 
@@ -18,11 +20,23 @@ from ibapi.order import Order
 from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
-from ai_asset_platform.brokers.ibkr_option_whatif import _resolve_target
+from ai_asset_platform.brokers.ibkr_option_discovery import discover_ibkr_paper_option
 from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
 from ai_asset_platform.core.settings import SETTINGS
 
+SYMBOL = "SPY"
+EXCHANGE = "SMART"
+CURRENCY = "USD"
+EXPIRY = "20260828"
+STRIKE = 765.0
+RIGHT = "C"
+MULTIPLIER = "100"
+LOCAL_SYMBOL = "SPY   260828C00765000"
+CON_ID = 900369377
+QUANTITY = 1
 CONFIRMATION_TEXT = "YES_BUY_AND_SELL_ONE_SPY_OPTION_PAPER_TO_FLAT"
+_FATAL_ERROR_CODES = {201, 202, 321, 322, 323, 326, 502, 503, 504, 1100}
+
 
 @dataclass(frozen=True)
 class OptionPaperRoundTripResult:
@@ -43,87 +57,440 @@ class OptionPaperRoundTripResult:
     real_paper_order_sent: bool = False
     live_order_sent: bool = False
 
+
 class _Probe(EWrapper, EClient):
-    def __init__(self):
-        EWrapper.__init__(self); EClient.__init__(self, self)
-        self.ready=Event(); self.position_ready=Event(); self.open_ready=Event(); self.done=Event()
-        self.next_id=None; self.positions=[]; self.open_orders=[]; self.statuses={}; self.errors=[]
-    def nextValidId(self, orderId): self.next_id=int(orderId); self.ready.set()
-    def position(self, account, contract, pos, avgCost):
-        self.positions.append((str(getattr(contract,'localSymbol','')).upper(),str(getattr(contract,'secType','')).upper(),float(pos)))
-    def positionEnd(self): self.position_ready.set()
-    def openOrder(self, orderId, contract, order, orderState):
-        self.open_orders.append((str(getattr(contract,'localSymbol','')).upper(),str(getattr(contract,'secType','')).upper(),int(orderId)))
-    def openOrderEnd(self): self.open_ready.set()
-    def orderStatus(self, orderId, status, filled, remaining, avgFillPrice, *args):
-        avg=float(avgFillPrice) if float(avgFillPrice or 0)>0 else None
-        self.statuses[int(orderId)]=(str(status).upper(),float(filled),avg)
-        if str(status).upper() in {'FILLED','CANCELLED','INACTIVE'}: self.done.set()
-    def error(self, reqId, *args):
-        if len(args)>=3: code,text=args[-2],args[-1]
-        elif len(args)>=2: code,text=args[0],args[1]
-        else: return
-        self.errors.append(f'{code}: {text}')
-        try: ci=int(code)
-        except Exception: ci=0
-        if ci in {201,202,321,322,323,326,502,503,504,1100}: self.done.set(); self.ready.set()
+    def __init__(self) -> None:
+        EWrapper.__init__(self)
+        EClient.__init__(self, self)
+        self.ready = Event()
+        self.position_ready = Event()
+        self.open_ready = Event()
+        self.done = Event()
+        self.next_id: int | None = None
+        self.positions: list[tuple[str, str, float]] = []
+        self.open_orders: list[tuple[str, str, int]] = []
+        self.statuses: dict[int, tuple[str, float, float | None]] = {}
+        self.errors: list[str] = []
 
-def _contract(c):
-    x=Contract(); x.conId=int(c.con_id); x.symbol='SPY'; x.secType='OPT'; x.exchange='SMART'; x.currency='USD'
-    x.localSymbol=str(c.local_symbol); x.lastTradeDateOrContractMonth=str(c.expiry); x.strike=float(c.strike); x.right=str(c.right); x.multiplier=str(c.multiplier)
-    return x
+    def nextValidId(self, orderId: int) -> None:  # noqa: N802
+        self.next_id = int(orderId)
+        self.ready.set()
 
-def _qty(p, local):
-    m=[q for l,s,q in p.positions if l==local.upper() and s=='OPT']
-    if len(m)>1: raise RuntimeError('multiple matching option positions')
-    return 0.0 if not m else float(m[0])
+    def position(self, account, contract, pos, avgCost) -> None:  # noqa: N802
+        self.positions.append(
+            (
+                str(getattr(contract, "localSymbol", "") or "").upper(),
+                str(getattr(contract, "secType", "") or "").upper(),
+                float(pos),
+            )
+        )
 
-def _refresh(p, local, timeout):
-    p.positions.clear(); p.position_ready.clear(); p.reqPositions()
-    if not p.position_ready.wait(timeout): return None
-    try: return _qty(p,local)
-    finally: p.cancelPositions()
+    def positionEnd(self) -> None:  # noqa: N802
+        self.position_ready.set()
 
-def _open(p, local, timeout):
-    p.open_orders.clear(); p.open_ready.clear(); p.reqOpenOrders()
-    if not p.open_ready.wait(timeout): raise RuntimeError('open-order verification timed out')
-    return any(l==local.upper() and s=='OPT' for l,s,_ in p.open_orders)
+    def openOrder(self, orderId, contract, order, orderState) -> None:  # noqa: N802
+        self.open_orders.append(
+            (
+                str(getattr(contract, "localSymbol", "") or "").upper(),
+                str(getattr(contract, "secType", "") or "").upper(),
+                int(orderId),
+            )
+        )
 
-def _order(side, ref):
-    o=Order(); o.action=side; o.orderType='MKT'; o.totalQuantity=1; o.tif='DAY'; o.whatIf=False; o.transmit=True; o.orderRef=ref; return o
+    def openOrderEnd(self) -> None:  # noqa: N802
+        self.open_ready.set()
 
-def run_option_paper_roundtrip(*, timeout=25.0):
-    empty=lambda reason: OptionPaperRoundTripResult(False,reason,None,None,None,None,0,None,None,0,None,None,False)
-    if not SETTINGS.enable_ibkr_paper: return empty('IBKR Paper is not explicitly enabled')
-    if SETTINGS.enable_live_trading or SETTINGS.live_trading_unlocked: return empty('Live Trading safety lock is not intact')
-    if os.getenv('IBKR_OPTION_E2E_CONFIRM','').strip()!=CONFIRMATION_TEXT: return empty('exact SPY option Paper E2E confirmation is missing')
-    port,candidate,discovery_errors=_resolve_target()
-    if candidate is None: return OptionPaperRoundTripResult(False,'option target resolution failed',port,None,None,None,0,None,None,0,None,None,False,tuple(discovery_errors))
-    local=str(candidate.local_symbol); cfg=create_ibkr_paper_config(use_gateway=(port==4002)); p=_Probe(); sent=False
+    def orderStatus(  # noqa: N802
+        self,
+        orderId,
+        status,
+        filled,
+        remaining,
+        avgFillPrice,
+        permId,
+        parentId,
+        lastFillPrice,
+        clientId,
+        whyHeld,
+        mktCapPrice,
+    ) -> None:
+        avg = float(avgFillPrice) if float(avgFillPrice or 0.0) > 0 else None
+        self.statuses[int(orderId)] = (str(status).upper(), float(filled), avg)
+        if str(status).upper() in {"FILLED", "CANCELLED", "INACTIVE"}:
+            self.done.set()
+
+    def error(
+        self,
+        reqId,
+        errorTime,
+        errorCode,
+        errorString,
+        advancedOrderRejectJson="",
+    ) -> None:
+        message = f"{errorCode}: {errorString}"
+        self.errors.append(message)
+        if int(errorCode) in _FATAL_ERROR_CODES:
+            self.done.set()
+            if int(errorCode) in {502, 503, 504, 1100}:
+                self.ready.set()
+
+
+def _verified_target():
+    result = discover_ibkr_paper_option(
+        symbol=SYMBOL,
+        exchange=EXCHANGE,
+        currency=CURRENCY,
+        expiry=EXPIRY,
+        strike=STRIKE,
+        right=RIGHT,
+        multiplier=MULTIPLIER,
+        timeout=10.0,
+    )
+    matches = [
+        c
+        for c in result.candidates
+        if c.local_symbol == LOCAL_SYMBOL
+        and c.expiry == EXPIRY
+        and c.strike == STRIKE
+        and str(c.right).upper() == RIGHT
+        and str(c.multiplier) == MULTIPLIER
+        and c.con_id == CON_ID
+    ]
+    if len(matches) != 1:
+        return result.endpoint_port, None, tuple(result.errors)
+    return result.endpoint_port, matches[0], tuple(result.errors)
+
+
+def _contract(candidate) -> Contract:
+    contract = Contract()
+    contract.conId = int(candidate.con_id)
+    contract.symbol = SYMBOL
+    contract.secType = "OPT"
+    contract.exchange = EXCHANGE
+    contract.currency = CURRENCY
+    contract.localSymbol = str(candidate.local_symbol)
+    contract.lastTradeDateOrContractMonth = str(candidate.expiry)
+    contract.strike = float(candidate.strike)
+    contract.right = str(candidate.right)
+    contract.multiplier = str(candidate.multiplier)
+    return contract
+
+
+def _market_order(side: str, order_ref: str) -> Order:
+    order = Order()
+    order.action = side
+    order.orderType = "MKT"
+    order.totalQuantity = QUANTITY
+    order.tif = "DAY"
+    order.whatIf = False
+    order.transmit = True
+    order.orderRef = order_ref
+    return order
+
+
+def _position_quantity(probe: _Probe) -> float:
+    matches = [
+        qty
+        for local, sec_type, qty in probe.positions
+        if local == LOCAL_SYMBOL.upper() and sec_type == "OPT"
+    ]
+    if len(matches) > 1:
+        raise RuntimeError("multiple matching SPY option positions returned")
+    return 0.0 if not matches else float(matches[0])
+
+
+def _refresh_positions(probe: _Probe, timeout: float) -> float | None:
+    probe.positions.clear()
+    probe.position_ready.clear()
+    probe.reqPositions()
+    if not probe.position_ready.wait(timeout):
+        return None
     try:
-        p.connect(cfg.host,cfg.port,cfg.client_id+296); Thread(target=run_ibapi_message_loop_safely,kwargs={'client':p,'errors':p.errors},daemon=True).start()
-        if not p.ready.wait(timeout) or p.next_id is None: return OptionPaperRoundTripResult(False,'IBKR Paper handshake failed',cfg.port,local,None,None,0,None,None,0,None,None,False,tuple(discovery_errors)+tuple(p.errors))
-        start=_refresh(p,local,timeout)
-        if start is None or abs(start)>1e-9: return OptionPaperRoundTripResult(False,f'option broker position must start flat; found {start}',cfg.port,local,start,None,0,None,None,0,None,start,False,tuple(discovery_errors)+tuple(p.errors))
-        if _open(p,local,timeout): return OptionPaperRoundTripResult(False,'matching option open order already exists',cfg.port,local,start,None,0,None,None,0,None,start,False,tuple(discovery_errors)+tuple(p.errors))
-        c=_contract(candidate); buy=int(p.next_id); p.done.clear(); p.placeOrder(buy,c,_order('BUY','stock_v2-option-paper-e2e-buy')); sent=True; p.done.wait(timeout); bs=p.statuses.get(buy)
-        if bs is None or bs[0]!='FILLED' or abs(bs[1]-1)>1e-9:
-            end=_refresh(p,local,timeout); return OptionPaperRoundTripResult(True,'BUY outcome is not a confirmed full fill; no automatic resend/SELL performed',cfg.port,local,start,buy,0 if bs is None else bs[1],None if bs is None else bs[2],None,0,None,end,bool(end is not None and abs(end)<=1e-9),tuple(discovery_errors)+tuple(p.errors),True,False)
-        held=_refresh(p,local,timeout)
-        if held is None or abs(held-1)>1e-9: return OptionPaperRoundTripResult(True,'BUY filled but broker position did not verify exactly +1; close not sent',cfg.port,local,start,buy,bs[1],bs[2],None,0,None,held,False,tuple(discovery_errors)+tuple(p.errors),True,False)
-        if _open(p,local,timeout): return OptionPaperRoundTripResult(True,'unexpected matching open order after BUY; close not sent',cfg.port,local,start,buy,bs[1],bs[2],None,0,None,held,False,tuple(discovery_errors)+tuple(p.errors),True,False)
-        sell=buy+1; p.done.clear(); p.placeOrder(sell,c,_order('SELL','stock_v2-option-paper-e2e-flat')); p.done.wait(timeout); ss=p.statuses.get(sell); end=None
-        for _ in range(4):
-            end=_refresh(p,local,timeout)
-            if end is not None and abs(end)<=1e-9: break
-            time.sleep(1)
-        flat=bool(end is not None and abs(end)<=1e-9)
-        return OptionPaperRoundTripResult(True,'option Paper round-trip completed and broker is flat' if flat else 'SELL sent but broker flat state is not confirmed; no automatic resend',cfg.port,local,start,buy,bs[1],bs[2],sell,0 if ss is None else ss[1],None if ss is None else ss[2],end,flat,tuple(discovery_errors)+tuple(p.errors),sent,False)
+        return _position_quantity(probe)
     finally:
-        if p.isConnected(): p.disconnect()
+        probe.cancelPositions()
 
-def main():
-    r=run_option_paper_roundtrip(); print('===== IBKR PAPER SPY OPTION ROUND-TRIP E2E =====')
-    for k,v in [('ATTEMPTED',r.attempted),('REASON',r.reason),('ENDPOINT PORT',r.endpoint_port),('LOCAL SYMBOL',r.local_symbol),('START QTY',r.start_quantity),('BUY ORDER ID',r.buy_order_id),('BUY FILLED',r.buy_filled),('BUY AVG PRICE',r.buy_avg_price),('SELL ORDER ID',r.sell_order_id),('SELL FILLED',r.sell_filled),('SELL AVG PRICE',r.sell_avg_price),('END QTY',r.end_quantity),('BROKER FLAT AFTER',r.broker_flat_after),('ERRORS',list(r.errors)),('REAL PAPER ORDER SENT',r.real_paper_order_sent),('LIVE ORDER SENT',r.live_order_sent)]: print(f'{k:22}:',v)
-    return 0 if r.attempted and r.broker_flat_after and not r.live_order_sent else 2
-if __name__=='__main__': raise SystemExit(main())
+
+def _matching_open_order_exists(probe: _Probe, timeout: float) -> bool:
+    probe.open_orders.clear()
+    probe.open_ready.clear()
+    probe.reqOpenOrders()
+    if not probe.open_ready.wait(timeout):
+        raise RuntimeError("open-order verification timed out")
+    return any(
+        local == LOCAL_SYMBOL.upper() and sec_type == "OPT"
+        for local, sec_type, _ in probe.open_orders
+    )
+
+
+def _empty(reason: str) -> OptionPaperRoundTripResult:
+    return OptionPaperRoundTripResult(
+        attempted=False,
+        reason=reason,
+        endpoint_port=None,
+        local_symbol=None,
+        start_quantity=None,
+        buy_order_id=None,
+        buy_filled=0.0,
+        buy_avg_price=None,
+        sell_order_id=None,
+        sell_filled=0.0,
+        sell_avg_price=None,
+        end_quantity=None,
+        broker_flat_after=False,
+    )
+
+
+def run_option_paper_roundtrip(*, timeout: float = 25.0) -> OptionPaperRoundTripResult:
+    if not SETTINGS.enable_ibkr_paper:
+        return _empty("IBKR Paper is not explicitly enabled")
+    if SETTINGS.enable_live_trading or SETTINGS.live_trading_unlocked:
+        return _empty("Live Trading safety lock is not intact")
+    if os.getenv("IBKR_OPTION_E2E_CONFIRM", "").strip() != CONFIRMATION_TEXT:
+        return _empty("exact SPY option Paper E2E confirmation is missing")
+
+    endpoint_port, candidate, discovery_errors = _verified_target()
+    if candidate is None:
+        return OptionPaperRoundTripResult(
+            False,
+            "exact proven SPY option identity was not returned by broker",
+            endpoint_port,
+            None,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            False,
+            discovery_errors,
+        )
+
+    cfg = create_ibkr_paper_config(use_gateway=(endpoint_port == 4002))
+    probe = _Probe()
+    local_symbol = str(candidate.local_symbol)
+    sent_any = False
+    start_qty: float | None = None
+    end_qty: float | None = None
+    try:
+        probe.connect(cfg.host, cfg.port, cfg.client_id + 296)
+        Thread(
+            target=run_ibapi_message_loop_safely,
+            kwargs={"client": probe, "errors": probe.errors},
+            daemon=True,
+        ).start()
+        if not probe.ready.wait(timeout) or probe.next_id is None:
+            return OptionPaperRoundTripResult(
+                False,
+                "IBKR Paper handshake failed",
+                cfg.port,
+                local_symbol,
+                None,
+                None,
+                0.0,
+                None,
+                None,
+                0.0,
+                None,
+                None,
+                False,
+                discovery_errors + tuple(probe.errors),
+            )
+
+        start_qty = _refresh_positions(probe, timeout)
+        if start_qty is None:
+            return OptionPaperRoundTripResult(
+                False,
+                "starting broker position snapshot timed out",
+                cfg.port,
+                local_symbol,
+                None,
+                None,
+                0.0,
+                None,
+                None,
+                0.0,
+                None,
+                None,
+                False,
+                discovery_errors + tuple(probe.errors),
+            )
+        if abs(start_qty) > 1e-9:
+            return OptionPaperRoundTripResult(
+                False,
+                f"option broker position must start flat; found {start_qty:g}",
+                cfg.port,
+                local_symbol,
+                start_qty,
+                None,
+                0.0,
+                None,
+                None,
+                0.0,
+                None,
+                start_qty,
+                False,
+                discovery_errors + tuple(probe.errors),
+            )
+        if _matching_open_order_exists(probe, timeout):
+            return OptionPaperRoundTripResult(
+                False,
+                "matching option open order already exists",
+                cfg.port,
+                local_symbol,
+                start_qty,
+                None,
+                0.0,
+                None,
+                None,
+                0.0,
+                None,
+                start_qty,
+                False,
+                discovery_errors + tuple(probe.errors),
+            )
+
+        contract = _contract(candidate)
+        buy_order_id = int(probe.next_id)
+        probe.done.clear()
+        probe.placeOrder(
+            buy_order_id,
+            contract,
+            _market_order("BUY", "stock_v2-option-paper-e2e-buy"),
+        )
+        sent_any = True
+        probe.done.wait(timeout)
+        buy_status = probe.statuses.get(buy_order_id)
+        if (
+            buy_status is None
+            or buy_status[0] != "FILLED"
+            or abs(buy_status[1] - QUANTITY) > 1e-9
+        ):
+            end_qty = _refresh_positions(probe, timeout)
+            return OptionPaperRoundTripResult(
+                True,
+                "BUY outcome is not a confirmed full fill; no automatic resend/SELL performed",
+                cfg.port,
+                local_symbol,
+                start_qty,
+                buy_order_id,
+                0.0 if buy_status is None else buy_status[1],
+                None if buy_status is None else buy_status[2],
+                None,
+                0.0,
+                None,
+                end_qty,
+                bool(end_qty is not None and abs(end_qty) <= 1e-9),
+                discovery_errors + tuple(probe.errors),
+                True,
+                False,
+            )
+
+        held_qty = _refresh_positions(probe, timeout)
+        if held_qty is None or abs(held_qty - QUANTITY) > 1e-9:
+            return OptionPaperRoundTripResult(
+                True,
+                "BUY filled but broker position did not verify exactly +1; close not sent",
+                cfg.port,
+                local_symbol,
+                start_qty,
+                buy_order_id,
+                buy_status[1],
+                buy_status[2],
+                None,
+                0.0,
+                None,
+                held_qty,
+                False,
+                discovery_errors + tuple(probe.errors),
+                True,
+                False,
+            )
+        if _matching_open_order_exists(probe, timeout):
+            return OptionPaperRoundTripResult(
+                True,
+                "unexpected matching option open order exists after BUY; close not sent",
+                cfg.port,
+                local_symbol,
+                start_qty,
+                buy_order_id,
+                buy_status[1],
+                buy_status[2],
+                None,
+                0.0,
+                None,
+                held_qty,
+                False,
+                discovery_errors + tuple(probe.errors),
+                True,
+                False,
+            )
+
+        sell_order_id = buy_order_id + 1
+        probe.done.clear()
+        probe.placeOrder(
+            sell_order_id,
+            contract,
+            _market_order("SELL", "stock_v2-option-paper-e2e-flat"),
+        )
+        probe.done.wait(timeout)
+        sell_status = probe.statuses.get(sell_order_id)
+
+        for _ in range(4):
+            end_qty = _refresh_positions(probe, timeout)
+            if end_qty is not None and abs(end_qty) <= 1e-9:
+                break
+            time.sleep(1.0)
+
+        flat = bool(end_qty is not None and abs(end_qty) <= 1e-9)
+        return OptionPaperRoundTripResult(
+            True,
+            "option Paper round-trip completed and broker is flat"
+            if flat
+            else "SELL sent but broker flat state is not confirmed; no automatic resend",
+            cfg.port,
+            local_symbol,
+            start_qty,
+            buy_order_id,
+            buy_status[1],
+            buy_status[2],
+            sell_order_id,
+            0.0 if sell_status is None else sell_status[1],
+            None if sell_status is None else sell_status[2],
+            end_qty,
+            flat,
+            discovery_errors + tuple(probe.errors),
+            sent_any,
+            False,
+        )
+    finally:
+        if probe.isConnected():
+            probe.disconnect()
+
+
+def main() -> int:
+    result = run_option_paper_roundtrip()
+    print("===== IBKR PAPER SPY OPTION ROUND-TRIP E2E =====")
+    print("ATTEMPTED             :", result.attempted)
+    print("REASON                :", result.reason)
+    print("ENDPOINT PORT         :", result.endpoint_port)
+    print("LOCAL SYMBOL          :", result.local_symbol)
+    print("START QTY             :", result.start_quantity)
+    print("BUY ORDER ID          :", result.buy_order_id)
+    print("BUY FILLED            :", result.buy_filled)
+    print("BUY AVG PRICE         :", result.buy_avg_price)
+    print("SELL ORDER ID         :", result.sell_order_id)
+    print("SELL FILLED           :", result.sell_filled)
+    print("SELL AVG PRICE        :", result.sell_avg_price)
+    print("END QTY               :", result.end_quantity)
+    print("BROKER FLAT AFTER     :", result.broker_flat_after)
+    print("ERRORS                :", list(result.errors))
+    print("REAL PAPER ORDER SENT :", result.real_paper_order_sent)
+    print("LIVE ORDER SENT       :", result.live_order_sent)
+    return 0 if result.attempted and result.broker_flat_after and not result.live_order_sent else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
