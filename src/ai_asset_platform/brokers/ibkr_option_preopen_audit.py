@@ -47,6 +47,7 @@ class OptionPreopenAuditResult:
     errors: tuple[str, ...] = field(default_factory=tuple)
     real_order_sent: bool = False
     live_order_sent: bool = False
+    exact_execution_details: tuple[str, ...] = field(default_factory=tuple)
 
 
 class _AllOpenOrdersProbe(EWrapper, EClient):
@@ -121,9 +122,9 @@ def _all_open_orders(*, timeout: float = 15.0) -> tuple[bool, int | None, int, t
             probe.disconnect()
 
 
-def _exact_execution_count(snapshot) -> int:
-    return sum(
-        1
+def _exact_execution_rows(snapshot):
+    return [
+        row
         for row in snapshot.executions
         if row.sec_type == "OPT"
         and (row.local_symbol or "").upper() == LOCAL_SYMBOL.upper()
@@ -131,6 +132,19 @@ def _exact_execution_count(snapshot) -> int:
         and (row.expiry or "") == EXPIRY
         and (row.multiplier or "") == MULTIPLIER
         and bool(row.exec_id)
+    ]
+
+
+def _exact_execution_count(snapshot) -> int:
+    return len(_exact_execution_rows(snapshot))
+
+
+def _exact_execution_details(snapshot) -> tuple[str, ...]:
+    rows = _exact_execution_rows(snapshot)
+    return tuple(
+        f"side={row.side} qty={row.quantity:g} price={row.price:g} "
+        f"order_id={row.order_id} exec_id={row.exec_id} time={row.time or 'UNKNOWN'}"
+        for row in sorted(rows, key=lambda item: (str(item.time), int(item.order_id), str(item.exec_id)))
     )
 
 
@@ -160,6 +174,7 @@ def run_option_preopen_audit(*, timeout: float = 15.0) -> OptionPreopenAuditResu
     snapshot = preview_ibkr_paper_execution_snapshot(timeout=timeout)
     errors.extend(snapshot.errors)
     exact_exec_count = _exact_execution_count(snapshot) if snapshot.ready else 0
+    exact_exec_details = _exact_execution_details(snapshot) if snapshot.ready else ()
 
     prior = run_option_postfill_audit(wait_seconds=0.2)
     prior_recovered = prior.ready
@@ -207,6 +222,7 @@ def run_option_preopen_audit(*, timeout: float = 15.0) -> OptionPreopenAuditResu
         tuple(errors),
         False,
         False,
+        exact_exec_details,
     )
 
 
@@ -227,6 +243,8 @@ def main() -> int:
     print("MATCHING OPEN ORDER COUNT   :", result.matching_open_order_count)
     print("EXECUTION SNAPSHOT READY    :", result.execution_snapshot_ready)
     print("EXACT HISTORICAL EXECUTIONS :", result.exact_execution_count)
+    for index, detail in enumerate(result.exact_execution_details, start=1):
+        print(f"EXACT EXECUTION {index:<12}:", detail)
     print("PRIOR ROUNDTRIP RECOVERED   :", result.prior_roundtrip_recovered)
     print("PRIOR REALIZED PNL USD      :", result.prior_roundtrip_realized_pnl_usd)
     print("ERRORS                      :", list(result.errors))
