@@ -30,3 +30,23 @@ def isolate_signal_runner_decision_report(monkeypatch, tmp_path):
         "generate_decision_log_report",
         generate_temporary_report,
     )
+
+
+@pytest.fixture(autouse=True)
+def isolate_signal_runner_daily_state(monkeypatch, request):
+    """Keep signal-runner unit tests independent of durable daily order state."""
+
+    if request.node.fspath.basename != "test_signal_runner_final_decision.py":
+        return
+
+    import signal_runner
+
+    monkeypatch.setattr(signal_runner, "calculate_daily_buy_order_count", lambda: 0)
+    monkeypatch.setattr(signal_runner, "calculate_daily_sell_order_count", lambda: 0)
+    monkeypatch.setattr(signal_runner, "calculate_daily_realized_pnl", lambda: 0.0)
+    monkeypatch.setattr(signal_runner, "calculate_daily_trading_amount", lambda: 0.0)
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_repurchase_cooldown_remaining_minutes",
+        lambda *args, **kwargs: 0,
+    )
