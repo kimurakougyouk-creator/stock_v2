@@ -15,6 +15,7 @@ from ibapi.contract import Contract, ContractDetails
 from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
+from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
 
 
 @dataclass(frozen=True)
@@ -131,7 +132,11 @@ def discover_ibkr_paper_crypto(
         probe = _CryptoDiscoveryProbe()
         try:
             probe.connect(cfg.host, cfg.port, cfg.client_id + 260)
-            Thread(target=probe.run, daemon=True).start()
+            Thread(
+                target=run_ibapi_message_loop_safely,
+                kwargs={"client": probe, "errors": probe.errors},
+                daemon=True,
+            ).start()
             ready = probe.connected_ready.wait(timeout)
             if not ready or probe.fatal_error:
                 connection_errors.extend(probe.errors)
