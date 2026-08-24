@@ -25,6 +25,9 @@ class IbkrFxCandidate:
     local_symbol: str | None
     con_id: int | None
     min_tick: float | None
+    min_size: float | None
+    size_increment: float | None
+    suggested_size_increment: float | None
     valid_exchanges: str | None
     order_types: str | None
     time_zone_id: str | None
@@ -76,12 +79,7 @@ class _FxDiscoveryProbe(EWrapper, EClient):
             self.details_ready.set()
 
 
-def build_fx_discovery_contract(
-    *,
-    base_currency: str,
-    quote_currency: str,
-    exchange: str,
-) -> Contract:
+def build_fx_discovery_contract(*, base_currency: str, quote_currency: str, exchange: str) -> Contract:
     base = str(base_currency).strip().upper()
     quote = str(quote_currency).strip().upper()
     venue = str(exchange).strip().upper()
@@ -93,7 +91,6 @@ def build_fx_discovery_contract(
         raise ValueError("FX exchange is required")
     if base == quote:
         raise ValueError("FX base and quote currencies must differ")
-
     contract = Contract()
     contract.symbol = base
     contract.secType = "CASH"
@@ -102,17 +99,27 @@ def build_fx_discovery_contract(
     return contract
 
 
+def _positive_optional(value) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _candidate(details: ContractDetails) -> IbkrFxCandidate:
     contract = details.contract
     con_id_value = int(getattr(contract, "conId", 0) or 0)
-    min_tick_value = float(getattr(details, "minTick", 0.0) or 0.0)
     return IbkrFxCandidate(
         base_currency=str(getattr(contract, "symbol", "") or ""),
         quote_currency=str(getattr(contract, "currency", "") or ""),
         exchange=str(getattr(contract, "exchange", "") or ""),
         local_symbol=(str(getattr(contract, "localSymbol", "") or "") or None),
         con_id=con_id_value if con_id_value > 0 else None,
-        min_tick=min_tick_value if min_tick_value > 0 else None,
+        min_tick=_positive_optional(getattr(details, "minTick", None)),
+        min_size=_positive_optional(getattr(details, "minSize", None)),
+        size_increment=_positive_optional(getattr(details, "sizeIncrement", None)),
+        suggested_size_increment=_positive_optional(getattr(details, "suggestedSizeIncrement", None)),
         valid_exchanges=(str(getattr(details, "validExchanges", "") or "") or None),
         order_types=(str(getattr(details, "orderTypes", "") or "") or None),
         time_zone_id=(str(getattr(details, "timeZoneId", "") or "") or None),
@@ -122,20 +129,13 @@ def _candidate(details: ContractDetails) -> IbkrFxCandidate:
 
 
 def discover_ibkr_paper_fx(
-    *,
-    base_currency: str,
-    quote_currency: str,
-    exchange: str,
-    timeout: float = 10.0,
+    *, base_currency: str, quote_currency: str, exchange: str, timeout: float = 10.0
 ) -> IbkrFxDiscoveryResult:
     """Discover one explicit FX pair through Paper ContractDetails only."""
     contract = build_fx_discovery_contract(
-        base_currency=base_currency,
-        quote_currency=quote_currency,
-        exchange=exchange,
+        base_currency=base_currency, quote_currency=quote_currency, exchange=exchange
     )
     connection_errors: list[str] = []
-
     for use_gateway in (True, False):
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
         probe = _FxDiscoveryProbe()
@@ -146,31 +146,21 @@ def discover_ibkr_paper_fx(
             if not ready or probe.fatal_error:
                 connection_errors.extend(probe.errors)
                 continue
-
             probe.reqContractDetails(1, contract)
             probe.details_ready.wait(timeout)
             candidates = tuple(_candidate(item) for item in probe.details)
             return IbkrFxDiscoveryResult(
-                connected=True,
-                endpoint_port=cfg.port,
-                base_currency=contract.symbol,
-                quote_currency=contract.currency,
-                exchange=contract.exchange,
-                candidates=candidates,
-                order_sent=False,
+                connected=True, endpoint_port=cfg.port,
+                base_currency=contract.symbol, quote_currency=contract.currency,
+                exchange=contract.exchange, candidates=candidates, order_sent=False,
                 errors=tuple(connection_errors + probe.errors),
             )
         finally:
             if probe.isConnected():
                 probe.disconnect()
-
     return IbkrFxDiscoveryResult(
-        connected=False,
-        endpoint_port=None,
-        base_currency=contract.symbol,
-        quote_currency=contract.currency,
-        exchange=contract.exchange,
-        candidates=(),
-        order_sent=False,
+        connected=False, endpoint_port=None,
+        base_currency=contract.symbol, quote_currency=contract.currency,
+        exchange=contract.exchange, candidates=(), order_sent=False,
         errors=tuple(connection_errors),
     )
