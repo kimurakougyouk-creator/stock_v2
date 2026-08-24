@@ -8,13 +8,14 @@ from ticker punctuation or a market-wide default.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from threading import Event, Thread
+from threading import Event
 
 from ibapi.client import EClient
 from ibapi.contract import Contract, ContractDetails
 from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
+from ai_asset_platform.brokers.ibkr_probe_thread import start_guarded_ibapi_loop
 
 
 @dataclass(frozen=True)
@@ -139,11 +140,22 @@ def discover_ibkr_paper_global_stock(
     for use_gateway in (True, False):
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
         probe = _GlobalStockProbe()
+        thread = None
+        thread_state = None
         try:
-            probe.connect(cfg.host, cfg.port, cfg.client_id + 230)
-            Thread(target=probe.run, daemon=True).start()
+            try:
+                probe.connect(cfg.host, cfg.port, cfg.client_id + 230)
+            except OSError as exc:
+                connection_errors.append(f"{cfg.port}: {exc}")
+                continue
+            thread, thread_state = start_guarded_ibapi_loop(
+                probe.run,
+                name=f"ibkr-global-stock-{cfg.port}",
+            )
             ready = probe.connected_ready.wait(timeout)
             if not ready or probe.fatal_error:
+                if thread_state.exception:
+                    connection_errors.append(f"{cfg.port}: message-loop {thread_state.exception}")
                 connection_errors.extend(probe.errors)
                 continue
             probe.reqContractDetails(1, contract)
@@ -158,6 +170,8 @@ def discover_ibkr_paper_global_stock(
         finally:
             if probe.isConnected():
                 probe.disconnect()
+            if thread is not None:
+                thread.join(timeout=1.0)
     return IbkrGlobalStockDiscoveryResult(
         connected=False, endpoint_port=None,
         symbol=contract.symbol, exchange=contract.exchange, currency=contract.currency,
