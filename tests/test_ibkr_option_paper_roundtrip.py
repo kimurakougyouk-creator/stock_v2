@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from ai_asset_platform.brokers import ibkr_option_paper_roundtrip as flow
 
 
@@ -88,6 +90,27 @@ def test_ready_requires_confirmed_buy_sell_and_flat():
     assert _result(broker_flat_after=False).ready is False
     assert _result(real_paper_order_sent=False).ready is False
     assert _result(live_order_sent=True).ready is False
+
+
+def test_position_snapshot_allows_identical_duplicate_callbacks():
+    probe = SimpleNamespace(
+        positions=[
+            (flow.LOCAL_SYMBOL.upper(), "OPT", 0.0),
+            (flow.LOCAL_SYMBOL.upper(), "OPT", 0.0),
+        ]
+    )
+    assert flow._position_quantity(probe) == 0.0
+
+
+def test_position_snapshot_fails_closed_on_conflicting_duplicates():
+    probe = SimpleNamespace(
+        positions=[
+            (flow.LOCAL_SYMBOL.upper(), "OPT", 0.0),
+            (flow.LOCAL_SYMBOL.upper(), "OPT", 1.0),
+        ]
+    )
+    with pytest.raises(RuntimeError, match="conflicting matching SPY option position quantities"):
+        flow._position_quantity(probe)
 
 
 def test_missing_confirmation_fails_before_broker_access(monkeypatch):
