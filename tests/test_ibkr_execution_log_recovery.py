@@ -88,6 +88,28 @@ def test_recovery_requires_broker_and_log_agreement(monkeypatch, tmp_path):
     assert observed["snapshot"].order_sent is False
 
 
+def test_recovery_accepts_small_broker_average_cost_fee_delta(monkeypatch, tmp_path):
+    execution_log = tmp_path / "snapshot.log"
+    order_log = tmp_path / "orders.jsonl"
+    _write_execution_log(execution_log, price=765.45)
+    monkeypatch.setattr(recovery.order_manager, "load_accounting_orders", lambda: [])
+
+    called = {"value": False}
+
+    def fake_reconcile(snapshot, *, order_log_path):
+        called["value"] = True
+        return ReconciliationResult(1, 0, ())
+
+    monkeypatch.setattr(recovery, "reconcile_execution_snapshot_to_ledger", fake_reconcile)
+    result = recovery.recover_spy_execution_from_log(
+        execution_log_path=execution_log,
+        order_log_path=order_log,
+        account=_account(average_cost=766.10),
+    )
+    assert result.recovered is True
+    assert called["value"] is True
+
+
 def test_recovery_fails_closed_when_average_cost_disagrees(monkeypatch, tmp_path):
     execution_log = tmp_path / "snapshot.log"
     _write_execution_log(execution_log, price=700.0)
