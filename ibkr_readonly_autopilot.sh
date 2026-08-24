@@ -17,7 +17,9 @@ while true; do
     if [[ -f .venv/bin/activate ]]; then
       source .venv/bin/activate
       export PYTHONPATH="$PWD/src:$PWD"
-      bash ./ibkr_auto.sh
+      bash ./ibkr_auto.sh || echo "CHECKPOINT NOT READY: read-only checkpoint returned non-zero"
+      python -m ai_asset_platform.brokers.ibkr_multiasset_readonly_audit \
+        || echo "MULTI-ASSET NOT READY: read-only ContractDetails audit returned non-zero"
     else
       echo "SKIP: .venv/bin/activate not found. No order was sent."
     fi
