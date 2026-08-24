@@ -26,6 +26,9 @@ class IbkrGlobalStockCandidate:
     currency: str
     con_id: int | None
     min_tick: float | None
+    min_size: float | None
+    size_increment: float | None
+    suggested_size_increment: float | None
     valid_exchanges: str | None
     order_types: str | None
     time_zone_id: str | None
@@ -77,12 +80,7 @@ class _GlobalStockProbe(EWrapper, EClient):
             self.details_ready.set()
 
 
-def build_global_stock_discovery_contract(
-    *,
-    symbol: str,
-    exchange: str,
-    currency: str,
-) -> Contract:
+def build_global_stock_discovery_contract(*, symbol: str, exchange: str, currency: str) -> Contract:
     normalized_symbol = str(symbol).strip().upper()
     normalized_exchange = str(exchange).strip().upper()
     normalized_currency = str(currency).strip().upper()
@@ -92,7 +90,6 @@ def build_global_stock_discovery_contract(
         raise ValueError("stock exchange is required")
     if not normalized_currency:
         raise ValueError("stock currency is required")
-
     contract = Contract()
     contract.symbol = normalized_symbol
     contract.secType = "STK"
@@ -101,20 +98,28 @@ def build_global_stock_discovery_contract(
     return contract
 
 
+def _positive_optional(value) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _candidate(details: ContractDetails) -> IbkrGlobalStockCandidate:
     contract = details.contract
     con_id_value = int(getattr(contract, "conId", 0) or 0)
-    min_tick_value = float(getattr(details, "minTick", 0.0) or 0.0)
     return IbkrGlobalStockCandidate(
         symbol=str(getattr(contract, "symbol", "") or ""),
         local_symbol=(str(getattr(contract, "localSymbol", "") or "") or None),
         exchange=str(getattr(contract, "exchange", "") or ""),
-        primary_exchange=(
-            str(getattr(contract, "primaryExchange", "") or "") or None
-        ),
+        primary_exchange=(str(getattr(contract, "primaryExchange", "") or "") or None),
         currency=str(getattr(contract, "currency", "") or ""),
         con_id=con_id_value if con_id_value > 0 else None,
-        min_tick=min_tick_value if min_tick_value > 0 else None,
+        min_tick=_positive_optional(getattr(details, "minTick", None)),
+        min_size=_positive_optional(getattr(details, "minSize", None)),
+        size_increment=_positive_optional(getattr(details, "sizeIncrement", None)),
+        suggested_size_increment=_positive_optional(getattr(details, "suggestedSizeIncrement", None)),
         valid_exchanges=(str(getattr(details, "validExchanges", "") or "") or None),
         order_types=(str(getattr(details, "orderTypes", "") or "") or None),
         time_zone_id=(str(getattr(details, "timeZoneId", "") or "") or None),
@@ -124,23 +129,13 @@ def _candidate(details: ContractDetails) -> IbkrGlobalStockCandidate:
 
 
 def discover_ibkr_paper_global_stock(
-    *,
-    symbol: str,
-    exchange: str,
-    currency: str,
-    timeout: float = 10.0,
+    *, symbol: str, exchange: str, currency: str, timeout: float = 10.0
 ) -> IbkrGlobalStockDiscoveryResult:
-    """Resolve an explicit non-US/global stock through Paper ContractDetails only.
-
-    Gateway Paper 4002 is attempted first and TWS Paper 7497 second. Fallback
-    happens only before the ContractDetails request; after a connection is ready,
-    the request remains on that one session. No order path is present here.
-    """
+    """Resolve an explicit non-US/global stock through Paper ContractDetails only."""
     contract = build_global_stock_discovery_contract(
         symbol=symbol, exchange=exchange, currency=currency
     )
     connection_errors: list[str] = []
-
     for use_gateway in (True, False):
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
         probe = _GlobalStockProbe()
@@ -151,31 +146,20 @@ def discover_ibkr_paper_global_stock(
             if not ready or probe.fatal_error:
                 connection_errors.extend(probe.errors)
                 continue
-
             probe.reqContractDetails(1, contract)
             probe.details_ready.wait(timeout)
             candidates = tuple(_candidate(item) for item in probe.details)
             return IbkrGlobalStockDiscoveryResult(
-                connected=True,
-                endpoint_port=cfg.port,
-                symbol=contract.symbol,
-                exchange=contract.exchange,
-                currency=contract.currency,
-                candidates=candidates,
-                order_sent=False,
+                connected=True, endpoint_port=cfg.port,
+                symbol=contract.symbol, exchange=contract.exchange, currency=contract.currency,
+                candidates=candidates, order_sent=False,
                 errors=tuple(connection_errors + probe.errors),
             )
         finally:
             if probe.isConnected():
                 probe.disconnect()
-
     return IbkrGlobalStockDiscoveryResult(
-        connected=False,
-        endpoint_port=None,
-        symbol=contract.symbol,
-        exchange=contract.exchange,
-        currency=contract.currency,
-        candidates=(),
-        order_sent=False,
-        errors=tuple(connection_errors),
+        connected=False, endpoint_port=None,
+        symbol=contract.symbol, exchange=contract.exchange, currency=contract.currency,
+        candidates=(), order_sent=False, errors=tuple(connection_errors),
     )
