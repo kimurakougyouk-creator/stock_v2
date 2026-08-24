@@ -161,7 +161,10 @@ def run_option_whatif(*, timeout: float = 15.0) -> OptionWhatIfResult:
         order.lmtPrice = 0.01
         order.tif = "DAY"
         order.whatIf = True
-        order.transmit = False
+        # IBKR's What-If validation requires transmit=True together with
+        # whatIf=True. The broker treats this as a preview-only request and
+        # never transmits a real order while whatIf remains true.
+        order.transmit = True
         order.orderRef = "stock_v2-option-whatif"
         probe.placeOrder(int(probe.order_id), contract, order)
         probe.preview.wait(timeout)
