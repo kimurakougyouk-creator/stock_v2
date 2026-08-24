@@ -53,6 +53,24 @@ def test_verified_option_capability_is_scoped_to_spy_long_intraday():
     )
 
 
+def test_verified_future_capability_is_scoped_to_observed_esu6_roundtrip():
+    assert is_verified_paper_capability(
+        market="US_ESU6_FUTURE_LONG_ROUNDTRIP",
+        asset_class=AssetClass.FUTURE,
+        broker="IBKR",
+    )
+    assert not is_verified_paper_capability(
+        market="US_FUTURE",
+        asset_class=AssetClass.FUTURE,
+        broker="IBKR",
+    )
+    assert not is_verified_paper_capability(
+        market="US_ES_FUTURE_SHORT",
+        asset_class=AssetClass.FUTURE,
+        broker="IBKR",
+    )
+
+
 def test_overnight_is_not_promoted_by_regular_us_etf_verification():
     assert not is_verified_paper_capability(
         market="US_OVERNIGHT",
