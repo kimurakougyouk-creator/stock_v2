@@ -205,9 +205,17 @@ def _position_quantity(probe: _Probe) -> float:
         for local, sec_type, qty in probe.positions
         if local == LOCAL_SYMBOL.upper() and sec_type == "OPT"
     ]
-    if len(matches) > 1:
-        raise RuntimeError("multiple matching SPY option positions returned")
-    return 0.0 if not matches else float(matches[0])
+    if not matches:
+        return 0.0
+
+    unique = {round(float(qty), 12) for qty in matches}
+    if len(unique) == 1:
+        return float(matches[-1])
+
+    raise RuntimeError(
+        "conflicting matching SPY option position quantities returned: "
+        + ", ".join(str(qty) for qty in matches)
+    )
 
 
 def _refresh_positions(probe: _Probe, timeout: float) -> float | None:
@@ -507,9 +515,9 @@ def main() -> int:
     print("END QTY               :", result.end_quantity)
     print("BROKER FLAT AFTER     :", result.broker_flat_after)
     print("ERRORS                :", list(result.errors))
+    print("READY                 :", result.ready)
     print("REAL PAPER ORDER SENT :", result.real_paper_order_sent)
     print("LIVE ORDER SENT       :", result.live_order_sent)
-    print("READY                 :", result.ready)
     return 0 if result.ready else 2
 
 
