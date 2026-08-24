@@ -40,7 +40,8 @@ def validate_spy_long_intraday_roundtrip_scope(
     close_side: str,
     start_quantity: float,
     end_quantity: float,
-    trade_date: date,
+    open_date: date,
+    close_date: date,
     expiry: str,
 ) -> bool:
     """Fail closed unless the observed round-trip stays inside verified scope."""
@@ -50,10 +51,12 @@ def validate_spy_long_intraday_roundtrip_scope(
         raise ValueError("verified option scope is long-only BUY then SELL")
     if abs(float(start_quantity)) > 1e-9 or abs(float(end_quantity)) > 1e-9:
         raise ValueError("verified option round-trip must start and end flat")
+    if open_date != close_date:
+        raise ValueError("verified option scope requires same-session close")
     try:
         expiry_date = datetime.strptime(str(expiry), "%Y%m%d").date()
     except ValueError as exc:
         raise ValueError("option expiry must use YYYYMMDD") from exc
-    if trade_date >= expiry_date:
+    if open_date >= expiry_date or close_date >= expiry_date:
         raise ValueError("expiry-day or post-expiry holding is outside verified scope")
     return True
