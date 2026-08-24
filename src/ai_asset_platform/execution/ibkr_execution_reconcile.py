@@ -20,6 +20,13 @@ from ai_asset_platform.brokers.ibkr_execution_snapshot import (
 from ai_asset_platform.brokers.ibkr_fx_historical import preview_ibkr_paper_historical_fx_rate
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
+from ai_asset_platform.execution.ibkr_reconciliation_control import (
+    DEFAULT_RECONCILIATION_EXCLUSION_PATH,
+    DEFAULT_RECONCILIATION_PAUSE_PATH,
+    ReconciliationControlError,
+    load_reconciliation_exclusions,
+    reconciliation_is_paused,
+)
 
 
 @dataclass(frozen=True)
@@ -100,17 +107,16 @@ def _enrich_existing(path: Path, *, exec_id: str, intent: str, rate: float | Non
         ids = [str(v or "").strip() for v in list(record.get("broker_exec_ids") or [])]
         record_intent = str(record.get("order_intent_id", "")).strip()
         if exec_id in ids or record_intent == intent:
+            row_changed = False
             if exec_id not in ids:
                 ids.append(exec_id)
                 record["broker_exec_ids"] = ids
-                changed = True
+                row_changed = True
             if rate is not None and not record.get("fx_to_account_rate"):
                 record["fx_to_account_rate"] = float(rate)
-                changed = True
-            if changed:
-                output.append(json.dumps(record, ensure_ascii=False))
-            else:
-                output.append(line)
+                row_changed = True
+            changed = changed or row_changed
+            output.append(json.dumps(record, ensure_ascii=False) if row_changed else line)
         else:
             output.append(line)
     if changed:
@@ -121,10 +127,29 @@ def _enrich_existing(path: Path, *, exec_id: str, intent: str, rate: float | Non
 
 
 def reconcile_execution_snapshot_to_ledger(
-    snapshot: IbkrPaperExecutionSnapshot, *, order_log_path: Path,
+    snapshot: IbkrPaperExecutionSnapshot,
+    *,
+    order_log_path: Path,
+    exclusion_path: Path = DEFAULT_RECONCILIATION_EXCLUSION_PATH,
+    pause_path: Path = DEFAULT_RECONCILIATION_PAUSE_PATH,
 ) -> ReconciliationResult:
     if not snapshot.ready:
         return ReconciliationResult(0, 0, ("broker execution snapshot is not ready",))
+    if reconciliation_is_paused(path=pause_path):
+        return ReconciliationResult(
+            0,
+            0,
+            ("broker execution reconciliation is paused by a safety lock",),
+        )
+    try:
+        excluded_exec_ids = load_reconciliation_exclusions(path=exclusion_path)
+    except ReconciliationControlError as exc:
+        return ReconciliationResult(
+            0,
+            0,
+            (f"reconciliation exclusion registry is unsafe: {exc}",),
+        )
+
     reconciled = 0
     skipped = 0
     errors: list[str] = []
@@ -133,6 +158,9 @@ def reconcile_execution_snapshot_to_ledger(
         try:
             exec_id = str(execution.exec_id).strip()
             if not exec_id:
+                skipped += 1
+                continue
+            if exec_id in excluded_exec_ids:
                 skipped += 1
                 continue
             intent = _recovery_intent(execution)
