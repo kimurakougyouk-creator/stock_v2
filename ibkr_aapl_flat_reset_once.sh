@@ -19,10 +19,14 @@ fi
 
 source .venv/bin/activate
 export PYTHONPATH="$PWD/src:$PWD"
-# This dedicated wrapper is the explicit Paper-only opt-in. The platform's
-# Live Trading flags remain hard-disabled in PlatformSettings and are not
-# changed here.
-export AI_ASSET_ENABLE_IBKR_PAPER=1
 
+# Run the complete regression suite in the normal default-safe environment.
+# The dedicated IBKR Paper opt-in is applied only to the reset process below,
+# so tests that verify "IBKR Paper is disabled by default" keep their real
+# production semantics and cannot be masked by this wrapper.
 python -m pytest -q
+
+# Explicitly opt in only for this single AAPL Paper reset process.
+# Live Trading remains disabled by PlatformSettings and is never enabled here.
+AI_ASSET_ENABLE_IBKR_PAPER=1 \
 python -m ai_asset_platform.brokers.ibkr_aapl_flat_reset
