@@ -61,6 +61,36 @@ def test_latest_consecutive_pair_is_accounted_with_multiplier_and_restart():
     assert result.broker_flat_verified is True
 
 
+def test_exact_historical_pair_from_real_paper_run_recovers():
+    rows = [
+        _row(
+            exec_id="00020057.6a8c86b2.01.01",
+            order_id=1,
+            side="BUY",
+            price=4.08,
+        ),
+        _row(
+            exec_id="00020057.6a8c86b3.01.01",
+            order_id=2,
+            side="SELL",
+            price=4.07,
+        ),
+    ]
+    result = evaluate_option_postfill_audit(_snapshot(rows), _snapshot(rows), broker_flat=True)
+    assert result.ready is True
+    assert result.selected_buy_order_id == 1
+    assert result.selected_sell_order_id == 2
+    assert result.selected_exec_ids == (
+        "00020057.6a8c86b2.01.01",
+        "00020057.6a8c86b3.01.01",
+    )
+    assert result.realized_pnl_usd == Decimal("-1.00")
+    assert result.unrealized_pnl_usd == Decimal("0")
+    assert result.max_drawdown_usd == Decimal("1.00")
+    assert result.restart_recovery_verified is True
+    assert result.broker_flat_verified is True
+
+
 def test_split_execution_one_contract_is_aggregated():
     rows = [
         _row(exec_id="B1", order_id=9, side="BUY", price=5.00, quantity=0.4),
@@ -70,7 +100,6 @@ def test_split_execution_one_contract_is_aggregated():
     result = evaluate_option_postfill_audit(_snapshot(rows), _snapshot(rows), broker_flat=True)
     assert result.ready is True
     assert result.selected_exec_ids == ("B1", "B2", "S1")
-    # weighted buy = 5.12, sell = 5.30 => +18 USD
     assert result.realized_pnl_usd == Decimal("18.000")
 
 
