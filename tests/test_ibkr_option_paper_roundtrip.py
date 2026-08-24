@@ -16,6 +16,29 @@ def _candidate(**overrides):
     return SimpleNamespace(**values)
 
 
+def _result(**overrides):
+    values = dict(
+        attempted=True,
+        reason="ok",
+        endpoint_port=4002,
+        local_symbol=flow.LOCAL_SYMBOL,
+        start_quantity=0.0,
+        buy_order_id=1,
+        buy_filled=1.0,
+        buy_avg_price=1.0,
+        sell_order_id=2,
+        sell_filled=1.0,
+        sell_avg_price=1.0,
+        end_quantity=0.0,
+        broker_flat_after=True,
+        errors=(),
+        real_paper_order_sent=True,
+        live_order_sent=False,
+    )
+    values.update(overrides)
+    return flow.OptionPaperRoundTripResult(**values)
+
+
 def test_proven_option_identity_is_pinned():
     assert flow.SYMBOL == "SPY"
     assert flow.EXCHANGE == "SMART"
@@ -58,6 +81,15 @@ def test_confirmation_text_is_narrow_and_explicit():
     assert flow.CONFIRMATION_TEXT == "YES_BUY_AND_SELL_ONE_SPY_OPTION_PAPER_TO_FLAT"
 
 
+def test_ready_requires_confirmed_buy_sell_and_flat():
+    assert _result().ready is True
+    assert _result(buy_filled=0.0).ready is False
+    assert _result(sell_filled=0.0).ready is False
+    assert _result(broker_flat_after=False).ready is False
+    assert _result(real_paper_order_sent=False).ready is False
+    assert _result(live_order_sent=True).ready is False
+
+
 def test_missing_confirmation_fails_before_broker_access(monkeypatch):
     monkeypatch.delenv("IBKR_OPTION_E2E_CONFIRM", raising=False)
     monkeypatch.setattr(
@@ -77,6 +109,7 @@ def test_missing_confirmation_fails_before_broker_access(monkeypatch):
     result = flow.run_option_paper_roundtrip(timeout=0.01)
     assert result.attempted is False
     assert "confirmation" in result.reason
+    assert result.ready is False
     assert result.real_paper_order_sent is False
     assert result.live_order_sent is False
 
@@ -100,6 +133,7 @@ def test_live_lock_fails_before_broker_access(monkeypatch):
     result = flow.run_option_paper_roundtrip(timeout=0.01)
     assert result.attempted is False
     assert "Live Trading safety lock" in result.reason
+    assert result.ready is False
     assert result.real_paper_order_sent is False
     assert result.live_order_sent is False
 
