@@ -1,9 +1,9 @@
 """Batch read-only ContractDetails audit for multiple IBKR Paper asset classes.
 
-This module is intentionally non-trading. It only calls existing discovery
-helpers that request ContractDetails and never create or transmit an Order.
-Known explicit audit targets may be supplied by the caller; futures remain
-opt-in so no product is silently assumed.
+This module is intentionally non-trading. It only calls discovery helpers that
+request ContractDetails and then validates whether an exact broker candidate can
+be converted into a fail-closed Contract foundation. It never creates or
+transmits an Order. Futures remain explicit opt-in.
 """
 from __future__ import annotations
 
@@ -14,9 +14,17 @@ from ai_asset_platform.brokers.ibkr_future_discovery import (
     IbkrFutureDiscoveryResult,
     discover_ibkr_paper_futures,
 )
+from ai_asset_platform.brokers.ibkr_fx_contracts import (
+    build_verified_fx_contract,
+    contract_input_from_discovery_candidate as fx_contract_input,
+)
 from ai_asset_platform.brokers.ibkr_fx_discovery import (
     IbkrFxDiscoveryResult,
     discover_ibkr_paper_fx,
+)
+from ai_asset_platform.brokers.ibkr_global_stock_contracts import (
+    build_verified_global_stock_contract,
+    contract_input_from_discovery_candidate as stock_contract_input,
 )
 from ai_asset_platform.brokers.ibkr_global_stock_discovery import (
     IbkrGlobalStockDiscoveryResult,
@@ -41,6 +49,49 @@ class MultiAssetReadonlyAuditResult:
     @property
     def core_resolved(self) -> bool:
         return bool(self.global_stock.resolved and self.fx.resolved and not self.order_sent)
+
+    @property
+    def global_stock_contract_ready(self) -> bool:
+        if not self.global_stock.resolved or len(self.global_stock.candidates) != 1:
+            return False
+        try:
+            spec = stock_contract_input(self.global_stock.candidates[0])
+            contract = build_verified_global_stock_contract(spec)
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            contract.secType == "STK"
+            and contract.symbol
+            and contract.exchange
+            and contract.currency
+            and int(getattr(contract, "conId", 0) or 0) > 0
+        )
+
+    @property
+    def fx_contract_ready(self) -> bool:
+        if not self.fx.resolved or len(self.fx.candidates) != 1:
+            return False
+        try:
+            spec = fx_contract_input(self.fx.candidates[0])
+            contract = build_verified_fx_contract(spec)
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            contract.secType == "CASH"
+            and contract.symbol
+            and contract.exchange
+            and contract.currency
+            and int(getattr(contract, "conId", 0) or 0) > 0
+        )
+
+    @property
+    def core_contracts_ready(self) -> bool:
+        return bool(
+            self.core_resolved
+            and self.global_stock_contract_ready
+            and self.fx_contract_ready
+            and not self.order_sent
+        )
 
 
 def run_multiasset_readonly_audit(
@@ -98,15 +149,18 @@ def main() -> int:
     print("GLOBAL STOCK RESOLVED :", result.global_stock.resolved)
     print("GLOBAL STOCK TARGET   :", f"{result.global_stock.symbol}/{result.global_stock.exchange}/{result.global_stock.currency}")
     print("GLOBAL STOCK COUNT    :", len(result.global_stock.candidates))
+    print("GLOBAL STOCK CONTRACT :", result.global_stock_contract_ready)
     print("FX RESOLVED           :", result.fx.resolved)
     print("FX TARGET             :", f"{result.fx.base_currency}/{result.fx.quote_currency}@{result.fx.exchange}")
     print("FX COUNT              :", len(result.fx.candidates))
+    print("FX CONTRACT           :", result.fx_contract_ready)
     print("FUTURE REQUESTED      :", result.future is not None)
     print("FUTURE RESOLVED       :", result.future.resolved if result.future is not None else None)
     print("FUTURE COUNT          :", len(result.future.candidates) if result.future is not None else 0)
     print("ORDER SENT            :", result.order_sent)
     print("CORE RESOLVED         :", result.core_resolved)
-    return 0 if result.core_resolved and not result.order_sent else 2
+    print("CORE CONTRACTS READY  :", result.core_contracts_ready)
+    return 0 if result.core_contracts_ready and not result.order_sent else 2
 
 
 if __name__ == "__main__":
