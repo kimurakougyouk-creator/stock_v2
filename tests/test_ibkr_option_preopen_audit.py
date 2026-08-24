@@ -38,16 +38,34 @@ def _snapshot(*, ready=True, executions=()):
     return SimpleNamespace(ready=ready, executions=tuple(executions), errors=())
 
 
+def _execution(**overrides):
+    values = dict(
+        sec_type="OPT",
+        local_symbol=audit.LOCAL_SYMBOL,
+        con_id=audit.CON_ID,
+        expiry=audit.EXPIRY,
+        multiplier=audit.MULTIPLIER,
+        exec_id="E1",
+        side="BUY",
+        quantity=1.0,
+        price=4.25,
+        order_id=10,
+        time="20260824 15:59:00 US/Eastern",
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def _prior(*, ready=False, pnl=None):
     return SimpleNamespace(ready=ready, realized_pnl_usd=pnl)
 
 
-def _install_happy(monkeypatch, *, prior_ready=False):
+def _install_happy(monkeypatch, *, prior_ready=False, executions=()):
     monkeypatch.setattr(audit, "SETTINGS", _settings())
     monkeypatch.setattr(audit, "_verified_target", lambda: (4002, _candidate(), ()))
     monkeypatch.setattr(audit, "probe_option_position", lambda timeout=15.0: _position())
     monkeypatch.setattr(audit, "_all_open_orders", lambda timeout=15.0: (True, 4002, 0, ()))
-    monkeypatch.setattr(audit, "preview_ibkr_paper_execution_snapshot", lambda timeout=15.0: _snapshot())
+    monkeypatch.setattr(audit, "preview_ibkr_paper_execution_snapshot", lambda timeout=15.0: _snapshot(executions=executions))
     monkeypatch.setattr(
         audit,
         "run_option_postfill_audit",
@@ -64,6 +82,20 @@ def test_happy_preopen_gate_is_ready_without_order(monkeypatch):
     assert result.execution_snapshot_ready is True
     assert result.real_order_sent is False
     assert result.live_order_sent is False
+
+
+def test_exact_historical_execution_details_are_exposed(monkeypatch):
+    rows = (
+        _execution(),
+        _execution(exec_id="E2", side="SELL", order_id=11, price=4.50, time="20260824 15:59:05 US/Eastern"),
+    )
+    _install_happy(monkeypatch, executions=rows)
+    result = audit.run_option_preopen_audit(timeout=0.01)
+    assert result.exact_execution_count == 2
+    assert "side=BUY" in result.exact_execution_details[0]
+    assert "order_id=10" in result.exact_execution_details[0]
+    assert "side=SELL" in result.exact_execution_details[1]
+    assert "order_id=11" in result.exact_execution_details[1]
 
 
 def test_prior_roundtrip_recovery_is_reported(monkeypatch):

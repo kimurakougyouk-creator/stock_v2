@@ -124,17 +124,22 @@ def _resolve_target():
     return None, None, ()
 
 
-def run_option_whatif(*, timeout: float = 15.0) -> OptionWhatIfResult:
+def run_option_whatif_for_candidate(
+    endpoint_port: int,
+    candidate,
+    *,
+    timeout: float = 15.0,
+    discovery_errors: tuple[str, ...] = (),
+) -> OptionWhatIfResult:
+    """Submit a What-If for one already-resolved exact candidate only."""
     if not SETTINGS.enable_ibkr_paper:
-        return OptionWhatIfResult(False, False, False, None, None, None, None, None, None, None, None, None, None, "IBKR Paper is not explicitly enabled")
+        return OptionWhatIfResult(False, False, False, endpoint_port, None, None, None, None, None, None, None, None, None, "IBKR Paper is not explicitly enabled")
     if SETTINGS.enable_live_trading or SETTINGS.live_trading_unlocked:
-        return OptionWhatIfResult(False, False, False, None, None, None, None, None, None, None, None, None, None, "Live Trading safety lock is not intact")
-
-    endpoint_port, candidate, discovery_errors = _resolve_target()
-    if candidate is None:
+        return OptionWhatIfResult(False, False, False, endpoint_port, None, None, None, None, None, None, None, None, None, "Live Trading safety lock is not intact")
+    if candidate is None or not getattr(candidate, "con_id", None) or not getattr(candidate, "local_symbol", None):
         return OptionWhatIfResult(False, False, False, endpoint_port, None, None, None, None, None, None, None, None, None, None, discovery_errors)
 
-    cfg = create_ibkr_paper_config(use_gateway=(endpoint_port == 4002))
+    cfg = create_ibkr_paper_config(use_gateway=(int(endpoint_port) == 4002))
     probe = _WhatIfProbe()
     try:
         probe.connect(cfg.host, cfg.port, cfg.client_id + 295)
@@ -161,9 +166,6 @@ def run_option_whatif(*, timeout: float = 15.0) -> OptionWhatIfResult:
         order.lmtPrice = 0.01
         order.tif = "DAY"
         order.whatIf = True
-        # IBKR's What-If validation requires transmit=True together with
-        # whatIf=True. The broker treats this as a preview-only request and
-        # never transmits a real order while whatIf remains true.
         order.transmit = True
         order.orderRef = "stock_v2-option-whatif"
         probe.placeOrder(int(probe.order_id), contract, order)
@@ -191,6 +193,23 @@ def run_option_whatif(*, timeout: float = 15.0) -> OptionWhatIfResult:
     finally:
         if probe.isConnected():
             probe.disconnect()
+
+
+def run_option_whatif(*, timeout: float = 15.0) -> OptionWhatIfResult:
+    if not SETTINGS.enable_ibkr_paper:
+        return OptionWhatIfResult(False, False, False, None, None, None, None, None, None, None, None, None, None, "IBKR Paper is not explicitly enabled")
+    if SETTINGS.enable_live_trading or SETTINGS.live_trading_unlocked:
+        return OptionWhatIfResult(False, False, False, None, None, None, None, None, None, None, None, None, None, "Live Trading safety lock is not intact")
+
+    endpoint_port, candidate, discovery_errors = _resolve_target()
+    if candidate is None or endpoint_port is None:
+        return OptionWhatIfResult(False, False, False, endpoint_port, None, None, None, None, None, None, None, None, None, None, discovery_errors)
+    return run_option_whatif_for_candidate(
+        endpoint_port,
+        candidate,
+        timeout=timeout,
+        discovery_errors=discovery_errors,
+    )
 
 
 def main() -> int:
