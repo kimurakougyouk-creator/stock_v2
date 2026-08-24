@@ -4,7 +4,7 @@ Local-ledger recovery only. This module never creates, modifies, cancels, or
 transmits a broker order. Recovery is deliberately narrow and fail-closed:
 current broker Paper state must show exactly one SPY share, local confirmed
 accounting must show zero SPY shares, and a prior execution-snapshot log must
-contain exactly one valid SPY BUY whose price agrees with broker average cost.
+contain exactly one valid SPY BUY whose price agrees with broker cost evidence.
 """
 from __future__ import annotations
 
@@ -101,6 +101,20 @@ def _spy_broker_position(account: IbkrPaperAccountSnapshot):
     return matches[0] if len(matches) == 1 else None
 
 
+def _cost_matches_execution(*, execution_price: float, broker_average_cost: float, quantity: float) -> bool:
+    """Accept only tiny, explainable broker-cost differences for the exact one-share fill.
+
+    IBKR account snapshots may report stock average cost including small per-share
+    commissions/fees while execDetails reports the pure execution price. For this
+    recovery path we allow only a narrow absolute delta, and only for exactly one
+    share, so we still fail closed on materially different broker cost evidence.
+    """
+    if quantity != 1.0 or execution_price <= 0 or broker_average_cost <= 0:
+        return False
+    delta = abs(float(execution_price) - float(broker_average_cost))
+    return delta <= 1.00
+
+
 def recover_spy_execution_from_log(
     *,
     execution_log_path: Path = DEFAULT_EXECUTION_LOG,
@@ -145,8 +159,11 @@ def recover_spy_execution_from_log(
     broker_average_cost = float(position.average_cost)
     if broker_average_cost <= 0:
         return ExecutionLogRecoveryResult(False, "broker SPY average cost is unavailable")
-    tolerance = max(0.05, broker_average_cost * 0.001)
-    if abs(float(execution.price) - broker_average_cost) > tolerance:
+    if not _cost_matches_execution(
+        execution_price=float(execution.price),
+        broker_average_cost=broker_average_cost,
+        quantity=float(execution.quantity),
+    ):
         return ExecutionLogRecoveryResult(
             False, "logged SPY BUY price does not match broker average cost closely enough"
         )
