@@ -31,6 +31,10 @@ class IbkrExecutionEvidence:
     price: float
     time: str
     account: str
+    con_id: int | None = None
+    local_symbol: str | None = None
+    expiry: str | None = None
+    multiplier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,10 +84,14 @@ class _ExecutionSnapshotProbe(EWrapper, EClient):
             price = float(getattr(execution, "price", 0.0) or 0.0)
             order_id = int(getattr(execution, "orderId", 0) or 0)
             perm_id = int(getattr(execution, "permId", 0) or 0)
+            raw_con_id = int(getattr(contract, "conId", 0) or 0)
         except (TypeError, ValueError):
             return
         if quantity <= 0 or price <= 0 or side not in {"BUY", "SELL"}:
             return
+        local_symbol = str(getattr(contract, "localSymbol", "") or "").strip().upper() or None
+        expiry = str(getattr(contract, "lastTradeDateOrContractMonth", "") or "").strip() or None
+        multiplier = str(getattr(contract, "multiplier", "") or "").strip() or None
         self.executions.append(
             IbkrExecutionEvidence(
                 exec_id=str(getattr(execution, "execId", "") or "").strip(),
@@ -103,6 +111,10 @@ class _ExecutionSnapshotProbe(EWrapper, EClient):
                 price=price,
                 time=str(getattr(execution, "time", "") or "").strip(),
                 account=str(getattr(execution, "acctNumber", "") or "").strip(),
+                con_id=raw_con_id if raw_con_id > 0 else None,
+                local_symbol=local_symbol,
+                expiry=expiry,
+                multiplier=multiplier,
             )
         )
 
@@ -185,8 +197,10 @@ def main() -> int:
     print("ORDER SENT      :", result.order_sent)
     for index, item in enumerate(result.executions, start=1):
         print(
-            f"EXECUTION {index}: symbol={item.symbol} side={item.side} qty={item.quantity:g} "
+            f"EXECUTION {index}: symbol={item.symbol} local_symbol={item.local_symbol or 'UNKNOWN'} "
+            f"sec_type={item.sec_type or 'UNKNOWN'} side={item.side} qty={item.quantity:g} "
             f"price={item.price:g} currency={item.currency or 'UNKNOWN'} exchange={item.exchange or 'UNKNOWN'} "
+            f"con_id={item.con_id or 'UNKNOWN'} expiry={item.expiry or 'UNKNOWN'} multiplier={item.multiplier or 'UNKNOWN'} "
             f"order_id={item.order_id} perm_id={item.perm_id} exec_id={item.exec_id or 'UNKNOWN'} time={item.time or 'UNKNOWN'}"
         )
     print("ERRORS          :", list(result.errors))
