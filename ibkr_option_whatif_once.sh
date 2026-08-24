@@ -5,4 +5,4 @@ git switch main
 git pull --ff-only origin main
 source .venv/bin/activate
 python -m pytest -q
-IBKR_PAPER_ENABLED=1 python -m ai_asset_platform.brokers.ibkr_option_whatif
+AI_ASSET_ENABLE_IBKR_PAPER=1 python -m ai_asset_platform.brokers.ibkr_option_whatif
