@@ -16,6 +16,7 @@ from ibapi.contract import Contract
 from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
+from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
 
 
 @dataclass(frozen=True)
@@ -181,7 +182,6 @@ def _summary_value(probe: _AccountSnapshotProbe, tag: str, base_currency: str | 
         value = probe.summary_values.get((tag, base_currency))
         if value is not None:
             return value
-    # Some TWS versions label base-currency account values as BASE.
     value = probe.account_values.get((tag, "BASE"))
     if value is not None:
         return value
@@ -214,7 +214,11 @@ def preview_ibkr_paper_account_snapshot(*, timeout: float = 10.0) -> IbkrPaperAc
             except OSError as exc:
                 collected.append(f"{cfg.port}: {exc}")
                 continue
-            Thread(target=probe.run, daemon=True).start()
+            Thread(
+                target=run_ibapi_message_loop_safely,
+                kwargs={"client": probe, "errors": probe.errors},
+                daemon=True,
+            ).start()
             if not probe.connected_ready.wait(timeout) or probe.fatal_error:
                 collected.extend(probe.errors)
                 continue

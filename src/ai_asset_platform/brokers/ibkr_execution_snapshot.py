@@ -14,6 +14,7 @@ from ibapi.execution import ExecutionFilter
 from ibapi.wrapper import EWrapper
 
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
+from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,11 @@ def preview_ibkr_paper_execution_snapshot(*, timeout: float = 10.0) -> IbkrPaper
             except OSError as exc:
                 collected.append(f"{cfg.port}: {exc}")
                 continue
-            Thread(target=probe.run, daemon=True).start()
+            Thread(
+                target=run_ibapi_message_loop_safely,
+                kwargs={"client": probe, "errors": probe.errors},
+                daemon=True,
+            ).start()
             if not probe.connected_ready.wait(timeout) or probe.fatal_error:
                 collected.extend(probe.errors)
                 continue
