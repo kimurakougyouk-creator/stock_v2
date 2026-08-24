@@ -39,6 +39,9 @@ class MarketCapability:
 
 # ここには実証済みの能力だけを書く。
 # AAPL (US stock) と SPY (US ETF) はIBKR Paper実Fillまで確認済み。
+# SPY option は一般的な「US option対応」ではなく、
+# 長期保有・exercise/assignment・expiry-dayを含まない
+# 「SPY long-only intraday round-trip」だけを限定的に実証済みとして記録する。
 # Liveは未解禁。Overnightは別ゲートのため、通常US_ETFの検証と混同しない。
 VERIFIED_CAPABILITIES: tuple[MarketCapability, ...] = (
     MarketCapability(
@@ -51,6 +54,13 @@ VERIFIED_CAPABILITIES: tuple[MarketCapability, ...] = (
     MarketCapability(
         market="US_ETF",
         asset_class=AssetClass.ETF,
+        broker="IBKR",
+        paper_supported=True,
+        live_supported=False,
+    ),
+    MarketCapability(
+        market="US_SPY_OPTION_LONG_INTRADAY",
+        asset_class=AssetClass.OPTION,
         broker="IBKR",
         paper_supported=True,
         live_supported=False,

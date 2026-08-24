@@ -35,6 +35,24 @@ def test_verified_ibkr_us_etf_paper_capability():
     )
 
 
+def test_verified_option_capability_is_scoped_to_spy_long_intraday():
+    assert is_verified_paper_capability(
+        market="US_SPY_OPTION_LONG_INTRADAY",
+        asset_class=AssetClass.OPTION,
+        broker="IBKR",
+    )
+    assert not is_verified_paper_capability(
+        market="US_OPTION",
+        asset_class=AssetClass.OPTION,
+        broker="IBKR",
+    )
+    assert not is_verified_paper_capability(
+        market="US_SPY_OPTION_SHORT",
+        asset_class=AssetClass.OPTION,
+        broker="IBKR",
+    )
+
+
 def test_overnight_is_not_promoted_by_regular_us_etf_verification():
     assert not is_verified_paper_capability(
         market="US_OVERNIGHT",
