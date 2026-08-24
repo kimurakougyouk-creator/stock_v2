@@ -13,6 +13,7 @@ from ai_asset_platform.brokers.ibkr_config import (
 )
 from ai_asset_platform.brokers.ibkr_connection import probe_ibkr_paper_connection
 from ai_asset_platform.brokers.ibkr_contracts import build_ibkr_contract_spec, to_ibapi_contract
+from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
 from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.core.asset_classes import AssetClass
 
@@ -88,7 +89,11 @@ def audit_ibkr_paper_etf(
     probe = _ContractDetailsProbe()
     try:
         probe.connect(contract_cfg.host, contract_cfg.port, contract_cfg.client_id)
-        Thread(target=probe.run, daemon=True).start()
+        Thread(
+            target=run_ibapi_message_loop_safely,
+            kwargs={"client": probe, "errors": probe.errors},
+            daemon=True,
+        ).start()
         if not probe.connected_ready.wait(timeout):
             return IbkrEtfAuditResult(
                 True, False, normalized, None, None, None, False,
