@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from threading import Event, Thread
+from threading import Event
 
 from ibapi.client import EClient
 from ibapi.contract import Contract, ContractDetails
@@ -18,6 +18,7 @@ from ai_asset_platform.brokers.ibkr_overnight_order import (
     OvernightPaperOrderSpec,
     prepare_ibkr_overnight_paper_limit_order,
 )
+from ai_asset_platform.brokers.ibkr_probe_thread import start_guarded_ibapi_loop
 from ai_asset_platform.brokers.instruments import InstrumentSpec
 from ai_asset_platform.brokers.orders import OrderSide
 from ai_asset_platform.core.asset_classes import AssetClass
@@ -129,15 +130,25 @@ def _connect_probe_before_any_request(
             continue
         for attempt in range(total_attempts):
             probe = _WhatIfProbe()
-            probe.connect(cfg.host, cfg.port, cfg.client_id + 103)
-            Thread(target=probe.run, daemon=True).start()
+            try:
+                probe.connect(cfg.host, cfg.port, cfg.client_id + 103)
+            except OSError as exc:
+                collected_errors.append(f"port={cfg.port} {exc}")
+                continue
+            thread, thread_state = start_guarded_ibapi_loop(
+                probe.run,
+                name=f"ibkr-whatif-{cfg.port}-{attempt + 1}",
+            )
             ready = probe.connected_ready.wait(timeout)
             if ready and probe.next_order_id is not None and not probe.fatal_error:
                 return probe, cfg, tuple(collected_errors + probe.errors)
 
+            if thread_state.exception:
+                collected_errors.append(f"port={cfg.port} message-loop {thread_state.exception}")
             collected_errors.extend(f"port={cfg.port} {item}" for item in probe.errors)
             if probe.isConnected():
                 probe.disconnect()
+            thread.join(timeout=1.0)
             if attempt + 1 < total_attempts:
                 time.sleep(max(0.0, retry_delay))
 
@@ -258,14 +269,12 @@ def preview_ibkr_paper_overnight_order(
                 primary_exchange=resolved_primary,
             ),
             config=cfg,
-            verified_paper_test_quantity=1,
+            verified_paper_test_quantity=quantity,
         )
         prepared.order.whatIf = True
         prepared.order.transmit = True
-
         probe.placeOrder(probe.next_order_id, prepared.contract, prepared.order)
         probe.preview_ready.wait(timeout)
-
         state = probe.order_state
         if probe.fatal_error or state is None:
             return IbkrOvernightWhatIfResult(
@@ -273,18 +282,15 @@ def preview_ibkr_paper_overnight_order(
                 quantity, float(limit_price), False, None, None, None, None,
                 tuple(connection_errors + tuple(probe.errors)), cfg.port,
             )
-
         commission = getattr(state, "commission", None)
-        if commission is not None:
-            try:
-                commission = float(commission)
-            except (TypeError, ValueError):
-                commission = None
-
+        try:
+            commission_value = float(commission) if commission is not None else None
+        except (TypeError, ValueError):
+            commission_value = None
         return IbkrOvernightWhatIfResult(
             True, True, normalized, resolved_primary, "OVERNIGHT",
             quantity, float(limit_price), False,
-            getattr(state, "maintMarginChange", None), commission,
+            getattr(state, "maintMarginChange", None), commission_value,
             getattr(state, "commissionCurrency", None),
             getattr(state, "warningText", None),
             tuple(connection_errors + tuple(probe.errors)), cfg.port,
@@ -292,38 +298,3 @@ def preview_ibkr_paper_overnight_order(
     finally:
         if probe.isConnected():
             probe.disconnect()
-
-
-def main() -> int:
-    raw_price = os.getenv("IBKR_OVERNIGHT_WHATIF_LIMIT_PRICE", "").strip()
-    if not raw_price:
-        print("IBKR_OVERNIGHT_WHATIF_LIMIT_PRICE is required. No request was sent.")
-        return 2
-    try:
-        price = float(raw_price)
-    except ValueError:
-        print("IBKR_OVERNIGHT_WHATIF_LIMIT_PRICE must be numeric. No request was sent.")
-        return 2
-
-    result = preview_ibkr_paper_overnight_order(limit_price=price)
-    print("===== IBKR PAPER OVERNIGHT WHAT-IF =====")
-    print("CONNECTED          :", result.connected)
-    print("CONNECTED PORT     :", result.connected_port)
-    print("PREVIEW RECEIVED   :", result.preview_received)
-    print("SYMBOL             :", result.symbol)
-    print("PRIMARY EXCHANGE   :", result.primary_exchange)
-    print("DESTINATION        :", result.destination)
-    print("QUANTITY           :", result.quantity)
-    print("LIMIT PRICE        :", result.limit_price)
-    print("ORDER SENT         :", result.order_sent)
-    print("MARGIN CHANGE      :", result.margin_change)
-    print("COMMISSION         :", result.commission)
-    print("COMMISSION CURRENCY:", result.commission_currency)
-    print("WARNING            :", result.warning_text)
-    print("ERRORS             :", list(result.errors))
-    print("OVERALL READY      :", result.ready)
-    return 0 if result.ready else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
