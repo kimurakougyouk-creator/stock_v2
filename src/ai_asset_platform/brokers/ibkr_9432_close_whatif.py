@@ -67,7 +67,6 @@ def preview_9432_close_whatif(*, limit_price: float, timeout: float = 10.0) -> I
             currency=CURRENCY,
             verified_paper_test_quantity=QUANTITY,
         )
-        # Resolve the exact directed TSEJ contract before requesting what-if.
         from ai_asset_platform.brokers.ibkr_contracts import (
             build_ibkr_contract_spec,
             to_ibapi_contract,
@@ -84,9 +83,12 @@ def preview_9432_close_whatif(*, limit_price: float, timeout: float = 10.0) -> I
                 True, False, cfg.port, QUANTITY, float(limit_price), False,
                 errors=tuple(connection_errors + tuple(probe.errors)),
             )
+        resolved_exchange = str(getattr(resolved, "exchange", "") or "").strip().upper()
         if (
             str(getattr(resolved, "symbol", "")).strip().upper() != SYMBOL
+            or resolved_exchange != EXCHANGE
             or str(getattr(resolved, "currency", "")).strip().upper() != CURRENCY
+            or int(getattr(resolved, "conId", 0) or 0) <= 0
         ):
             return Ibkr9432CloseWhatIfResult(
                 True, False, cfg.port, QUANTITY, float(limit_price), False,
