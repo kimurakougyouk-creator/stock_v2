@@ -8,6 +8,7 @@ LOG_DIR="$REPO_DIR/results"
 LATEST_LOG="$LOG_DIR/ibkr_operator_checkpoint_latest.log"
 RECONCILE_LOG="$LOG_DIR/ibkr_execution_reconcile_latest.log"
 RECOVERY_LOG="$LOG_DIR/ibkr_execution_log_recovery_latest.log"
+MULTIASSET_LOG="$LOG_DIR/ibkr_multiasset_readonly_audit_latest.log"
 
 cd "$REPO_DIR"
 
@@ -45,13 +46,11 @@ while True:
     time.sleep(2)
 PY
 
-# First reconcile broker-confirmed execution evidence into the durable local
-# ledger. Current-session execution queries may legitimately return no older
-# fills, so a second fail-closed local-log recovery pass is attempted. That pass
-# can only import one previously captured SPY BUY when the current broker-held
-# position and broker average cost agree with the logged broker execution. It
-# never creates/transmits/cancels broker orders. Then run the normal operator
-# checkpoint against the resulting durable state.
+# Reconcile broker-confirmed execution evidence into durable local state, then
+# run the normal fail-closed operator checkpoint. The final multi-asset pass is
+# ContractDetails/read-only only; it records readiness evidence but is non-fatal
+# because unsupported products must remain unverified rather than breaking the
+# already-verified Paper checkpoint.
 set +e
 python -m ai_asset_platform.execution.ibkr_execution_reconcile 2>&1 | tee "$RECONCILE_LOG"
 reconcile_status=${PIPESTATUS[0]}
@@ -60,15 +59,19 @@ recovery_status=${PIPESTATUS[0]}
 IBKR_OVERNIGHT_WHATIF_LIMIT_PRICE="$LIMIT_PRICE" \
 python -m ai_asset_platform.brokers.ibkr_operator_checkpoint 2>&1 | tee "$LATEST_LOG"
 checkpoint_status=${PIPESTATUS[0]}
+python -m ai_asset_platform.brokers.ibkr_multiasset_readonly_audit 2>&1 | tee "$MULTIASSET_LOG"
+multiasset_status=${PIPESTATUS[0]}
 set -e
 
 echo "RECONCILIATION LOG: $RECONCILE_LOG"
 echo "RECOVERY LOG      : $RECOVERY_LOG"
 echo "CHECKPOINT LOG    : $LATEST_LOG"
+echo "MULTI-ASSET LOG   : $MULTIASSET_LOG"
 if [[ "$reconcile_status" -ne 0 ]]; then
   exit "$reconcile_status"
 fi
-# Recovery is intentionally non-fatal when it is not applicable. Any remaining
-# unsafe broker/local mismatch is fail-closed by the checkpoint itself.
+# Recovery is intentionally non-fatal when not applicable. Multi-asset readiness
+# is also diagnostic-only until each product passes its own explicit Paper gate.
 : "$recovery_status"
+: "$multiasset_status"
 exit "$checkpoint_status"
