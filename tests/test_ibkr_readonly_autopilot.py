@@ -19,6 +19,15 @@ def test_readonly_autopilot_keeps_running_when_audit_is_not_ready():
     assert "sleep \"$INTERVAL_SECONDS\"" in script
 
 
+def test_readonly_autopilot_self_reloads_after_fast_forward():
+    script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
+    assert 'before_head="$(git rev-parse HEAD)"' in script
+    assert 'after_head="$(git rev-parse HEAD)"' in script
+    assert '[[ "$after_head" != "$before_head" ]]' in script
+    assert 'exec /usr/bin/env bash "$REPO_DIR/ibkr_readonly_autopilot.sh"' in script
+    assert script.index("git pull --ff-only origin main") < script.index("exec /usr/bin/env bash")
+
+
 def test_installer_runs_only_readonly_autopilot_service():
     script = Path("install_ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
     assert "ibkr_readonly_autopilot.sh" in script

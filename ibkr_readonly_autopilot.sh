@@ -13,7 +13,13 @@ while true; do
   {
     echo "===== $(date -Is) IBKR READ-ONLY AUTOPILOT ====="
     git switch main
+    before_head="$(git rev-parse HEAD)"
     git pull --ff-only origin main
+    after_head="$(git rev-parse HEAD)"
+    if [[ "$after_head" != "$before_head" ]]; then
+      echo "AUTOPILOT UPDATE: main changed; reloading read-only autopilot from the new revision."
+      exec /usr/bin/env bash "$REPO_DIR/ibkr_readonly_autopilot.sh"
+    fi
     if [[ -f .venv/bin/activate ]]; then
       source .venv/bin/activate
       export PYTHONPATH="$PWD/src:$PWD"
