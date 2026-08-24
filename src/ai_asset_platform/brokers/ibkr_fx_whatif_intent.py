@@ -1,13 +1,14 @@
 """Pure fail-closed intent validation for a future IBKR FX Paper what-if.
 
 This module intentionally does not create an IB API Order and never connects to
-a broker.  It exists to make the ambiguous parts of FX order semantics explicit
+a broker. It exists to make the ambiguous parts of FX order semantics explicit
 before any no-transmit broker preview is attempted.
 
 IBKR exposes both regular order quantity and cash-quantity fields for forex.
-This module therefore never chooses a quantity field implicitly.  The caller
-must explicitly select TOTAL_QUANTITY or CASH_QUANTITY and supply broker-backed
-size constraints when those are available.
+This module therefore never chooses a quantity field implicitly. The caller
+must explicitly select TOTAL_QUANTITY or CASH_QUANTITY. Broker ContractDetails
+size constraints are applied only to TOTAL_QUANTITY here; their applicability
+to CASH_QUANTITY is not assumed.
 """
 from __future__ import annotations
 
@@ -88,14 +89,23 @@ def verify_fx_whatif_intent(spec: FxWhatIfIntentInput) -> VerifiedFxWhatIfIntent
 
     quantity = _positive_decimal(spec.quantity, field="FX quantity")
     limit_price = _positive_decimal(spec.limit_price, field="FX limit_price")
-    min_size = _optional_positive_decimal(spec.min_size, field="FX min_size")
-    size_increment = _optional_positive_decimal(
-        spec.size_increment, field="FX size_increment"
-    )
-    if min_size is not None and quantity < min_size:
-        raise ValueError("FX quantity is below broker min_size")
-    if size_increment is not None and not _is_increment_aligned(quantity, size_increment):
-        raise ValueError("FX quantity is not aligned to broker size_increment")
+
+    if spec.quantity_mode is FxQuantityMode.CASH_QUANTITY:
+        if spec.min_size is not None or spec.size_increment is not None:
+            raise ValueError(
+                "FX CASH_QUANTITY broker min_size/size_increment semantics are unverified"
+            )
+        min_size = None
+        size_increment = None
+    else:
+        min_size = _optional_positive_decimal(spec.min_size, field="FX min_size")
+        size_increment = _optional_positive_decimal(
+            spec.size_increment, field="FX size_increment"
+        )
+        if min_size is not None and quantity < min_size:
+            raise ValueError("FX quantity is below broker min_size")
+        if size_increment is not None and not _is_increment_aligned(quantity, size_increment):
+            raise ValueError("FX quantity is not aligned to broker size_increment")
 
     contract_input = VerifiedFxContractInput(
         base_currency=spec.base_currency,
