@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import order_manager
 from ai_asset_platform.brokers.ibkr_execution_snapshot import (
@@ -62,7 +62,7 @@ def _execution_reference_timestamp(raw: str) -> float | None:
         local_text, timezone_name = str(raw).strip().rsplit(" ", 1)
         local = datetime.strptime(local_text, "%Y%m%d %H:%M:%S")
         return local.replace(tzinfo=ZoneInfo(timezone_name)).timestamp()
-    except Exception:
+    except (ValueError, ZoneInfoNotFoundError):
         return None
 
 
