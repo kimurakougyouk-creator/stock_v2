@@ -57,6 +57,17 @@ class OptionPaperRoundTripResult:
     real_paper_order_sent: bool = False
     live_order_sent: bool = False
 
+    @property
+    def ready(self) -> bool:
+        return (
+            self.attempted
+            and abs(self.buy_filled - QUANTITY) <= 1e-9
+            and abs(self.sell_filled - QUANTITY) <= 1e-9
+            and self.broker_flat_after
+            and self.real_paper_order_sent
+            and not self.live_order_sent
+        )
+
 
 class _Probe(EWrapper, EClient):
     def __init__(self) -> None:
@@ -437,6 +448,11 @@ def run_option_paper_roundtrip(*, timeout: float = 25.0) -> OptionPaperRoundTrip
         )
         probe.done.wait(timeout)
         sell_status = probe.statuses.get(sell_order_id)
+        sell_confirmed = bool(
+            sell_status is not None
+            and sell_status[0] == "FILLED"
+            and abs(sell_status[1] - QUANTITY) <= 1e-9
+        )
 
         for _ in range(4):
             end_qty = _refresh_positions(probe, timeout)
@@ -445,11 +461,15 @@ def run_option_paper_roundtrip(*, timeout: float = 25.0) -> OptionPaperRoundTrip
             time.sleep(1.0)
 
         flat = bool(end_qty is not None and abs(end_qty) <= 1e-9)
+        if sell_confirmed and flat:
+            reason = "option Paper round-trip completed and broker is flat"
+        elif not sell_confirmed:
+            reason = "SELL outcome is not a confirmed full fill; no automatic resend"
+        else:
+            reason = "SELL filled but broker flat state is not confirmed; no automatic resend"
         return OptionPaperRoundTripResult(
             True,
-            "option Paper round-trip completed and broker is flat"
-            if flat
-            else "SELL sent but broker flat state is not confirmed; no automatic resend",
+            reason,
             cfg.port,
             local_symbol,
             start_qty,
@@ -489,7 +509,8 @@ def main() -> int:
     print("ERRORS                :", list(result.errors))
     print("REAL PAPER ORDER SENT :", result.real_paper_order_sent)
     print("LIVE ORDER SENT       :", result.live_order_sent)
-    return 0 if result.attempted and result.broker_flat_after and not result.live_order_sent else 2
+    print("READY                 :", result.ready)
+    return 0 if result.ready else 2
 
 
 if __name__ == "__main__":
