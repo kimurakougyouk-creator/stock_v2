@@ -26,7 +26,8 @@ def test_observed_paper_roundtrip_is_inside_scope():
         close_side="SELL",
         start_quantity=0,
         end_quantity=0,
-        trade_date=date(2026, 8, 24),
+        open_date=date(2026, 8, 24),
+        close_date=date(2026, 8, 24),
         expiry="20260828",
     ) is True
 
@@ -38,7 +39,8 @@ def test_observed_paper_roundtrip_is_inside_scope():
         ({"open_side": "SELL", "close_side": "BUY"}, "long-only"),
         ({"start_quantity": 1}, "start and end flat"),
         ({"end_quantity": 1}, "start and end flat"),
-        ({"trade_date": date(2026, 8, 28)}, "expiry-day"),
+        ({"close_date": date(2026, 8, 25)}, "same-session"),
+        ({"open_date": date(2026, 8, 28), "close_date": date(2026, 8, 28)}, "expiry-day"),
     ],
 )
 def test_scope_fails_closed_outside_verified_boundary(kwargs, message):
@@ -48,7 +50,8 @@ def test_scope_fails_closed_outside_verified_boundary(kwargs, message):
         close_side="SELL",
         start_quantity=0,
         end_quantity=0,
-        trade_date=date(2026, 8, 24),
+        open_date=date(2026, 8, 24),
+        close_date=date(2026, 8, 24),
         expiry="20260828",
     )
     values.update(kwargs)
