@@ -5,9 +5,9 @@ def test_fx_discovery_uses_guarded_ibapi_message_loop():
     text = Path(
         "src/ai_asset_platform/brokers/ibkr_fx_discovery.py"
     ).read_text(encoding="utf-8")
-    assert "run_ibapi_message_loop_safely" in text
+    assert "start_guarded_ibapi_loop" in text
     assert "target=probe.run" not in text
-    assert 'kwargs={"client": probe, "errors": probe.errors}' in text
+    assert "probe.run" in text
 
 
 def test_fx_discovery_remains_read_only():
