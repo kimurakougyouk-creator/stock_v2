@@ -13,7 +13,9 @@ from threading import Event, Thread
 from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
 
-from ai_asset_platform.accounting.options_postfill_audit import run_option_postfill_audit
+from ai_asset_platform.accounting.options_postfill_audit import (
+    evaluate_option_postfill_from_existing_snapshot,
+)
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_execution_snapshot import preview_ibkr_paper_execution_snapshot
 from ai_asset_platform.brokers.ibkr_option_paper_roundtrip import (
@@ -176,7 +178,8 @@ def run_option_preopen_audit(*, timeout: float = 15.0) -> OptionPreopenAuditResu
     exact_exec_count = _exact_execution_count(snapshot) if snapshot.ready else 0
     exact_exec_details = _exact_execution_details(snapshot) if snapshot.ready else ()
 
-    prior = run_option_postfill_audit(wait_seconds=0.2)
+    broker_flat = bool(position.connected and position.quantity is not None and position.flat)
+    prior = evaluate_option_postfill_from_existing_snapshot(snapshot, broker_flat=broker_flat)
     prior_recovered = prior.ready
     prior_pnl = str(prior.realized_pnl_usd) if prior.realized_pnl_usd is not None else None
 

@@ -65,11 +65,12 @@ def _install_happy(monkeypatch, *, prior_ready=False, executions=()):
     monkeypatch.setattr(audit, "_verified_target", lambda: (4002, _candidate(), ()))
     monkeypatch.setattr(audit, "probe_option_position", lambda timeout=15.0: _position())
     monkeypatch.setattr(audit, "_all_open_orders", lambda timeout=15.0: (True, 4002, 0, ()))
-    monkeypatch.setattr(audit, "preview_ibkr_paper_execution_snapshot", lambda timeout=15.0: _snapshot(executions=executions))
+    snapshot = _snapshot(executions=executions)
+    monkeypatch.setattr(audit, "preview_ibkr_paper_execution_snapshot", lambda timeout=15.0: snapshot)
     monkeypatch.setattr(
         audit,
-        "run_option_postfill_audit",
-        lambda wait_seconds=0.2: _prior(ready=prior_ready, pnl="10" if prior_ready else None),
+        "evaluate_option_postfill_from_existing_snapshot",
+        lambda received, broker_flat: _prior(ready=prior_ready, pnl="10" if prior_ready else None),
     )
 
 
@@ -105,6 +106,28 @@ def test_prior_roundtrip_recovery_is_reported(monkeypatch):
     assert result.prior_roundtrip_recovered is True
     assert result.prior_roundtrip_realized_pnl_usd == "10"
     assert "already recoverable" in result.reason
+
+
+def test_preopen_reuses_the_exact_captured_execution_snapshot(monkeypatch):
+    snapshot = _snapshot(executions=(_execution(),))
+    monkeypatch.setattr(audit, "SETTINGS", _settings())
+    monkeypatch.setattr(audit, "_verified_target", lambda: (4002, _candidate(), ()))
+    monkeypatch.setattr(audit, "probe_option_position", lambda timeout=15.0: _position())
+    monkeypatch.setattr(audit, "_all_open_orders", lambda timeout=15.0: (True, 4002, 0, ()))
+    monkeypatch.setattr(audit, "preview_ibkr_paper_execution_snapshot", lambda timeout=15.0: snapshot)
+
+    captured = {}
+
+    def _evaluate(received, *, broker_flat):
+        captured["snapshot"] = received
+        captured["broker_flat"] = broker_flat
+        return _prior(ready=False)
+
+    monkeypatch.setattr(audit, "evaluate_option_postfill_from_existing_snapshot", _evaluate)
+    result = audit.run_option_preopen_audit(timeout=0.01)
+    assert result.ready is True
+    assert captured["snapshot"] is snapshot
+    assert captured["broker_flat"] is True
 
 
 def test_matching_open_order_blocks_gate(monkeypatch):

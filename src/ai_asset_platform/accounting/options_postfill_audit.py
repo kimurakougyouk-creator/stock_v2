@@ -202,6 +202,22 @@ def evaluate_option_postfill_audit(
     )
 
 
+def evaluate_option_postfill_from_existing_snapshot(
+    snapshot: IbkrPaperExecutionSnapshot,
+    *,
+    broker_flat: bool,
+) -> OptionPostFillAuditResult:
+    """Evaluate a broker snapshot already captured by the caller.
+
+    This intentionally reuses the exact same immutable execution evidence for
+    both restart sides. It is useful in a pre-open audit when the caller has
+    already captured the broker execution history and wants deterministic
+    recovery proof without relying on a second reqExecutions call returning the
+    same execution window. No broker call is performed here.
+    """
+    return evaluate_option_postfill_audit(snapshot, snapshot, broker_flat=broker_flat)
+
+
 def run_option_postfill_audit(*, wait_seconds: float = 1.0) -> OptionPostFillAuditResult:
     first = preview_ibkr_paper_execution_snapshot()
     position = probe_option_position()
