@@ -28,6 +28,9 @@ class IbkrCryptoCandidate:
     local_symbol: str | None
     con_id: int | None
     min_tick: float | None
+    min_size: float | None
+    size_increment: float | None
+    suggested_size_increment: float | None
     valid_exchanges: str | None
     order_types: str | None
     time_zone_id: str | None
@@ -97,17 +100,27 @@ def build_crypto_discovery_contract(*, symbol: str, exchange: str, currency: str
     return contract
 
 
+def _positive_optional(value) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _candidate(details: ContractDetails) -> IbkrCryptoCandidate:
     contract = details.contract
     con_id_value = int(getattr(contract, "conId", 0) or 0)
-    min_tick_value = float(getattr(details, "minTick", 0.0) or 0.0)
     return IbkrCryptoCandidate(
         symbol=str(getattr(contract, "symbol", "") or ""),
         exchange=str(getattr(contract, "exchange", "") or ""),
         currency=str(getattr(contract, "currency", "") or ""),
         local_symbol=(str(getattr(contract, "localSymbol", "") or "") or None),
         con_id=con_id_value if con_id_value > 0 else None,
-        min_tick=min_tick_value if min_tick_value > 0 else None,
+        min_tick=_positive_optional(getattr(details, "minTick", None)),
+        min_size=_positive_optional(getattr(details, "minSize", None)),
+        size_increment=_positive_optional(getattr(details, "sizeIncrement", None)),
+        suggested_size_increment=_positive_optional(getattr(details, "suggestedSizeIncrement", None)),
         valid_exchanges=(str(getattr(details, "validExchanges", "") or "") or None),
         order_types=(str(getattr(details, "orderTypes", "") or "") or None),
         time_zone_id=(str(getattr(details, "timeZoneId", "") or "") or None),
