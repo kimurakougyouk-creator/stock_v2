@@ -12,10 +12,17 @@ MULTIASSET_LOG="$LOG_DIR/ibkr_multiasset_readonly_audit_latest.log"
 
 cd "$REPO_DIR"
 
-# Preserve local runtime artifacts. Only fast-forward main; never reset, clean,
-# stash, delete, or commit local files automatically.
+# Preserve local runtime artifacts and require the verified local main branch.
+# A remote/network outage must not disable already-installed read-only safety
+# checks, so a failed fast-forward pull is logged and this cycle continues from
+# the unchanged local main revision. Never reset, clean, stash, delete, or
+# commit local files automatically.
 git switch main >/dev/null
-git pull --ff-only origin main
+if git pull --ff-only origin main; then
+  echo "READ-ONLY CODE UPDATE: local main is synchronized with origin/main."
+else
+  echo "WARNING: origin/main could not be fast-forwarded; continuing this read-only cycle from unchanged local main. No order was sent." >&2
+fi
 
 if [[ ! -f .venv/bin/activate ]]; then
   echo "ERROR: .venv/bin/activate not found. No order was sent."
