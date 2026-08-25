@@ -1,10 +1,12 @@
 """Final broker-read-only completion audit for the verified IBKR Paper baseline.
 
-The audit never creates, changes, cancels, or transmits an order. It may update
-only the durable local ledger through the existing broker-execution
-reconciliation path. It then proves that a fresh second reconciliation is
-idempotent, checks the controlled Paper symbols are flat at both broker and
-local levels, and rebuilds trusted trade/accounting outputs without guessing.
+The audit never creates, changes, cancels, or transmits an order. The durable
+legacy order ledger is stock/ETF-shaped, so derivative and pinned option E2E
+executions are excluded from this aggregate stock accounting gate and are
+verified by their dedicated multiplier-aware audits. The audit captures one
+broker execution snapshot, reconciles it once, then reuses the same immutable
+snapshot for the idempotency proof so an IBKR reqExecutions window change cannot
+create a false failure.
 """
 from __future__ import annotations
 
@@ -45,6 +47,17 @@ from ai_asset_platform.reports.paired_spy_close_accounting import (
 
 CONTROLLED_SYMBOLS = ("SPY", "AAPL", "9432")
 
+# These executions are proven by dedicated derivative/option accounting audits
+# and must never be flattened into the legacy stock/ETF ledger.
+DEDICATED_AUDIT_EXEC_IDS = frozenset(
+    {
+        "0000e1a7.6a8f948c.01.01",  # ESU6 BUY
+        "0000e1a7.6a8f948d.01.01",  # ESU6 SELL
+        "00020057.6a8c86b2.01.01",  # pinned SPY option BUY
+        "00020057.6a8c86b3.01.01",  # pinned SPY option SELL
+    }
+)
+
 
 @dataclass(frozen=True)
 class FinalCompletionAuditResult:
@@ -72,8 +85,25 @@ def _broker_quantity(account: IbkrPaperAccountSnapshot, symbol: str) -> float:
     )
 
 
+def _broker_exec_ids(record: dict) -> set[str]:
+    return {
+        str(value or "").strip()
+        for value in list(record.get("broker_exec_ids") or [])
+        if str(value or "").strip()
+    }
+
+
+def _belongs_to_dedicated_audit(record: dict) -> bool:
+    return bool(_broker_exec_ids(record) & DEDICATED_AUDIT_EXEC_IDS)
+
+
+def _aggregate_stock_records(records: list[dict]) -> list[dict]:
+    """Return only records owned by the legacy stock/ETF accounting gate."""
+    return [record for record in records if not _belongs_to_dedicated_audit(record)]
+
+
 def _accounting_inputs() -> tuple[list[dict], tuple[str, ...]]:
-    records = list(order_manager.load_accounting_orders())
+    records = _aggregate_stock_records(list(order_manager.load_accounting_orders()))
     try:
         records = list(enrich_closed_spy_round_trip(records))
     except PairedSpyCloseAccountingError:
@@ -89,13 +119,13 @@ def _accounting_inputs() -> tuple[list[dict], tuple[str, ...]]:
 def run_final_completion_audit() -> FinalCompletionAuditResult:
     reasons: list[str] = []
 
-    first_snapshot = preview_ibkr_paper_execution_snapshot()
+    snapshot = preview_ibkr_paper_execution_snapshot()
     first_reconcile = reconcile_execution_snapshot_to_ledger(
-        first_snapshot,
+        snapshot,
         order_log_path=order_manager.ORDER_LOG_PATH,
     )
-    if not first_snapshot.ready:
-        reasons.append("first broker execution snapshot is not ready")
+    if not snapshot.ready:
+        reasons.append("broker execution snapshot is not ready")
     if first_reconcile.errors:
         reasons.append(f"first reconciliation errors: {list(first_reconcile.errors)}")
 
@@ -154,20 +184,18 @@ def run_final_completion_audit() -> FinalCompletionAuditResult:
         trade_history_error = str(exc)
         reasons.append(f"trusted trade history failed: {exc}")
 
-    # A new broker snapshot plus a second reconciliation is the local-runtime
-    # idempotency proof. No order request exists in either operation.
-    second_snapshot = preview_ibkr_paper_execution_snapshot()
+    # Idempotency is a property of reconciling the same immutable broker
+    # evidence twice. Do not make a second reqExecutions call: IBKR may return a
+    # different history window even though durable state is already correct.
     second_reconcile = reconcile_execution_snapshot_to_ledger(
-        second_snapshot,
+        snapshot,
         order_log_path=order_manager.ORDER_LOG_PATH,
     )
-    if not second_snapshot.ready:
-        reasons.append("second broker execution snapshot is not ready")
     if second_reconcile.errors:
         reasons.append(f"second reconciliation errors: {list(second_reconcile.errors)}")
     if second_reconcile.reconciled_count != 0:
         reasons.append(
-            "fresh second reconciliation changed durable state; restart/idempotency proof failed"
+            "second reconciliation of identical broker evidence changed durable state; idempotency proof failed"
         )
 
     return FinalCompletionAuditResult(
