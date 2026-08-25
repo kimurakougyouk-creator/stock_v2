@@ -1,4 +1,15 @@
 from pathlib import Path
+import subprocess
+
+
+def test_readonly_autopilot_has_valid_bash_syntax():
+    result = subprocess.run(
+        ["bash", "-n", "ibkr_readonly_autopilot.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_readonly_autopilot_only_invokes_safe_readonly_checks():
@@ -38,6 +49,18 @@ def test_readonly_autopilot_requires_main_but_tolerates_remote_outage():
     warning_at = script.index("origin/main unavailable; continuing from unchanged local main")
     audit_at = script.index("bash ./ibkr_auto.sh")
     assert switch_at < pull_at < warning_at < audit_at
+
+
+def test_readonly_autopilot_bounds_interval_and_log_growth():
+    script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
+    assert 'INTERVAL_SECONDS="${IBKR_AUTOPILOT_INTERVAL_SECONDS:-300}"' in script
+    assert "INTERVAL_SECONDS < 30 || INTERVAL_SECONDS > 86400" in script
+    assert 'MAX_LOG_BYTES="${IBKR_AUTOPILOT_MAX_LOG_BYTES:-5242880}"' in script
+    assert "MAX_LOG_BYTES < 1048576 || MAX_LOG_BYTES > 104857600" in script
+    assert 'ROTATED_LOG_FILE="$LOG_FILE.1"' in script
+    assert "rotate_autopilot_log_if_needed" in script
+    assert 'mv -f "$LOG_FILE" "$ROTATED_LOG_FILE"' in script
+    assert "rm -f" not in script
 
 
 def test_installer_runs_only_readonly_autopilot_service():
