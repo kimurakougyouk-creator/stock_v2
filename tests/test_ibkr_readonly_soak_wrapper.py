@@ -29,3 +29,12 @@ def test_readonly_soak_wrapper_is_bounded_not_infinite():
     assert "while true" not in text
     assert "CYCLES < 2 || CYCLES > 20" in text
     assert "for ((cycle=1; cycle<=CYCLES; cycle++))" in text
+
+
+def test_readonly_soak_requires_main_but_can_run_when_origin_is_unavailable():
+    text = Path("ibkr_readonly_soak_once.sh").read_text(encoding="utf-8")
+    switch_at = text.index("git switch main")
+    pull_at = text.index("if git pull --ff-only origin main; then")
+    warning_at = text.index("origin/main unavailable; continuing bounded read-only soak")
+    pytest_at = text.index("python -m pytest -q")
+    assert switch_at < pull_at < warning_at < pytest_at
