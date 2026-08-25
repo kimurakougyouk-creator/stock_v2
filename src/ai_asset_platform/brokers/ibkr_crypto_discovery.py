@@ -17,6 +17,8 @@ from ibapi.wrapper import EWrapper
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
 
+CRYPTO_CLIENT_OFFSETS = {"PAXOS": 260, "ZEROHASH": 261}
+
 
 @dataclass(frozen=True)
 class IbkrCryptoCandidate:
@@ -87,7 +89,6 @@ def build_crypto_discovery_contract(*, symbol: str, exchange: str, currency: str
         raise ValueError("crypto exchange is required")
     if not normalized_currency:
         raise ValueError("crypto currency is required")
-
     contract = Contract()
     contract.symbol = normalized_symbol
     contract.secType = "CRYPTO"
@@ -122,16 +123,15 @@ def discover_ibkr_paper_crypto(
     currency: str,
     timeout: float = 10.0,
 ) -> IbkrCryptoDiscoveryResult:
-    contract = build_crypto_discovery_contract(
-        symbol=symbol, exchange=exchange, currency=currency
-    )
+    contract = build_crypto_discovery_contract(symbol=symbol, exchange=exchange, currency=currency)
     connection_errors: list[str] = []
+    client_offset = CRYPTO_CLIENT_OFFSETS.get(contract.exchange, 269)
 
     for use_gateway in (True, False):
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
         probe = _CryptoDiscoveryProbe()
         try:
-            probe.connect(cfg.host, cfg.port, cfg.client_id + 260)
+            probe.connect(cfg.host, cfg.port, cfg.client_id + client_offset)
             Thread(
                 target=run_ibapi_message_loop_safely,
                 kwargs={"client": probe, "errors": probe.errors},
@@ -141,7 +141,6 @@ def discover_ibkr_paper_crypto(
             if not ready or probe.fatal_error:
                 connection_errors.extend(probe.errors)
                 continue
-
             probe.reqContractDetails(1, contract)
             probe.details_ready.wait(timeout)
             candidates = tuple(_candidate(item) for item in probe.details)
