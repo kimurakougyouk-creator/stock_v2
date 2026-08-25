@@ -12,13 +12,19 @@ mkdir -p "$LOG_DIR"
 while true; do
   {
     echo "===== $(date -Is) IBKR READ-ONLY AUTOPILOT ====="
+    # Never run an arbitrary development branch unattended. Local main is
+    # mandatory, but origin/main availability is not: a transient GitHub/network
+    # outage must not suppress already-installed read-only broker safety checks.
     git switch main
     before_head="$(git rev-parse HEAD)"
-    git pull --ff-only origin main
-    after_head="$(git rev-parse HEAD)"
-    if [[ "$after_head" != "$before_head" ]]; then
-      echo "AUTOPILOT UPDATE: main changed; reloading read-only autopilot from the new revision."
-      exec /usr/bin/env bash "$REPO_DIR/ibkr_readonly_autopilot.sh"
+    if git pull --ff-only origin main; then
+      after_head="$(git rev-parse HEAD)"
+      if [[ "$after_head" != "$before_head" ]]; then
+        echo "AUTOPILOT UPDATE: main changed; reloading read-only autopilot from the new revision."
+        exec /usr/bin/env bash "$REPO_DIR/ibkr_readonly_autopilot.sh"
+      fi
+    else
+      echo "AUTOPILOT UPDATE WARNING: origin/main unavailable; continuing from unchanged local main. No order was sent."
     fi
     if [[ -f .venv/bin/activate ]]; then
       source .venv/bin/activate
