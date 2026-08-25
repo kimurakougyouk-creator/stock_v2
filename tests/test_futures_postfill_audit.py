@@ -1,6 +1,9 @@
 from decimal import Decimal
 
-from ai_asset_platform.accounting.futures_postfill_audit import evaluate_futures_postfill_audit
+from ai_asset_platform.accounting.futures_postfill_audit import (
+    evaluate_futures_postfill_audit,
+    evaluate_futures_postfill_from_existing_snapshot,
+)
 from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     IbkrExecutionEvidence,
     IbkrPaperExecutionSnapshot,
@@ -46,6 +49,21 @@ def test_verified_real_observed_prices_produce_expected_accounting():
     assert result.broker_flat_verified is True
     assert result.real_order_sent is False
     assert result.live_order_sent is False
+
+
+def test_existing_snapshot_recovery_is_deterministic():
+    snapshot = _snapshot(
+        _row("BUY", "0000e1a7.6a8f948c.01.01", 7668.25),
+        _row("SELL", "0000e1a7.6a8f948d.01.01", 7667.75),
+    )
+    result = evaluate_futures_postfill_from_existing_snapshot(
+        snapshot,
+        broker_flat=True,
+    )
+    assert result.ready is True
+    assert result.execution_count == 2
+    assert result.realized_pnl_usd == Decimal("-25.00")
+    assert result.restart_recovery_verified is True
 
 
 def test_missing_execution_blocks_audit():

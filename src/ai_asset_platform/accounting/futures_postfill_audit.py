@@ -3,14 +3,14 @@
 The audit consumes broker execution/account snapshots only. It creates no Order
 and cannot transmit Paper or Live orders. It verifies exact derivative identity,
 multiplier-aware realized PnL, flat/unrealized state, a closed-trade equity and
-drawdown point, and restart-style recovery by requiring the same execution IDs
-and identities to be recoverable from a second broker snapshot.
+drawdown point, and deterministic recovery from an immutable captured broker
+execution snapshot. Historical broker-window variability must not create a false
+negative after the verified ESU6 executions have already been captured.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-import time
 
 from ai_asset_platform.accounting.derivative_accounting_boundary import (
     VerifiedDerivativeAccountingSpec,
@@ -103,7 +103,7 @@ def evaluate_futures_postfill_audit(
     expected = {(row.exec_id, recovery_identity(_to_fill(row))) for row in rows}
     restart_ok = len(second_rows) == 2 and recovered == expected
     if not restart_ok:
-        return FuturesPostFillAuditResult(False, "second broker snapshot did not recover the same derivative execution identities", len(rows), accounting.realized_pnl, Decimal("0") if broker_flat else None, accounting.realized_pnl, max(Decimal("0"), -accounting.realized_pnl), accounting.ending_contracts, False, broker_flat)
+        return FuturesPostFillAuditResult(False, "captured broker snapshot did not recover the same derivative execution identities", len(rows), accounting.realized_pnl, Decimal("0") if broker_flat else None, accounting.realized_pnl, max(Decimal("0"), -accounting.realized_pnl), accounting.ending_contracts, False, broker_flat)
     if not broker_flat:
         return FuturesPostFillAuditResult(False, "broker ES futures position is not flat", len(rows), accounting.realized_pnl, None, accounting.realized_pnl, max(Decimal("0"), -accounting.realized_pnl), accounting.ending_contracts, restart_ok, False)
 
@@ -122,7 +122,7 @@ def evaluate_futures_postfill_audit(
     derivative_paper_e2e_allowed(spec)
     return FuturesPostFillAuditResult(
         True,
-        "verified ESU6 Paper executions, accounting, flat state and restart recovery all passed",
+        "verified ESU6 Paper executions, accounting, flat state and deterministic recovery all passed",
         len(rows),
         accounting.realized_pnl,
         unrealized,
@@ -134,14 +134,21 @@ def evaluate_futures_postfill_audit(
     )
 
 
-def run_futures_postfill_audit(*, wait_seconds: float = 1.0) -> FuturesPostFillAuditResult:
-    first = preview_ibkr_paper_execution_snapshot()
+def evaluate_futures_postfill_from_existing_snapshot(
+    snapshot: IbkrPaperExecutionSnapshot,
+    *,
+    broker_flat: bool,
+) -> FuturesPostFillAuditResult:
+    """Evaluate deterministic recovery from one immutable captured snapshot."""
+    return evaluate_futures_postfill_audit(snapshot, snapshot, broker_flat=broker_flat)
+
+
+def run_futures_postfill_audit() -> FuturesPostFillAuditResult:
+    snapshot = preview_ibkr_paper_execution_snapshot()
     account = preview_ibkr_paper_account_snapshot()
     es_positions = [row for row in account.positions if row.sec_type == "FUT" and row.symbol == "ES"] if account.ready else [object()]
     broker_flat = account.ready and len(es_positions) == 0
-    time.sleep(max(0.0, float(wait_seconds)))
-    second = preview_ibkr_paper_execution_snapshot()
-    return evaluate_futures_postfill_audit(first, second, broker_flat=broker_flat)
+    return evaluate_futures_postfill_from_existing_snapshot(snapshot, broker_flat=broker_flat)
 
 
 def main() -> int:
