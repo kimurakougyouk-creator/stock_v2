@@ -10,7 +10,11 @@ LOG_FILE="$LOG_DIR/ibkr_readonly_soak_latest.log"
 
 cd "$REPO_DIR"
 git switch main >/dev/null
-git pull --ff-only origin main
+if git pull --ff-only origin main; then
+  echo "READ-ONLY SOAK UPDATE: local main is synchronized with origin/main."
+else
+  echo "WARNING: origin/main unavailable; continuing bounded read-only soak from unchanged local main. No order was sent." >&2
+fi
 
 if [[ ! -f .venv/bin/activate ]]; then
   echo "BLOCKED: .venv is missing. No order was sent."
