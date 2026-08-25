@@ -34,6 +34,9 @@ def test_candidate_preserves_crypto_metadata():
     contract.conId = 123
     details.contract = contract
     details.minTick = 0.01
+    details.minSize = 0.0001
+    details.sizeIncrement = 0.0001
+    details.suggestedSizeIncrement = 0.0001
     details.validExchanges = "PAXOS"
     details.orderTypes = "LMT,MKT"
 
@@ -44,6 +47,9 @@ def test_candidate_preserves_crypto_metadata():
     assert candidate.local_symbol == "BTC.USD"
     assert candidate.con_id == 123
     assert candidate.min_tick == 0.01
+    assert candidate.min_size == 0.0001
+    assert candidate.size_increment == 0.0001
+    assert candidate.suggested_size_increment == 0.0001
 
 
 def test_crypto_discovery_is_read_only(monkeypatch):
