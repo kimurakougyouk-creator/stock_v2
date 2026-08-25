@@ -50,3 +50,19 @@ def isolate_signal_runner_daily_state(monkeypatch, request):
         "calculate_repurchase_cooldown_remaining_minutes",
         lambda *args, **kwargs: 0,
     )
+
+
+@pytest.fixture(autouse=True)
+def isolate_position_exists_test_from_holding_age(monkeypatch, request):
+    """Do not let durable holding-age state turn this BUY-block test into Time Stop."""
+
+    if request.node.name != "test_buy_is_blocked_when_position_already_exists":
+        return
+
+    import signal_runner
+
+    monkeypatch.setattr(
+        signal_runner,
+        "calculate_position_holding_days",
+        lambda ticker: None,
+    )
