@@ -20,6 +20,35 @@ def test_broker_quantity_sums_only_requested_symbol():
     assert module._broker_quantity(account, "AAPL") == 0.0
 
 
+def test_dedicated_derivative_and_option_execs_are_excluded_from_legacy_stock_accounting():
+    option_sell = {
+        "broker_exec_ids": ["00020057.6a8c86b3.01.01"],
+        "ticker": "SPY",
+        "side": "SELL",
+    }
+    future_buy = {
+        "broker_exec_ids": ["0000e1a7.6a8f948c.01.01"],
+        "ticker": "ES",
+        "side": "BUY",
+    }
+    ordinary_spy = {
+        "broker_exec_ids": ["00012ec5.6ab91096.01.01"],
+        "ticker": "SPY",
+        "side": "BUY",
+    }
+    assert module._belongs_to_dedicated_audit(option_sell)
+    assert module._belongs_to_dedicated_audit(future_buy)
+    assert not module._belongs_to_dedicated_audit(ordinary_spy)
+    assert module._aggregate_stock_records([option_sell, future_buy, ordinary_spy]) == [ordinary_spy]
+
+
+def test_final_audit_reuses_one_execution_snapshot_for_idempotency_proof():
+    text = Path(
+        "src/ai_asset_platform/brokers/ibkr_final_completion_audit.py"
+    ).read_text(encoding="utf-8")
+    assert text.count("preview_ibkr_paper_execution_snapshot()") == 1
+
+
 def test_final_audit_source_contains_no_order_transmission_path():
     text = Path(
         "src/ai_asset_platform/brokers/ibkr_final_completion_audit.py"
