@@ -28,14 +28,14 @@ class IbkrCryptoCandidate:
     local_symbol: str | None
     con_id: int | None
     min_tick: float | None
-    min_size: float | None
-    size_increment: float | None
-    suggested_size_increment: float | None
     valid_exchanges: str | None
     order_types: str | None
     time_zone_id: str | None
     trading_hours: str | None
     liquid_hours: str | None
+    min_size: float | None = None
+    size_increment: float | None = None
+    suggested_size_increment: float | None = None
 
 
 @dataclass(frozen=True)
@@ -118,14 +118,14 @@ def _candidate(details: ContractDetails) -> IbkrCryptoCandidate:
         local_symbol=(str(getattr(contract, "localSymbol", "") or "") or None),
         con_id=con_id_value if con_id_value > 0 else None,
         min_tick=_positive_optional(getattr(details, "minTick", None)),
-        min_size=_positive_optional(getattr(details, "minSize", None)),
-        size_increment=_positive_optional(getattr(details, "sizeIncrement", None)),
-        suggested_size_increment=_positive_optional(getattr(details, "suggestedSizeIncrement", None)),
         valid_exchanges=(str(getattr(details, "validExchanges", "") or "") or None),
         order_types=(str(getattr(details, "orderTypes", "") or "") or None),
         time_zone_id=(str(getattr(details, "timeZoneId", "") or "") or None),
         trading_hours=(str(getattr(details, "tradingHours", "") or "") or None),
         liquid_hours=(str(getattr(details, "liquidHours", "") or "") or None),
+        min_size=_positive_optional(getattr(details, "minSize", None)),
+        size_increment=_positive_optional(getattr(details, "sizeIncrement", None)),
+        suggested_size_increment=_positive_optional(getattr(details, "suggestedSizeIncrement", None)),
     )
 
 
