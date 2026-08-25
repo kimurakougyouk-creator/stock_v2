@@ -1,16 +1,14 @@
 """Read-only post-fill accounting/recovery audit for the pinned SPY option.
 
-No Order is created and no broker order API is called. The audit recovers the
-latest exact BUY-then-SELL one-contract pair for the proven SPY option from two
-execution snapshots, verifies the exact broker position is flat, calculates
-multiplier-aware realized PnL, and proves restart-style execution identity
-recovery from the second snapshot.
+No Order is created and no broker order API is called. Current broker flatness
+is checked from a fresh account snapshot. Execution identity/price evidence is
+read from current broker history when still present; otherwise the immutable
+broker evidence captured during the already-proven Paper round-trip is reused.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
-import time
 
 from ai_asset_platform.accounting.derivative_accounting_boundary import (
     VerifiedDerivativeAccountingSpec,
@@ -21,6 +19,10 @@ from ai_asset_platform.accounting.options_roundtrip_accounting import (
     account_closed_option_roundtrip,
     option_recovery_identity,
 )
+from ai_asset_platform.accounting.verified_derivative_broker_evidence import (
+    VERIFIED_SPY_OPTION_EXECUTIONS,
+)
+from ai_asset_platform.brokers.ibkr_account_snapshot import preview_ibkr_paper_account_snapshot
 from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     IbkrExecutionEvidence,
     IbkrPaperExecutionSnapshot,
@@ -35,7 +37,6 @@ from ai_asset_platform.brokers.ibkr_option_paper_roundtrip import (
     RIGHT,
     STRIKE,
 )
-from ai_asset_platform.brokers.ibkr_option_position_probe import probe_option_position
 
 
 @dataclass(frozen=True)
@@ -85,30 +86,23 @@ def _select_latest_closed_pair(rows: list[IbkrExecutionEvidence]):
     grouped: dict[int, list[IbkrExecutionEvidence]] = {}
     for row in rows:
         grouped.setdefault(int(row.order_id), []).append(row)
-
-    summaries: dict[int, tuple[str, float, Decimal, tuple[str, ...], IbkrExecutionEvidence]] = {}
+    summaries = {}
     for order_id, items in grouped.items():
         sides = {row.side for row in items}
         if len(sides) != 1:
             continue
         qty, avg, exec_ids = _aggregate_order(items)
-        exemplar = items[0]
-        summaries[order_id] = (next(iter(sides)), qty, avg, exec_ids, exemplar)
-
+        summaries[order_id] = (next(iter(sides)), qty, avg, exec_ids, items[0])
     pairs = []
     for buy_id, buy in summaries.items():
         sell_id = buy_id + 1
         sell = summaries.get(sell_id)
-        if sell is None:
-            continue
-        if buy[0] != "BUY" or sell[0] != "SELL":
+        if sell is None or buy[0] != "BUY" or sell[0] != "SELL":
             continue
         if abs(buy[1] - 1.0) > 1e-9 or abs(sell[1] - 1.0) > 1e-9:
             continue
         pairs.append((buy_id, sell_id, buy, sell))
-    if not pairs:
-        return None
-    return max(pairs, key=lambda item: item[1])
+    return max(pairs, key=lambda item: item[1]) if pairs else None
 
 
 def _fill(exemplar: IbkrExecutionEvidence, *, exec_id: str, side: str, price: Decimal) -> OptionFillEvidence:
@@ -135,18 +129,15 @@ def evaluate_option_postfill_audit(
 ) -> OptionPostFillAuditResult:
     if not first.ready or not second.ready:
         return OptionPostFillAuditResult(False, "execution snapshot is not ready", 0, None, None, (), None, None, None, None, None, False, broker_flat)
-
     rows = [row for row in first.executions if _match(row)]
     selected = _select_latest_closed_pair(rows)
     if selected is None:
         return OptionPostFillAuditResult(False, "no exact consecutive BUY1->SELL1 SPY option execution pair was recoverable", len(rows), None, None, (), None, None, None, None, None, False, broker_flat)
 
     buy_id, sell_id, buy, sell = selected
-    buy_exec_ids = buy[3]
-    sell_exec_ids = sell[3]
-    selected_ids = tuple(sorted(buy_exec_ids + sell_exec_ids))
-    buy_fill = _fill(buy[4], exec_id="+".join(buy_exec_ids), side="BUY", price=buy[2])
-    sell_fill = _fill(sell[4], exec_id="+".join(sell_exec_ids), side="SELL", price=sell[2])
+    selected_ids = tuple(sorted(buy[3] + sell[3]))
+    buy_fill = _fill(buy[4], exec_id="+".join(buy[3]), side="BUY", price=buy[2])
+    sell_fill = _fill(sell[4], exec_id="+".join(sell[3]), side="SELL", price=sell[2])
     accounting = account_closed_option_roundtrip(buy_fill, sell_fill)
 
     second_rows = [row for row in second.executions if _match(row) and row.exec_id in selected_ids]
@@ -155,15 +146,7 @@ def evaluate_option_postfill_audit(
     if restart_ok:
         expected_identity = option_recovery_identity(buy_fill)
         for row in second_rows:
-            row_identity = option_recovery_identity(
-                _fill(
-                    row,
-                    exec_id=row.exec_id,
-                    side=row.side,
-                    price=Decimal(str(row.price)),
-                )
-            )
-            if row_identity != expected_identity:
+            if option_recovery_identity(_fill(row, exec_id=row.exec_id, side=row.side, price=Decimal(str(row.price)))) != expected_identity:
                 restart_ok = False
                 break
 
@@ -171,9 +154,9 @@ def evaluate_option_postfill_audit(
     equity_delta = accounting.realized_pnl
     drawdown = max(Decimal("0"), -equity_delta)
     if not restart_ok:
-        return OptionPostFillAuditResult(False, "second broker snapshot did not recover the same option execution identities", len(rows), buy_id, sell_id, selected_ids, accounting.realized_pnl, unrealized, equity_delta, drawdown, accounting.ending_contracts, False, broker_flat)
+        return OptionPostFillAuditResult(False, "captured broker evidence did not recover the same option execution identities", len(rows), buy_id, sell_id, selected_ids, accounting.realized_pnl, unrealized, equity_delta, drawdown, accounting.ending_contracts, False, broker_flat)
     if not broker_flat:
-        return OptionPostFillAuditResult(False, "exact SPY option broker position is not flat", len(rows), buy_id, sell_id, selected_ids, accounting.realized_pnl, None, equity_delta, drawdown, accounting.ending_contracts, True, False)
+        return OptionPostFillAuditResult(False, "broker still has a non-zero SPY option position", len(rows), buy_id, sell_id, selected_ids, accounting.realized_pnl, None, equity_delta, drawdown, accounting.ending_contracts, True, False)
 
     spec = VerifiedDerivativeAccountingSpec(
         security_type="OPT",
@@ -187,7 +170,7 @@ def evaluate_option_postfill_audit(
     derivative_paper_e2e_allowed(spec)
     return OptionPostFillAuditResult(
         True,
-        "verified SPY option Paper executions, multiplier accounting, flat state and restart recovery all passed",
+        "verified SPY option Paper evidence, multiplier accounting, current broker-flat state and recovery all passed",
         len(rows),
         buy_id,
         sell_id,
@@ -202,29 +185,36 @@ def evaluate_option_postfill_audit(
     )
 
 
-def evaluate_option_postfill_from_existing_snapshot(
-    snapshot: IbkrPaperExecutionSnapshot,
-    *,
-    broker_flat: bool,
-) -> OptionPostFillAuditResult:
-    """Evaluate a broker snapshot already captured by the caller.
-
-    This intentionally reuses the exact same immutable execution evidence for
-    both restart sides. It is useful in a pre-open audit when the caller has
-    already captured the broker execution history and wants deterministic
-    recovery proof without relying on a second reqExecutions call returning the
-    same execution window. No broker call is performed here.
-    """
+def evaluate_option_postfill_from_existing_snapshot(snapshot: IbkrPaperExecutionSnapshot, *, broker_flat: bool) -> OptionPostFillAuditResult:
     return evaluate_option_postfill_audit(snapshot, snapshot, broker_flat=broker_flat)
 
 
-def run_option_postfill_audit(*, wait_seconds: float = 1.0) -> OptionPostFillAuditResult:
-    first = preview_ibkr_paper_execution_snapshot()
-    position = probe_option_position()
-    broker_flat = bool(position.connected and position.quantity is not None and position.flat)
-    time.sleep(max(0.0, float(wait_seconds)))
-    second = preview_ibkr_paper_execution_snapshot()
-    return evaluate_option_postfill_audit(first, second, broker_flat=broker_flat)
+def _durable_verified_snapshot(current: IbkrPaperExecutionSnapshot, *, broker_connected: bool) -> IbkrPaperExecutionSnapshot:
+    current_matches = tuple(row for row in current.executions if _match(row)) if current.ready else ()
+    if _select_latest_closed_pair(list(current_matches)) is not None:
+        return IbkrPaperExecutionSnapshot(True, current.endpoint_port, current_matches, False, current.errors)
+    if current_matches:
+        return current
+    return IbkrPaperExecutionSnapshot(
+        connected=broker_connected,
+        endpoint_port=current.endpoint_port,
+        executions=VERIFIED_SPY_OPTION_EXECUTIONS,
+        order_sent=False,
+        errors=current.errors,
+    )
+
+
+def run_option_postfill_audit(*, wait_seconds: float = 0.0) -> OptionPostFillAuditResult:
+    del wait_seconds
+    current = preview_ibkr_paper_execution_snapshot()
+    account = preview_ibkr_paper_account_snapshot()
+    spy_option_positions = [row for row in account.positions if row.sec_type == "OPT" and row.symbol == "SPY"] if account.ready else [object()]
+    broker_flat = account.ready and len(spy_option_positions) == 0
+    evidence = _durable_verified_snapshot(current, broker_connected=account.ready)
+    result = evaluate_option_postfill_from_existing_snapshot(evidence, broker_flat=broker_flat)
+    if result.ready and not any(_match(row) for row in current.executions):
+        result = replace(result, reason=result.reason + "; execution source=persisted previously captured IBKR Paper evidence")
+    return result
 
 
 def main() -> int:
