@@ -1,14 +1,14 @@
 """Evidence ledger for issue #56 multi-asset verification.
 
-This module is deliberately descriptive, not an order-permission switch.  It
+This module is deliberately descriptive, not an order-permission switch. It
 separates four different ideas that must never be conflated:
 
 * a repository-only Contract foundation,
 * broker read-only runtime evidence,
 * one controlled instrument's real Paper E2E evidence, and
-* a market-level entry in VERIFIED_CAPABILITIES.
+* an exact scoped entry in VERIFIED_CAPABILITIES.
 
-Adding evidence here does not make an order transmittable.  Actual order paths
+Adding evidence here does not make an order transmittable. Actual order paths
 retain their own product-specific fail-closed gates, and Live remains disabled.
 """
 from __future__ import annotations
@@ -38,17 +38,18 @@ class AssetVerificationEvidence:
     real_paper_e2e: bool
     capability_promoted: bool
     controlled_instrument: str | None = None
+    capability_market: str | None = None
     remaining_gates: tuple[str, ...] = ()
     live_supported: bool = False
 
     @property
     def paper_market_verified(self) -> bool:
-        """True only for a market-level capability already promoted elsewhere."""
+        """True only for an exact capability already promoted elsewhere."""
         return self.level is VerificationLevel.VERIFIED_MARKET_PAPER and self.capability_promoted
 
 
-# Facts below are intentionally conservative and correspond to verified evidence
-# already recorded in PROJECT_STATE / issue #56 as of 2026-08-24.
+# Facts below are intentionally conservative and correspond to broker/runtime
+# evidence verified through the final read-only audit on 2026-08-26.
 MULTI_ASSET_VERIFICATION: tuple[AssetVerificationEvidence, ...] = (
     AssetVerificationEvidence(
         key="US_ETF",
@@ -61,6 +62,7 @@ MULTI_ASSET_VERIFICATION: tuple[AssetVerificationEvidence, ...] = (
         real_paper_e2e=True,
         capability_promoted=True,
         controlled_instrument="SPY",
+        capability_market="US_ETF",
         remaining_gates=(),
     ),
     AssetVerificationEvidence(
@@ -91,61 +93,62 @@ MULTI_ASSET_VERIFICATION: tuple[AssetVerificationEvidence, ...] = (
         capability_promoted=False,
         controlled_instrument="USD/JPY@IDEALPRO",
         remaining_gates=(
-            "explicit product-specific Paper no-transmit/what-if order gate",
-            "verified FX quantity/direction/order-type semantics",
-            "FX fill-to-accounting/trade-history/equity/drawdown/restart path",
-            "real Paper E2E before capability promotion",
+            "IBKR Paper What-If rejected the trade because it would expose the account to currency leverage",
+            "do not bypass that broker/account restriction by treating currency conversion as leveraged Spot FX",
+            "FX fill-to-accounting/trade-history/equity/drawdown/restart path remains unverified",
+            "real Paper E2E is required before any FX capability promotion",
         ),
     ),
     AssetVerificationEvidence(
         key="FUTURES",
         asset_class=AssetClass.FUTURE,
-        level=VerificationLevel.CONTRACT_FOUNDATION,
+        level=VerificationLevel.VERIFIED_MARKET_PAPER,
         contract_foundation=True,
-        runtime_contract_evidence=False,
-        product_specific_order_path=False,
-        trusted_accounting_path=False,
-        real_paper_e2e=False,
-        capability_promoted=False,
+        runtime_contract_evidence=True,
+        product_specific_order_path=True,
+        trusted_accounting_path=True,
+        real_paper_e2e=True,
+        capability_promoted=True,
+        controlled_instrument="ESU6/CME/USD conId=649180671 expiry=20260918 multiplier=50",
+        capability_market="US_ESU6_FUTURE_LONG_ROUNDTRIP",
         remaining_gates=(
-            "explicit intended future + exchange + expiry broker runtime evidence",
-            "verified multiplier/min-size/tick and lifecycle/roll/settlement rules",
-            "derivative-specific sizing/accounting/restart path",
-            "no-transmit order gate and real Paper E2E",
+            "scope is limited to the exact verified ESU6 one-contract BUY-to-SELL round-trip",
+            "do not generalize to arbitrary futures contracts, expiries, roll or settlement behavior",
         ),
     ),
     AssetVerificationEvidence(
         key="OPTIONS",
         asset_class=AssetClass.OPTION,
-        level=VerificationLevel.CONTRACT_FOUNDATION,
+        level=VerificationLevel.VERIFIED_MARKET_PAPER,
         contract_foundation=True,
-        runtime_contract_evidence=False,
-        product_specific_order_path=False,
-        trusted_accounting_path=False,
-        real_paper_e2e=False,
-        capability_promoted=False,
+        runtime_contract_evidence=True,
+        product_specific_order_path=True,
+        trusted_accounting_path=True,
+        real_paper_e2e=True,
+        capability_promoted=True,
+        controlled_instrument="SPY 2026-08-28 765C conId=900369377 multiplier=100",
+        capability_market="US_SPY_OPTION_LONG_INTRADAY",
         remaining_gates=(
-            "explicit broker runtime resolution for expiry/strike/right/multiplier",
-            "exercise/assignment/expiry/settlement risk handling",
-            "derivative-specific sizing/accounting/restart path",
-            "no-transmit order gate and real Paper E2E",
+            "scope is limited to the exact verified long BUY-to-open then SELL-to-close round-trip",
+            "exercise, assignment, expiration settlement, opening short options and multi-leg options remain unverified",
         ),
     ),
     AssetVerificationEvidence(
         key="CRYPTO",
         asset_class=AssetClass.CRYPTO,
-        level=VerificationLevel.CONTRACT_FOUNDATION,
+        level=VerificationLevel.READ_ONLY_RUNTIME,
         contract_foundation=True,
-        runtime_contract_evidence=False,
+        runtime_contract_evidence=True,
         product_specific_order_path=False,
         trusted_accounting_path=False,
         real_paper_e2e=False,
         capability_promoted=False,
+        controlled_instrument="BTC/USD ContractDetails on PAXOS and ZEROHASH",
         remaining_gates=(
-            "account/residence/venue/Paper availability must be verified, not inferred",
-            "broker runtime contract/market-data/min-size evidence",
-            "crypto-specific sizing/accounting/order path",
-            "no-transmit order gate and real Paper E2E",
+            "ContractDetails visibility does not prove account/residence eligibility or cryptocurrency trading permission",
+            "actual Paper crypto order acceptance remains unverified",
+            "crypto-specific sizing/accounting/order path remains unverified",
+            "real Paper E2E is required before any CRYPTO capability promotion",
         ),
     ),
 )
@@ -170,13 +173,14 @@ def validate_verification_matrix() -> tuple[str, ...]:
         if item.real_paper_e2e and not item.product_specific_order_path:
             violations.append(f"{item.key}: Paper E2E lacks product-specific order path")
         if item.paper_market_verified:
+            capability_market = item.capability_market or item.key
             if not is_verified_paper_capability(
-                market=item.key,
+                market=capability_market,
                 asset_class=item.asset_class,
                 broker="IBKR",
             ):
                 violations.append(
-                    f"{item.key}: matrix claims market verification absent from VERIFIED_CAPABILITIES"
+                    f"{item.key}: matrix claims exact Paper verification absent from VERIFIED_CAPABILITIES"
                 )
         elif item.capability_promoted:
             violations.append(f"{item.key}: promotion level is not VERIFIED_MARKET_PAPER")
