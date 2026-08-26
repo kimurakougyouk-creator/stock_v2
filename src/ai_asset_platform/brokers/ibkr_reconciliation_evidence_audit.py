@@ -23,6 +23,10 @@ from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     preview_ibkr_paper_execution_snapshot,
 )
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.reports.paired_spy_close_accounting import (
+    PairedSpyCloseAccountingError,
+    enrich_closed_spy_round_trip,
+)
 
 
 @dataclass(frozen=True)
@@ -287,18 +291,25 @@ def audit_ibkr_reconciliation_evidence(
     execution_snapshot: IbkrPaperExecutionSnapshot | None = None,
 ) -> IbkrReconciliationEvidenceAudit:
     records = _load_jsonl(order_log_path)
+    evidence_records = records
+    try:
+        evidence_records = enrich_closed_spy_round_trip(records)
+    except PairedSpyCloseAccountingError:
+        # Keep the original row incomplete when broker execution identity is
+        # ambiguous.  The audit must fail closed instead of manufacturing FX.
+        evidence_records = records
     broker_account = account or preview_ibkr_paper_account_snapshot()
     broker_executions = execution_snapshot or preview_ibkr_paper_execution_snapshot()
     account_currency = str(broker_account.base_currency or SETTINGS.account_currency).strip().upper()
     blockers = _blockers(
-        records,
+        evidence_records,
         account_currency=account_currency,
         executions=tuple(broker_executions.executions),
     )
     symbols = tuple(
         _symbol_evidence(
             ticker,
-            records=records,
+            records=evidence_records,
             account=broker_account,
             executions=tuple(broker_executions.executions),
         )
