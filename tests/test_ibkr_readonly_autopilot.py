@@ -80,6 +80,9 @@ def test_installer_runs_only_readonly_autopilot_service():
     assert "IBKR_PAPER_MONITOR_EMAIL_ALERTS=auto" in script
     assert "IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS=12" in script
     assert "tests/test_ibkr_paper_operations_monitor.py" in script
+    assert "systemctl --user enable ibkr-readonly-autopilot.service" in script
+    assert "systemctl --user restart ibkr-readonly-autopilot.service" in script
+    assert "systemctl --user enable --now ibkr-readonly-autopilot.service" not in script
 
 
 def test_paper_operations_monitor_once_wrapper_is_readonly():
