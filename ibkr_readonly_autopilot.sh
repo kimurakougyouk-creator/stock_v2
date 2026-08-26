@@ -53,15 +53,15 @@ while true; do
       source .venv/bin/activate
       export PYTHONPATH="$PWD/src:$PWD"
       set +e
-      bash ./ibkr_auto.sh
-      checkpoint_status=$?
+      # Strict unattended policy: run only the comprehensive read-only monitor.
+      # Do not invoke ibkr_auto.sh/operator checkpoint here because that path
+      # performs an IBKR What-If placeOrder request. What-If is non-transmitting,
+      # but it is still an order API request and therefore requires deliberate,
+      # separately authorized operator execution rather than unattended repeats.
       python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor \
         2>&1 | tee "$MONITOR_LOG"
       monitor_status=${PIPESTATUS[0]}
       set -e
-      if [[ "$checkpoint_status" -ne 0 ]]; then
-        echo "CHECKPOINT NOT READY: deep read-only checkpoint returned non-zero"
-      fi
       if [[ "$monitor_status" -eq 2 ]]; then
         echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
       elif [[ "$monitor_status" -eq 1 ]]; then
@@ -71,6 +71,7 @@ while true; do
     else
       echo "SKIP: .venv/bin/activate not found. No order was sent."
     fi
+    echo "ORDER API REQUEST SENT: False"
     echo "REAL ORDER SENT: False"
     echo "LIVE ORDER SENT: False"
   } >>"$LOG_FILE" 2>&1 || true

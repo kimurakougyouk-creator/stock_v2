@@ -12,10 +12,13 @@ def test_readonly_autopilot_has_valid_bash_syntax():
     assert result.returncode == 0, result.stderr
 
 
-def test_readonly_autopilot_only_invokes_safe_readonly_checks():
+def test_readonly_autopilot_only_invokes_strict_readonly_monitor():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
-    assert "bash ./ibkr_auto.sh" in script
     assert "python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor" in script
+    assert "bash ./ibkr_auto.sh" not in script
+    assert "ibkr_operator_checkpoint" not in script
+    assert "ibkr_overnight_whatif" not in script
+    assert "placeOrder(" not in script
     assert "ibkr_auto_close_cycle_once.sh" not in script
     assert "ibkr_overnight_e2e_once.sh" not in script
     assert "YES_CLOSE_ONE_SPY_PAPER" not in script
@@ -25,11 +28,11 @@ def test_readonly_autopilot_only_invokes_safe_readonly_checks():
     assert "enable_live_trading" not in script.lower()
     assert "RUN_VERIFIED_PAPER_ONLY" not in script
     assert "ibkr_verified_paper_runtime_once.sh" not in script
+    assert 'echo "ORDER API REQUEST SENT: False"' in script
 
 
-def test_readonly_autopilot_keeps_running_when_audit_is_not_ready():
+def test_readonly_autopilot_keeps_running_when_monitor_is_not_ready():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
-    assert "CHECKPOINT NOT READY" in script
     assert "PAPER OPERATIONS CRITICAL" in script
     assert "PAPER OPERATIONS WARNING" in script
     assert "sleep \"$INTERVAL_SECONDS\"" in script
@@ -50,8 +53,8 @@ def test_readonly_autopilot_requires_main_but_tolerates_remote_outage():
     switch_at = script.index("git switch main")
     pull_at = script.index("if git pull --ff-only origin main; then")
     warning_at = script.index("origin/main unavailable; continuing from unchanged local main")
-    audit_at = script.index("bash ./ibkr_auto.sh")
-    assert switch_at < pull_at < warning_at < audit_at
+    monitor_at = script.index("python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor")
+    assert switch_at < pull_at < warning_at < monitor_at
 
 
 def test_readonly_autopilot_bounds_interval_and_log_growth():
