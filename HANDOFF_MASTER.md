@@ -73,7 +73,7 @@ The current development target is not merely “the wiring exists.” The Paper 
 - Account currency: JPY
 - Account timezone: Asia/Tokyo
 
-Remote `main` immediately before this Work-handoff workflow clarification: `7234d6c0409f2f82ef1678b4c4f6b39fa1b819c4`.
+Remote `main` after the closed-SPY reconciliation fix: `1e3f73ba10586c11e84e8fa9bd7e60c1938e3530`.
 
 Do not assume the Chromebook checkout is already at the latest remote commit unless verified locally.
 
@@ -94,6 +94,7 @@ Old feature/version branches are not authoritative just because their names look
 - PR #234: Phase 7 signal-runner final IBKR Paper wiring — merged.
 - PR #235: exact verified derivative rows can be safely quarantined from the legacy whole-share ledger — merged.
 - PR #236: post-cleanup reconciliation audit runs automatically in the cleanup wrapper — merged.
+- PR #238: the read-only reconciliation audit recognizes the exact closed SPY stock pair using the SELL row's explicit FX without mutating the ledger — merged.
 - Open PRs: 0 at the last pre-workflow check.
 - Open Issues: 0 at the last pre-workflow check.
 - `main` branch protection: disabled.
@@ -230,6 +231,32 @@ A subsequent Completed Orders audit confirmed READY=True, port 4002, ORDER COUNT
 
 Current IBKR dynamic history therefore cannot recover those old executions.
 
+### Latest cleanup and reconciliation result
+
+The verified-derivative cleanup was executed on the Chromebook on 2026-08-26 JST:
+
+- targeted cleanup tests: `4 passed`
+- exact derivative rows retired: `4`
+- backup: `results/verified_derivative_cleanup_backups/paper_orders.before_verified_derivative_cleanup.20260826T161456+0900.jsonl`
+- quarantine: `results/quarantined_verified_derivative_ledger_rows.jsonl`
+- order sent: `False`
+
+The remaining SPY stock BUY 1 @ 765.45 has a matching SELL 1 @ 766.34 with a distinct broker execution ID and explicit `fx_to_account_rate=158.875`. PR #238 made the read-only reconciliation audit reuse the existing calculation-only exact-pair rule. It copies and enriches audit records in memory only; it does not write the durable ledger. Ambiguous or overlapping execution identity still fails closed.
+
+Chromebook verification after PR #238:
+
+- targeted reconciliation tests: `8 passed`
+- account ready: `True`
+- execution snapshot ready: `True`
+- endpoint: `4002`
+- AAPL broker/local: `0/0`
+- SPY broker/local: `0/0`
+- blocker count: `0`
+- next action: `RECONCILIATION_EVIDENCE_IS_CLEAN`
+- ledger changed: `False`
+- Paper order sent: `False`
+- Live order sent: `False`
+
 ## Interpretation of the four legacy blockers
 
 Three blockers exactly match immutable derivative evidence already stored in the repository:
@@ -281,15 +308,12 @@ The current status of that file is unknown.
 
 Do not automatically run `git reset`, `git clean`, `git stash`, delete runtime artifacts, or commit generated files merely to make the tree clean.
 
-Also unknown at handoff:
+Still unknown:
 
-- whether local `main` has pulled PR #235/#236
-- whether verified derivative cleanup has been executed locally
-- blocker count after cleanup
-- full local pytest count after PR #235/#236
+- full local pytest count after PR #238 (the remote-equivalent isolated suite passed `1348` tests; Chromebook targeted reconciliation passed `8`)
 - `AI_ASSET_ENABLE_IBKR_PAPER` current local value
 - systemd read-only autopilot installed/enabled/active state
-- whether IB Gateway/TWS is running when development resumes
+- whether IB Gateway/TWS is running at a future resume time
 
 These remain unknown until a local check is genuinely needed.
 
@@ -321,15 +345,11 @@ Handoff completion and development completion are separate.
 
 Shortest development path after handoff:
 
-1. verify local checkout state only when needed
-2. run the already-merged verified-derivative cleanup wrapper only if the local legacy blocker state still requires it
-3. inspect its automatic post-cleanup reconciliation result
-4. resolve the remaining SPY BUY 765.45 blocker without guessing
-5. restore `ACCOUNTING SAFE=True` and `PREFLIGHT ALLOWED=True`
-6. rerun read-only soak
-7. verify restart/recovery behavior
-8. validate the deliberate unattended Paper runtime/entry point for the verified scope
-9. only then make the final Paper completion judgment
+1. rerun the bounded read-only soak now that reconciliation is clean
+2. require consecutive clean cycles with no Paper/Live order sent
+3. verify restart/recovery behavior
+4. validate the deliberate unattended Paper runtime/entry point for the verified scope
+5. only then make the final Paper completion judgment
 
 Live Trading is not part of this completion path.
 
