@@ -73,7 +73,7 @@ The current development target is not merely “the wiring exists.” The Paper 
 - Account currency: JPY
 - Account timezone: Asia/Tokyo
 
-Remote `main` after the closed-SPY reconciliation fix: `1e3f73ba10586c11e84e8fa9bd7e60c1938e3530`.
+Remote implementation `main` before this final evidence record: `2ab0f5ba39206e6d6bd6a649db3b5464cedbe36d`.
 
 Do not assume the Chromebook checkout is already at the latest remote commit unless verified locally.
 
@@ -95,6 +95,9 @@ Old feature/version branches are not authoritative just because their names look
 - PR #235: exact verified derivative rows can be safely quarantined from the legacy whole-share ledger — merged.
 - PR #236: post-cleanup reconciliation audit runs automatically in the cleanup wrapper — merged.
 - PR #238: the read-only reconciliation audit recognizes the exact closed SPY stock pair using the SELL row's explicit FX without mutating the ledger — merged.
+- PR #239: the clean reconciliation state and bounded-soak next gate were recorded — merged.
+- PR #240: the exact closed-SPY BUY row can be durably repaired from its uniquely matching SELL row's explicit FX, with backup first and no broker order — merged.
+- PR #241: an explicit bounded, fail-closed IBKR Paper runtime entry point for AAPL 1 / SPY 1 / 9432.T 100 was added — merged.
 - Open PRs: 0 at the last pre-workflow check.
 - Open Issues: 0 at the last pre-workflow check.
 - `main` branch protection: disabled.
@@ -257,6 +260,45 @@ Chromebook verification after PR #238:
 - Paper order sent: `False`
 - Live order sent: `False`
 
+### Final Paper milestone evidence
+
+The closed SPY ledger repair was executed on the Chromebook on 2026-08-26 JST:
+
+- targeted repair/audit tests: `16 passed`
+- repaired intent: `broker-recovery:00012ec5.6ab91096.01.01`
+- persisted FX rate: `158.875`
+- exact reference SELL exec_id: `0000e511.6a8b602c.01.01`
+- backup: `results/closed_spy_fx_repair_backups/paper_orders.before_closed_spy_fx_repair.20260826T164549+0900.jsonl`
+- reconciliation remained clean with AAPL/SPY broker/local `0/0` and blocker count `0`
+- accounting safe, preflight allowed, and Paper E2E review ready were all `True`
+- broker order sent: `False`; Live order sent: `False`
+
+The bounded read-only soak then passed three consecutive process cycles:
+
+- full suite before soak: `1348 passed in 25.23s`
+- every cycle: account ready, broker positions `0`, SPY held `0`, legacy blockers `[]`, accounting safe `True`, preflight allowed `True`, Paper E2E review ready `True`
+- every cycle: Paper order sent `False`; Live order sent `False`
+- final result: `PASS (3 consecutive read-only cycles)`
+
+Targeted restart/network-loss/reconciliation tests passed `31` tests. They cover connection loss blocking dispatch, failed reconnect remaining fail-closed, fill-state recovery after restart, and durable order-intent duplicate suppression. PR #241's bounded Paper runtime passed `37` targeted tests; its remote-equivalent full suite passed `1359` tests.
+
+The deliberate runtime `ibkr_verified_paper_runtime_once.sh` was then executed after synchronizing local `main`:
+
+- runtime tests: `37 passed in 2.80s`
+- exact scope: AAPL `1`, SPY `1`, 9432.T `100`
+- Live Trading: `PROHIBITED`
+- AAPL: technical `HOLD`, AI `SELL`, final `HOLD`
+- SPY: technical `HOLD`, AI `HOLD`, final `HOLD`
+- 9432.T: technical `BUY`, AI `SELL`, final `HOLD`
+- analysis records: `3`; data failures: `0`
+- confirmed new Paper fills: `0`
+- runtime errors: `0`; execution errors: `0`
+- Live order sent: `False`
+
+Zero new fills is the correct result for this scan because no ticker had a final BUY or SELL decision. It is not an execution failure and is not a reason to force or repeat an order.
+
+The Paper milestone completion rule is therefore satisfied for the exact verified scope. Normal `start.sh` remains intentionally non-ordering; Paper dispatch is available only through the deliberate, explicitly opted-in bounded entry point. Live Trading and unsupported/broader products remain outside this completion claim and fail closed.
+
 ## Interpretation of the four legacy blockers
 
 Three blockers exactly match immutable derivative evidence already stored in the repository:
@@ -310,8 +352,7 @@ Do not automatically run `git reset`, `git clean`, `git stash`, delete runtime a
 
 Still unknown:
 
-- full local pytest count after PR #238 (the remote-equivalent isolated suite passed `1348` tests; Chromebook targeted reconciliation passed `8`)
-- `AI_ASSET_ENABLE_IBKR_PAPER` current local value
+- the persistent `.env` value of `AI_ASSET_ENABLE_IBKR_PAPER`; the verified wrapper used process-scoped explicit Paper opt-in
 - systemd read-only autopilot installed/enabled/active state
 - whether IB Gateway/TWS is running at a future resume time
 
@@ -341,17 +382,9 @@ Only if local runtime evidence is genuinely required should the user be asked fo
 
 ## Next development objective after handoff
 
-Handoff completion and development completion are separate.
+The exact verified-scope Paper milestone is complete. Do not create duplicate broker proof or force an actionable signal merely to produce a new fill.
 
-Shortest development path after handoff:
-
-1. rerun the bounded read-only soak now that reconciliation is clean
-2. require consecutive clean cycles with no Paper/Live order sent
-3. verify restart/recovery behavior
-4. validate the deliberate unattended Paper runtime/entry point for the verified scope
-5. only then make the final Paper completion judgment
-
-Live Trading is not part of this completion path.
+The next single stage is monitored Paper operation over time: accumulate ordinary deliberate-run results and evaluate strategy quality, reporting, and operational alerts without broadening the capability registry. Any future FX/Crypto or broader derivative expansion requires new broker/account evidence first. Live Trading is a separate, unauthorized stage and remains prohibited/fail-closed.
 
 ---
 
