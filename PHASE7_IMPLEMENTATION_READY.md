@@ -1,26 +1,38 @@
 # Phase 7 — Signal Runner Final Wiring
 
-Status: implementation target verified against `signal_runner.py` on this branch.
+Status: **COMPLETE — merged to `main` on 2026-08-26**.
 
-## Required final change
+## Completed final change
 
-Replace only the legacy final paper-order dispatch after all existing signal/risk/position/daily-limit checks have passed:
+The legacy final paper-order dispatch in `signal_runner.py`:
 
 `build_paper_order_sync(...) -> create_paper_order(...)`
 
-with the existing IBKR Paper bridge:
+was replaced with the verified IBKR Paper runtime:
 
-`execute_signal_via_ibkr_paper(...) -> ExecutionService -> risk gate -> IBKR Paper adapter`
+`execute_approved_signal_via_ibkr_paper(...) -> ExecutionService -> shared risk gate -> IBKR Paper adapter`
 
-## Non-negotiable safety constraints
+The change was merged by PR #234 as squash commit `abdad2fd04ca83cd650d64363fbc69a4e216dbc4`.
 
-- Do not add a Live Trading order path.
-- Require both Paper Trading and IBKR Paper opt-ins before IBKR dispatch.
-- HOLD must never dispatch an order.
-- Preserve emergency stop, daily loss, consecutive loss, max positions, daily BUY/SELL limits, repurchase cooldown, cash/allocation/risk limits, trailing stop, time stop, and daily trading amount checks.
-- Do not call both `create_paper_order()` and the IBKR bridge for the same intent.
-- Preserve deterministic order-intent duplicate protection.
-- Do not commit `data/` runtime artifacts.
-- Final verification must use mocks/fakes first; no new real Paper order during code wiring.
+## Safety properties preserved and verified
 
-This file is a branch-local checkpoint and does not claim the final wiring is complete.
+- No Live Trading order path was added or enabled.
+- IBKR dispatch requires both Paper Trading and IBKR Paper opt-ins.
+- HOLD never dispatches an order.
+- Existing emergency stop, daily loss, consecutive loss, max positions, daily BUY/SELL limits, repurchase cooldown, cash/allocation/risk limits, trailing stop, time stop, and daily trading amount checks remain upstream of dispatch.
+- The legacy local `create_paper_order()` path is no longer called by production `signal_runner.py` for the final dispatch.
+- Deterministic order-intent IDs are derived from ticker, side, quantity, and source bar so repeated processing of the same bar preserves the same intent identity.
+- Unverified ticker/quantity combinations fail closed before the broker runtime; the runtime retains its own verified-capability guard.
+- No real Paper order was sent while wiring the code.
+
+## Verification evidence
+
+- Pull request: #234 `Phase 7: wire signal runner to verified IBKR Paper execution`
+- PR CI secret scan: PASS
+- PR CI pytest: **1342 passed**
+- PR merge: successful
+- `main` now imports and uses `execute_approved_signal_via_ibkr_paper` from `signal_runner.py`.
+
+## Next engineering phase
+
+Phase 7 is closed. Continue with production hardening of the already verified Paper scope: unattended runtime/soak behavior, restart/network-loss recovery evidence, and monitoring/reporting. Live Trading remains separately locked and out of scope until explicitly authorized.
