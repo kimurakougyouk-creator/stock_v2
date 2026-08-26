@@ -164,6 +164,77 @@ def test_clean_ledger_and_flat_broker_is_clean(tmp_path):
     assert result.next_action == "RECONCILIATION_EVIDENCE_IS_CLEAN"
 
 
+def test_closed_spy_pair_uses_explicit_sell_fx_without_mutating_ledger(tmp_path):
+    rows = [
+        {
+            "mode": "IBKR_PAPER",
+            "status": "FILLED",
+            "ticker": "SPY",
+            "side": "BUY",
+            "shares": 1,
+            "reference_price": 765.45,
+            "currency": "USD",
+            "order_intent_id": "broker-recovery:00012ec5.6ab91096.01.01",
+            "broker_order_id": 3,
+            "broker_exec_ids": ["00012ec5.6ab91096.01.01"],
+        },
+        {
+            "mode": "IBKR_PAPER",
+            "status": "FILLED",
+            "ticker": "SPY",
+            "side": "SELL",
+            "shares": 1,
+            "reference_price": 766.34,
+            "currency": "USD",
+            "order_intent_id": "overnight-paper-e2e:SPY:SELL:1:2026-08-23",
+            "broker_order_id": 7,
+            "broker_exec_ids": ["0000e511.6a8b602c.01.01"],
+            "fx_to_account_rate": 158.875,
+        },
+    ]
+    path = _write(tmp_path, rows)
+    before = path.read_text(encoding="utf-8")
+
+    result = audit_ibkr_reconciliation_evidence(
+        order_log_path=path,
+        account=_account(),
+        execution_snapshot=_snapshot(),
+    )
+
+    assert result.blockers == ()
+    assert result.next_action == "RECONCILIATION_EVIDENCE_IS_CLEAN"
+    assert result.ledger_changed is False
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_closed_spy_pair_with_overlapping_exec_identity_fails_closed(tmp_path):
+    rows = [
+        {
+            "mode": "IBKR_PAPER", "status": "FILLED", "ticker": "SPY",
+            "side": "BUY", "shares": 1, "reference_price": 765.45,
+            "currency": "USD", "order_intent_id": "buy",
+            "broker_exec_ids": ["same-exec"],
+        },
+        {
+            "mode": "IBKR_PAPER", "status": "FILLED", "ticker": "SPY",
+            "side": "SELL", "shares": 1, "reference_price": 766.34,
+            "currency": "USD", "order_intent_id": "sell",
+            "broker_exec_ids": ["same-exec"], "fx_to_account_rate": 158.875,
+        },
+    ]
+    path = _write(tmp_path, rows)
+
+    result = audit_ibkr_reconciliation_evidence(
+        order_log_path=path,
+        account=_account(),
+        execution_snapshot=_snapshot(),
+    )
+
+    assert len(result.blockers) == 1
+    assert result.blockers[0].reason == "missing-historical-fx"
+    assert result.next_action == "LEGACY_EVIDENCE_REMAINS_UNRECOVERABLE"
+
+
 def test_not_ready_account_fails_closed(tmp_path):
     path = _write(tmp_path, [])
     result = audit_ibkr_reconciliation_evidence(
