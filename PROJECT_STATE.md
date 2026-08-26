@@ -2,7 +2,7 @@
 
 Last updated: 2026-08-26
 
-> **Runtime handoff note (2026-08-26):** `HANDOFF_MASTER.md` is now the canonical cross-chat handoff entry point. Phase 7 signal-runner -> verified IBKR Paper wiring is merged (#234), but normal `start.sh` / `signal_runner.main()` still defaults to no order dispatch. A later Chromebook read-only soak passed 1342 tests but stopped at cycle 1 on four legacy whole-share accounting blockers. PR #235 and #236 are merged to safely quarantine only exact verified derivative rows and then rerun the reconciliation audit, but that cleanup has not yet been confirmed as executed on the Chromebook. Do not treat the earlier aggregate PASS below as proof that the latest local runtime is currently soak-clean; do not guess the remaining SPY BUY 765.45 historical-FX evidence. See `HANDOFF_MASTER.md` for the latest remote/local split and next-step rules.
+> **Runtime handoff note (2026-08-26):** `HANDOFF_MASTER.md` is the canonical cross-chat handoff entry point. Phase 7 signal-runner -> verified IBKR Paper wiring is merged (#234), but normal `start.sh` / `signal_runner.main()` still defaults to no order dispatch. The verified-derivative cleanup was executed locally, backed up the ledger, and quarantined four exact rows without sending an order. PR #238 then made the read-only reconciliation audit recognize the exact closed SPY stock pair from distinct broker execution IDs plus the SELL row's explicit FX, without mutating the ledger. Chromebook verification now reports AAPL/SPY broker/local `0/0`, blocker count `0`, and `RECONCILIATION_EVIDENCE_IS_CLEAN`. The next runtime gate is the bounded read-only soak; do not repeat old Paper proof.
 
 This is the concise evidence ledger for AI agents. Do not replace verified facts with guesses and do not request duplicate Paper orders merely to re-prove existing broker evidence.
 
@@ -13,6 +13,11 @@ The consolidated IBKR Paper completion audit is complete for the exact verified 
 ## Latest consolidated evidence
 
 Local runs on 2026-08-26:
+
+- Verified-derivative cleanup targeted tests: `4 passed`; `4` exact derivative rows quarantined after backup; no broker order sent.
+- Post-PR #238 reconciliation targeted tests: `8 passed`.
+- Latest reconciliation: account/execution snapshot ready on port `4002`; AAPL broker/local `0/0`; SPY broker/local `0/0`; blocker count `0`; `RECONCILIATION_EVIDENCE_IS_CLEAN`; ledger unchanged; no Paper or Live order sent.
+- Remote-equivalent isolated full suite after PR #238: `1348 passed`.
 
 - Aggregate read-only audit: `1330 passed`.
 - Stock/ETF/global-stock final completion gate: `PASS`.
@@ -85,4 +90,4 @@ The Paper platform is complete only for the exact verified capability scope list
 
 ## Next engineering priority
 
-Do not create more duplicate broker proof. The next engineering stage should move from capability verification to production hardening of the verified Paper scope: long-running unattended operation, deterministic recovery after restart/network loss, reporting/monitoring, and only then any separately authorized Live-readiness work. Any future FX/Crypto capability expansion requires new broker/account evidence first.
+Do not create more duplicate broker proof. Run the bounded read-only soak now that reconciliation is clean, then continue production hardening of the verified Paper scope: deterministic recovery after restart/network loss, reporting/monitoring, and a deliberate unattended Paper runtime/entry point. Only then judge the Paper milestone complete. Any future FX/Crypto capability expansion requires new broker/account evidence first; Live remains out of scope and fail-closed.
