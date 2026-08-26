@@ -17,4 +17,6 @@ pytest -q tests/test_ibkr_verified_derivative_ledger_cleanup.py
 AI_ASSET_ALLOW_VERIFIED_DERIVATIVE_LEDGER_CLEANUP=1 \
   python -m ai_asset_platform.brokers.ibkr_verified_derivative_ledger_cleanup_cli
 
+python -m ai_asset_platform.brokers.ibkr_reconciliation_evidence_audit
+
 printf '%s\n' "REAL ORDER SENT BY CLEANUP WRAPPER: False"
