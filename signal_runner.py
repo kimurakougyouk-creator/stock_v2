@@ -23,8 +23,13 @@ from config import (
     TRADING_CAPITAL,
 )
 from ai_asset_platform.core.settings import SETTINGS
-from ai_asset_platform.execution.paper_order_sync import build_paper_order_sync
+from ai_asset_platform.execution.ibkr_signal_runtime import (
+    execute_approved_signal_via_ibkr_paper,
+)
 from ai_asset_platform.execution.order_limit_reason import detect_buy_order_limit_reason
+from ai_asset_platform.execution.signal_order_bridge import (
+    verified_paper_test_quantity_for_ticker,
+)
 from indicators import add_indicators
 from mail import send_mail
 from order_manager import (
@@ -36,7 +41,6 @@ from order_manager import (
     calculate_daily_trading_amount,
     calculate_position_holding_days,
     calculate_repurchase_cooldown_remaining_minutes,
-    create_paper_order,
     get_open_positions,
     load_paper_orders,
     update_trailing_high_price,
@@ -99,6 +103,35 @@ def _safe_download(ticker: str) -> tuple[pd.DataFrame | None, str | None]:
         return None, "empty"
 
     return df, None
+
+
+def _build_signal_order_intent_id(
+    *,
+    ticker: str,
+    signal: str,
+    shares: int,
+    bar_key: object,
+) -> str:
+    """同じ確定バーの同一注文意図を、再起動後も同じIDへ固定する。"""
+
+    normalized_ticker = str(ticker).strip().upper()
+    normalized_signal = str(signal).strip().upper()
+    quantity = int(shares)
+    normalized_bar_key = str(bar_key).strip()
+
+    if not normalized_ticker:
+        raise ValueError("ticker is empty")
+    if normalized_signal not in {"BUY", "SELL"}:
+        raise ValueError("signal must be BUY or SELL")
+    if quantity <= 0:
+        raise ValueError("shares must be positive")
+    if not normalized_bar_key:
+        raise ValueError("bar_key is empty")
+
+    return (
+        f"signal-runner:{normalized_ticker}:{normalized_signal}:"
+        f"{quantity}:{normalized_bar_key}"
+    )
 
 
 def evaluate_trailing_stop(
@@ -720,43 +753,120 @@ def run_signal_scan(
                                     f"{max_daily_trading_amount_yen:,.0f}円を"
                                     "超えるため、注文を見送りました。"
                                 )
-                            elif SETTINGS.enable_paper_trading:
-                                paper_order_sync = build_paper_order_sync(
-                                    ticker=ticker,
-                                    signal=order_signal,
-                                    shares=order_shares,
-                                    reference_price=float(
-                                        signal_result["price"]
-                                    ),
+                            elif (
+                                SETTINGS.enable_paper_trading
+                                and getattr(
+                                    SETTINGS,
+                                    "enable_ibkr_paper",
+                                    False,
+                                )
+                            ):
+                                verified_quantity = (
+                                    verified_paper_test_quantity_for_ticker(
+                                        ticker
+                                    )
                                 )
 
-                                paper_order = create_paper_order(
-                                    ticker=paper_order_sync.legacy_order[
-                                        "ticker"
-                                    ],
-                                    signal=paper_order_sync.legacy_order[
-                                        "side"
-                                    ],
-                                    shares=paper_order_sync.legacy_order[
-                                        "shares"
-                                    ],
-                                    reference_price=paper_order_sync.legacy_order[
-                                        "reference_price"
-                                    ],
-                                )
-                                if trailing_stop_triggered:
-                                    order_reason = "Trailing Stop"
-                                elif time_stop_triggered:
-                                    order_reason = "Time Stop"
+                                if verified_quantity is None:
+                                    print(
+                                        f"{ticker}: IBKR Paperで"
+                                        "検証済み注文数量が未登録のため、"
+                                        "注文を送信しません。"
+                                    )
+                                elif order_shares != verified_quantity:
+                                    print(
+                                        f"{ticker}: 今回の注文数量"
+                                        f"{order_shares}株は、IBKR Paperの"
+                                        f"検証済み数量{verified_quantity}株と"
+                                        "一致しないため送信しません。"
+                                    )
                                 else:
-                                    order_reason = "AI最終判定"
+                                    order_intent_id = (
+                                        _build_signal_order_intent_id(
+                                            ticker=ticker,
+                                            signal=order_signal,
+                                            shares=order_shares,
+                                            bar_key=prepared.index[-1],
+                                        )
+                                    )
 
-                                decision_ordered = True
+                                    if trailing_stop_triggered:
+                                        order_reason = "Trailing Stop"
+                                    elif time_stop_triggered:
+                                        order_reason = "Time Stop"
+                                    else:
+                                        order_reason = "AI最終判定"
+
+                                    try:
+                                        execution = (
+                                            execute_approved_signal_via_ibkr_paper(
+                                                ticker=ticker,
+                                                signal=order_signal,
+                                                shares=order_shares,
+                                                order_intent_id=(
+                                                    order_intent_id
+                                                ),
+                                            )
+                                        )
+                                    except Exception as exc:
+                                        errors.append(
+                                            {
+                                                "ticker": ticker,
+                                                "error": (
+                                                    "IBKR Paper注文エラー: "
+                                                    f"{exc}"
+                                                ),
+                                            }
+                                        )
+                                        print(
+                                            f"{ticker}: IBKR Paper注文に"
+                                            f"失敗したため送信完了扱いにしません。{exc}"
+                                        )
+                                    else:
+                                        broker_result = execution.broker_result
+                                        order_sent = bool(
+                                            execution.attempted
+                                            and getattr(
+                                                broker_result,
+                                                "sent",
+                                                False,
+                                            )
+                                        )
+
+                                        if order_sent:
+                                            decision_ordered = True
+                                            status = str(
+                                                getattr(
+                                                    broker_result,
+                                                    "status",
+                                                    "UNKNOWN",
+                                                )
+                                            )
+                                            print(
+                                                f"{ticker}: {order_reason}による"
+                                                "IBKR Paper注文を送信しました "
+                                                f"({order_signal} "
+                                                f"{order_shares}株 / "
+                                                f"status={status})"
+                                            )
+                                        else:
+                                            detail = str(
+                                                getattr(
+                                                    broker_result,
+                                                    "message",
+                                                    "",
+                                                )
+                                                or execution.reason
+                                            )
+                                            print(
+                                                f"{ticker}: IBKR Paper注文は"
+                                                f"送信されませんでした。{detail}"
+                                            )
+                            elif SETTINGS.enable_paper_trading:
                                 print(
-                                    f"{ticker}: {order_reason}による"
-                                    "模擬注文を記録しました "
-                                    f"({paper_order['side']} "
-                                    f"{paper_order['shares']}株)"
+                                    f"{ticker}: Paper Tradingは有効ですが、"
+                                    "IBKR Paperの明示オプトインが無効なため、"
+                                    "注文を送信しません。"
                                 )
                             elif SETTINGS.live_trading_unlocked:
                                 print(
