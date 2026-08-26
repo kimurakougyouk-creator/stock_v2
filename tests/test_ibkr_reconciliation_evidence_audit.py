@@ -162,6 +162,49 @@ def test_clean_ledger_and_flat_broker_is_clean(tmp_path):
     )
     assert result.blockers == ()
     assert result.next_action == "RECONCILIATION_EVIDENCE_IS_CLEAN"
+    assert [item.ticker for item in result.symbols] == ["AAPL", "SPY", "9432.T"]
+
+
+def test_9432_t_local_quantity_is_compared_with_broker_9432_symbol(tmp_path):
+    path = _write(tmp_path, [{
+        "mode": "IBKR_PAPER",
+        "ticker": "9432.T",
+        "side": "BUY",
+        "shares": 100,
+        "reference_price": 150.0,
+        "currency": "JPY",
+        "status": "FILLED",
+        "order_intent_id": "9432-buy",
+    }])
+    result = audit_ibkr_reconciliation_evidence(
+        order_log_path=path,
+        account=_account(_position("9432", 100)),
+        execution_snapshot=_snapshot(),
+    )
+    evidence = next(item for item in result.symbols if item.ticker == "9432.T")
+    assert evidence.broker_quantity == 100
+    assert evidence.local_confirmed_quantity == 100
+    assert evidence.quantity_gap == 0
+    assert result.next_action == "RECONCILIATION_EVIDENCE_IS_CLEAN"
+
+
+def test_spy_quantity_gap_blocks_verified_runtime_reconciliation(tmp_path):
+    path = _write(tmp_path, [{
+        "mode": "IBKR_PAPER",
+        "ticker": "SPY",
+        "side": "BUY",
+        "shares": 1,
+        "reference_price": 700.0,
+        "currency": "JPY",
+        "status": "FILLED",
+        "order_intent_id": "spy-buy",
+    }])
+    result = audit_ibkr_reconciliation_evidence(
+        order_log_path=path,
+        account=_account(),
+        execution_snapshot=_snapshot(),
+    )
+    assert result.next_action == "REVIEW_SPY_PAPER_POSITION_BEFORE_NEW_EXPOSURE"
 
 
 def test_closed_spy_pair_uses_explicit_sell_fx_without_mutating_ledger(tmp_path):

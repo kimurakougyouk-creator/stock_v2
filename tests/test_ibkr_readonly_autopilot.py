@@ -15,7 +15,7 @@ def test_readonly_autopilot_has_valid_bash_syntax():
 def test_readonly_autopilot_only_invokes_safe_readonly_checks():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
     assert "bash ./ibkr_auto.sh" in script
-    assert "python -m ai_asset_platform.brokers.ibkr_multiasset_readonly_audit" in script
+    assert "python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor" in script
     assert "ibkr_auto_close_cycle_once.sh" not in script
     assert "ibkr_overnight_e2e_once.sh" not in script
     assert "YES_CLOSE_ONE_SPY_PAPER" not in script
@@ -23,12 +23,15 @@ def test_readonly_autopilot_only_invokes_safe_readonly_checks():
     assert "AI_ASSET_ENABLE_LIVE_TRADING" not in script
     assert "AI_ASSET_LIVE_TRADING_UNLOCKED" not in script
     assert "enable_live_trading" not in script.lower()
+    assert "RUN_VERIFIED_PAPER_ONLY" not in script
+    assert "ibkr_verified_paper_runtime_once.sh" not in script
 
 
 def test_readonly_autopilot_keeps_running_when_audit_is_not_ready():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
     assert "CHECKPOINT NOT READY" in script
-    assert "MULTI-ASSET NOT READY" in script
+    assert "PAPER OPERATIONS CRITICAL" in script
+    assert "PAPER OPERATIONS WARNING" in script
     assert "sleep \"$INTERVAL_SECONDS\"" in script
 
 
@@ -68,3 +71,24 @@ def test_installer_runs_only_readonly_autopilot_service():
     assert "ibkr_readonly_autopilot.sh" in script
     assert "ibkr_auto_close_cycle_once.sh" not in script
     assert "YES_CLOSE_ONE_SPY_PAPER" not in script
+    assert "UMask=0077" in script
+    assert "IBKR_PAPER_MONITOR_MAX_RUNTIME_AGE_HOURS=96" in script
+    assert "IBKR_PAPER_MONITOR_MAX_HISTORY_BYTES=10485760" in script
+    assert "IBKR_PAPER_MONITOR_EMAIL_ALERTS=auto" in script
+    assert "IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS=12" in script
+    assert "tests/test_ibkr_paper_operations_monitor.py" in script
+
+
+def test_paper_operations_monitor_once_wrapper_is_readonly():
+    script = Path("ibkr_paper_operations_monitor_once.sh").read_text(encoding="utf-8")
+    assert "ai_asset_platform.brokers.ibkr_paper_operations_monitor" in script
+    assert "RUN_VERIFIED_PAPER_ONLY" not in script
+    assert "AI_ASSET_ENABLE_IBKR_PAPER" not in script
+    assert "ibkr_verified_paper_runtime_once.sh" not in script
+    result = subprocess.run(
+        ["bash", "-n", "ibkr_paper_operations_monitor_once.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
