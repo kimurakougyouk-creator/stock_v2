@@ -77,13 +77,13 @@ def bridge_legacy_signal_runner_order_spies_to_ibkr_runtime(monkeypatch, request
     real_getattr = builtins.getattr
 
     def test_compatible_getattr(obj, name, *default):
-        if name == "enable_ibkr_paper" and not hasattr(obj, name):
+        if name == "enable_ibkr_paper":
             return bool(real_getattr(obj, "enable_paper_trading", False))
         return real_getattr(obj, name, *default)
 
-    # Some older tests replace SETTINGS with a SimpleNamespace created before
-    # enable_ibkr_paper existed. Treat that missing field as a test-double-only
-    # opt-in. Real PlatformSettings keeps the strict environment-backed flag.
+    # These legacy unit tests predate the separate IBKR Paper opt-in. For these
+    # two modules only, paper_trading=True also enables the mocked IBKR endpoint.
+    # Dedicated final-wiring tests separately verify the real double opt-in gate.
     monkeypatch.setattr(
         signal_runner,
         "getattr",
