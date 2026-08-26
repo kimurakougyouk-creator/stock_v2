@@ -44,7 +44,10 @@ WantedBy=default.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user enable --now ibkr-readonly-autopilot.service
+# Always replace any already-running older process with the newly verified script.
+# `restart` also starts the service when it is currently inactive.
+systemctl --user enable ibkr-readonly-autopilot.service
+systemctl --user restart ibkr-readonly-autopilot.service
 
 echo "IBKR read-only autopilot installed and started."
 echo "It monitors reconciliation, all open orders, accounting, and verified-runtime history."
