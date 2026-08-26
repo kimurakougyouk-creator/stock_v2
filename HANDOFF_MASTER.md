@@ -4,6 +4,42 @@ Last verified: 2026-08-26 (JST)
 
 This file is the canonical handoff entry point for ChatGPT/Claude/Codex agents. It exists to stop repeated re-discovery, duplicate Paper orders, and confusion between remote GitHub state and the user's Chromebook runtime state.
 
+## Handoff destination — critical
+
+The primary continuation destination is **ChatGPT Project `自動売買システム開発` -> `Work`**.
+
+Do not restart the project in an unrelated normal chat. Do not treat GitHub alone as the handoff destination. GitHub stores the canonical code/evidence; ChatGPT Project keeps the long-running project context; Work is the primary place for the longer multi-step development workflow.
+
+After entering Work, the next agent must read this file and `PROJECT_STATE.md` before asking the user to repeat anything.
+
+### Operating model after handoff
+
+- **ChatGPT Project / Work**: primary project manager and remote execution coordinator. Inspect GitHub, audit code, make safe changes, create PRs, check CI, review issues, research, and maintain project state before asking the user to do anything.
+- **GitHub `main`**: canonical remote code and durable evidence source. Do not treat old chats or historical branches as newer than `main`.
+- **Chromebook + IBKR Paper**: local runtime/evidence environment. Use only when remote work cannot answer the question. The user should receive one complete copy-paste command only when local execution is genuinely required.
+- **Claude Code**: use only when local-filesystem implementation/testing is materially required or is clearly faster than remote GitHub work. Do not duplicate the same implementation in ChatGPT Work and Claude Code.
+- **User**: performs only unavoidable local/authentication/approval actions. Mark those moments with `🟢 あなたの出番です`.
+
+### No-more-handoff-loop rule
+
+Once the project is running in Project `自動売買システム開発` -> Work, do not create another handoff merely because the chat becomes long. Update this file after substantive verified changes and continue from it. Create a new handoff only when the user explicitly migrates to a different environment or a genuine context boundary requires it.
+
+### Work start sequence
+
+On the first Work run after migration:
+
+1. Read `HANDOFF_MASTER.md` and `PROJECT_STATE.md`.
+2. Verify current `main`, open PRs, open issues, CI, and Live fail-closed state.
+3. Identify the single current blocker from newer evidence; do not repeat old Paper proof.
+4. Do all GitHub-side investigation/fixes/tests/PR/CI first.
+5. Only if Chromebook/IBKR runtime evidence is indispensable, give exactly one user action with `🟢 あなたの出番です`.
+6. When the user returns the result, continue automatically instead of restarting diagnosis.
+7. Update canonical state only after substantive progress; documentation must follow implementation, not replace it.
+
+### Current Paper milestone completion rule
+
+The current development target is not merely “the wiring exists.” The Paper milestone is complete only when the verified scope can operate safely through an unattended Paper runtime with explicit opt-in, deterministic recovery, monitoring/reporting, and the final runtime gates pass. The normal safe startup may remain non-ordering; a deliberate Paper runtime/entry point may be separate. Live Trading is not part of this milestone and remains locked.
+
 ## Operator rules
 
 - The user is a beginner. Minimize manual work, repeated confirmation, and long explanations.
@@ -37,7 +73,7 @@ This file is the canonical handoff entry point for ChatGPT/Claude/Codex agents. 
 - Account currency: JPY
 - Account timezone: Asia/Tokyo
 
-Remote `main` immediately before this handoff file was created: `fd417ad201f3c2dcec9def026d68da433580b6c6`.
+Remote `main` immediately before this Work-handoff workflow clarification: `7234d6c0409f2f82ef1678b4c4f6b39fa1b819c4`.
 
 Do not assume the Chromebook checkout is already at the latest remote commit unless verified locally.
 
@@ -58,8 +94,8 @@ Old feature/version branches are not authoritative just because their names look
 - PR #234: Phase 7 signal-runner final IBKR Paper wiring — merged.
 - PR #235: exact verified derivative rows can be safely quarantined from the legacy whole-share ledger — merged.
 - PR #236: post-cleanup reconciliation audit runs automatically in the cleanup wrapper — merged.
-- Open PRs: 0.
-- Open Issues: 0.
+- Open PRs: 0 at the last pre-workflow check.
+- Open Issues: 0 at the last pre-workflow check.
 - `main` branch protection: disabled.
 - Many historical feature/version branches remain and are not authoritative.
 - `fix/quarantine-verified-derivative-ledger-rows-2` is a stray historical work branch, not a newer source than `main`.
@@ -292,7 +328,8 @@ Shortest development path after handoff:
 5. restore `ACCOUNTING SAFE=True` and `PREFLIGHT ALLOWED=True`
 6. rerun read-only soak
 7. verify restart/recovery behavior
-8. only then make the final Paper completion judgment
+8. validate the deliberate unattended Paper runtime/entry point for the verified scope
+9. only then make the final Paper completion judgment
 
 Live Trading is not part of this completion path.
 
