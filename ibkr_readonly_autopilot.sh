@@ -7,6 +7,7 @@ MAX_LOG_BYTES="${IBKR_AUTOPILOT_MAX_LOG_BYTES:-5242880}"
 LOG_DIR="$REPO_DIR/results"
 LOG_FILE="$LOG_DIR/ibkr_readonly_autopilot.log"
 ROTATED_LOG_FILE="$LOG_FILE.1"
+MONITOR_LOG="$LOG_DIR/ibkr_paper_operations_monitor_latest.log"
 
 cd "$REPO_DIR"
 mkdir -p "$LOG_DIR"
@@ -51,13 +52,27 @@ while true; do
     if [[ -f .venv/bin/activate ]]; then
       source .venv/bin/activate
       export PYTHONPATH="$PWD/src:$PWD"
-      bash ./ibkr_auto.sh || echo "CHECKPOINT NOT READY: read-only checkpoint returned non-zero"
-      python -m ai_asset_platform.brokers.ibkr_multiasset_readonly_audit \
-        || echo "MULTI-ASSET NOT READY: read-only ContractDetails audit returned non-zero"
+      set +e
+      bash ./ibkr_auto.sh
+      checkpoint_status=$?
+      python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor \
+        2>&1 | tee "$MONITOR_LOG"
+      monitor_status=${PIPESTATUS[0]}
+      set -e
+      if [[ "$checkpoint_status" -ne 0 ]]; then
+        echo "CHECKPOINT NOT READY: deep read-only checkpoint returned non-zero"
+      fi
+      if [[ "$monitor_status" -eq 2 ]]; then
+        echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
+      elif [[ "$monitor_status" -eq 1 ]]; then
+        echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
+      fi
+      echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
     else
       echo "SKIP: .venv/bin/activate not found. No order was sent."
     fi
     echo "REAL ORDER SENT: False"
+    echo "LIVE ORDER SENT: False"
   } >>"$LOG_FILE" 2>&1 || true
   sleep "$INTERVAL_SECONDS"
 done

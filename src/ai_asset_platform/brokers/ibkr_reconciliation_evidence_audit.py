@@ -68,6 +68,13 @@ class IbkrReconciliationEvidenceAudit:
     ledger_changed: bool = False
 
 
+_MONITORED_SYMBOLS = (
+    ("AAPL", "AAPL"),
+    ("SPY", "SPY"),
+    ("9432.T", "9432"),
+)
+
+
 def _load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -180,8 +187,8 @@ def _confirmed_quantity(records: Iterable[dict], ticker: str) -> int | None:
     return held
 
 
-def _broker_position(account: IbkrPaperAccountSnapshot, ticker: str):
-    target = str(ticker).strip().upper()
+def _broker_position(account: IbkrPaperAccountSnapshot, broker_symbol: str):
+    target = str(broker_symbol).strip().upper()
     matches = [item for item in account.positions if str(item.symbol).strip().upper() == target]
     if not matches:
         return None
@@ -238,18 +245,23 @@ def _blockers(
 
 def _symbol_evidence(
     ticker: str,
+    broker_symbol: str,
     *,
     records: list[dict],
     account: IbkrPaperAccountSnapshot,
     executions: tuple[IbkrExecutionEvidence, ...],
 ) -> SymbolReconciliationEvidence:
     local = _confirmed_quantity(records, ticker)
-    position = _broker_position(account, ticker)
+    position = _broker_position(account, broker_symbol)
     broker_qty = 0.0 if position is None else float(position.quantity)
     avg_cost = None if position is None or float(position.average_cost) <= 0 else float(position.average_cost)
     market_price = None if position is None or float(position.market_price) <= 0 else float(position.market_price)
     gap = None if local is None else broker_qty - float(local)
-    available = sum(1 for item in executions if str(item.symbol).strip().upper() == ticker)
+    available = sum(
+        1
+        for item in executions
+        if str(item.symbol).strip().upper() == broker_symbol
+    )
     return SymbolReconciliationEvidence(
         ticker=ticker,
         broker_quantity=broker_qty,
@@ -281,6 +293,12 @@ def _next_action(
             return "RECOVER_UNIQUE_BROKER_EXECUTION_EVIDENCE"
     if blockers:
         return "LEGACY_EVIDENCE_REMAINS_UNRECOVERABLE"
+    for item in symbols:
+        if item.local_confirmed_quantity is None:
+            return "BLOCKED_LOCAL_POSITION_RECONSTRUCTION_FAILED"
+        if item.quantity_gap not in (None, 0.0):
+            normalized = item.ticker.replace(".", "_").replace("-", "_")
+            return f"REVIEW_{normalized}_PAPER_POSITION_BEFORE_NEW_EXPOSURE"
     return "RECONCILIATION_EVIDENCE_IS_CLEAN"
 
 
@@ -309,11 +327,12 @@ def audit_ibkr_reconciliation_evidence(
     symbols = tuple(
         _symbol_evidence(
             ticker,
+            broker_symbol,
             records=evidence_records,
             account=broker_account,
             executions=tuple(broker_executions.executions),
         )
-        for ticker in ("AAPL", "SPY")
+        for ticker, broker_symbol in _MONITORED_SYMBOLS
     )
     return IbkrReconciliationEvidenceAudit(
         account_ready=broker_account.ready,
