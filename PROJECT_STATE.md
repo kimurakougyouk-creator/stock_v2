@@ -2,6 +2,8 @@
 
 Last updated: 2026-08-26
 
+> **Runtime handoff note (2026-08-26):** `HANDOFF_MASTER.md` is now the canonical cross-chat handoff entry point. Phase 7 signal-runner -> verified IBKR Paper wiring is merged (#234), but normal `start.sh` / `signal_runner.main()` still defaults to no order dispatch. A later Chromebook read-only soak passed 1342 tests but stopped at cycle 1 on four legacy whole-share accounting blockers. PR #235 and #236 are merged to safely quarantine only exact verified derivative rows and then rerun the reconciliation audit, but that cleanup has not yet been confirmed as executed on the Chromebook. Do not treat the earlier aggregate PASS below as proof that the latest local runtime is currently soak-clean; do not guess the remaining SPY BUY 765.45 historical-FX evidence. See `HANDOFF_MASTER.md` for the latest remote/local split and next-step rules.
+
 This is the concise evidence ledger for AI agents. Do not replace verified facts with guesses and do not request duplicate Paper orders merely to re-prove existing broker evidence.
 
 ## Current phase
