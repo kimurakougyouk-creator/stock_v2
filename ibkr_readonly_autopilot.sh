@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_DIR="${IBKR_REPO_DIR:-$HOME/stock_v2_latest}"
 INTERVAL_SECONDS="${IBKR_AUTOPILOT_INTERVAL_SECONDS:-300}"
 MAX_LOG_BYTES="${IBKR_AUTOPILOT_MAX_LOG_BYTES:-5242880}"
+PIN_FILE="${IBKR_AUTOPILOT_PIN_FILE:-$HOME/.config/ai-asset-platform/ibkr-readonly-autopilot-pinned-head}"
 LOG_DIR="$REPO_DIR/results"
 LOG_FILE="$LOG_DIR/ibkr_readonly_autopilot.log"
 ROTATED_LOG_FILE="$LOG_FILE.1"
@@ -21,6 +22,37 @@ if ! [[ "$MAX_LOG_BYTES" =~ ^[0-9]+$ ]] || (( MAX_LOG_BYTES < 1048576 || MAX_LOG
   exit 2
 fi
 
+initial_branch="$(git branch --show-current 2>/dev/null || true)"
+initial_head="$(git rev-parse HEAD 2>/dev/null || true)"
+if [[ "$initial_branch" != "main" ]] || ! [[ "$initial_head" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "BLOCKED: unattended monitor must start from a valid local main commit. No order was sent." >&2
+  exit 2
+fi
+
+# Migration path for installations created before revision pinning existed.
+# The previously audited daemon may fast-forward to this audited revision once;
+# this first launch freezes that exact HEAD in a local mode-0600 file. From then
+# on the unattended process never fetches, pulls, switches branches, or executes
+# newly downloaded code. Future upgrades require the tested installer.
+if [[ -n "${IBKR_AUTOPILOT_PINNED_HEAD:-}" ]]; then
+  PINNED_HEAD="$IBKR_AUTOPILOT_PINNED_HEAD"
+elif [[ -f "$PIN_FILE" ]]; then
+  PINNED_HEAD="$(tr -d '[:space:]' < "$PIN_FILE")"
+else
+  PINNED_HEAD="$initial_head"
+  mkdir -p "$(dirname "$PIN_FILE")"
+  pin_tmp="$PIN_FILE.tmp"
+  umask 077
+  printf '%s\n' "$PINNED_HEAD" > "$pin_tmp"
+  chmod 600 "$pin_tmp"
+  mv -f "$pin_tmp" "$PIN_FILE"
+  echo "AUTOPILOT MIGRATION PIN: $PINNED_HEAD"
+fi
+if ! [[ "$PINNED_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "BLOCKED: unattended monitor pinned revision is invalid. No order was sent." >&2
+  exit 2
+fi
+
 rotate_autopilot_log_if_needed() {
   local current_size=0
   if [[ -f "$LOG_FILE" ]]; then
@@ -31,25 +63,29 @@ rotate_autopilot_log_if_needed() {
   fi
 }
 
+tracked_source_is_clean() {
+  git diff --quiet HEAD -- . ':(exclude)results/**' ':(exclude)data/**' && \
+    git diff --cached --quiet HEAD -- . ':(exclude)results/**' ':(exclude)data/**'
+}
+
 while true; do
   rotate_autopilot_log_if_needed
   {
     echo "===== $(date -Is) IBKR READ-ONLY AUTOPILOT ====="
-    # Never run an arbitrary development branch unattended. Local main is
-    # mandatory, but origin/main availability is not: a transient GitHub/network
-    # outage must not suppress already-installed read-only broker safety checks.
-    git switch main
-    before_head="$(git rev-parse HEAD)"
-    if git pull --ff-only origin main; then
-      after_head="$(git rev-parse HEAD)"
-      if [[ "$after_head" != "$before_head" ]]; then
-        echo "AUTOPILOT UPDATE: main changed; reloading read-only autopilot from the new revision."
-        exec /usr/bin/env bash "$REPO_DIR/ibkr_readonly_autopilot.sh"
-      fi
-    else
-      echo "AUTOPILOT UPDATE WARNING: origin/main unavailable; continuing from unchanged local main. No order was sent."
-    fi
-    if [[ -f .venv/bin/activate ]]; then
+    current_branch="$(git branch --show-current 2>/dev/null || true)"
+    current_head="$(git rev-parse HEAD 2>/dev/null || true)"
+
+    # Never mutate or update source code from an unattended trading-safety
+    # service. Only the exact commit approved by the installer/bootstrap pin may
+    # execute. Runtime artifacts under results/ and data/ are intentionally
+    # excluded from the tracked-source cleanliness check.
+    if [[ "$current_branch" != "main" ]]; then
+      echo "AUTOPILOT SOURCE BLOCKED: local branch is '$current_branch', expected 'main'. Monitoring code was not executed."
+    elif [[ "$current_head" != "$PINNED_HEAD" ]]; then
+      echo "AUTOPILOT SOURCE BLOCKED: local HEAD $current_head differs from pinned audited HEAD $PINNED_HEAD. Rerun the tested installer after review."
+    elif ! tracked_source_is_clean; then
+      echo "AUTOPILOT SOURCE BLOCKED: tracked source differs from pinned HEAD outside runtime output directories. Monitoring code was not executed."
+    elif [[ -f .venv/bin/activate ]]; then
       source .venv/bin/activate
       export PYTHONPATH="$PWD/src:$PWD"
       set +e
@@ -70,6 +106,7 @@ while true; do
     else
       echo "SKIP: .venv/bin/activate not found. No order was sent."
     fi
+    echo "PINNED AUDITED HEAD: $PINNED_HEAD"
     echo "ORDER API REQUEST SENT: False"
     echo "REAL ORDER SENT: False"
     echo "LIVE ORDER SENT: False"

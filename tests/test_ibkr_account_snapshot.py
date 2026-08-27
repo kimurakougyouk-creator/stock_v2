@@ -10,6 +10,11 @@ class _Event:
         return None
 
 
+class _IncompleteEvent(_Event):
+    def wait(self, timeout):
+        return False
+
+
 class FakeProbe:
     instances = []
     def __init__(self):
@@ -96,4 +101,39 @@ def test_snapshot_fails_closed_when_base_currency_is_not_proven(monkeypatch):
     assert result.connected is True
     assert result.base_currency is None
     assert result.ready is False
+    assert result.order_sent is False
+
+
+def test_snapshot_fails_closed_when_account_download_never_completes(monkeypatch):
+    class IncompleteDownload(FakeProbe):
+        def __init__(self):
+            super().__init__()
+            self.download_ready = _IncompleteEvent()
+
+    monkeypatch.setattr(module, "_AccountSnapshotProbe", IncompleteDownload)
+    monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
+
+    result = module.preview_ibkr_paper_account_snapshot(timeout=0.01)
+
+    assert result.ready is False
+    assert result.connected is False
+    assert result.positions == ()
+    assert any("account download did not complete" in item for item in result.errors)
+    assert result.order_sent is False
+
+
+def test_snapshot_fails_closed_when_account_summary_never_completes(monkeypatch):
+    class IncompleteSummary(FakeProbe):
+        def __init__(self):
+            super().__init__()
+            self.summary_ready = _IncompleteEvent()
+
+    monkeypatch.setattr(module, "_AccountSnapshotProbe", IncompleteSummary)
+    monkeypatch.setattr(module, "create_ibkr_paper_config", _config)
+
+    result = module.preview_ibkr_paper_account_snapshot(timeout=0.01)
+
+    assert result.ready is False
+    assert result.connected is False
+    assert any("account summary did not complete" in item for item in result.errors)
     assert result.order_sent is False

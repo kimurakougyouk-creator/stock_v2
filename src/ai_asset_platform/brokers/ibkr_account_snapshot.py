@@ -203,7 +203,7 @@ def _base_currency(probe: _AccountSnapshotProbe) -> str | None:
 
 
 def preview_ibkr_paper_account_snapshot(*, timeout: float = 10.0) -> IbkrPaperAccountSnapshot:
-    """Read one Paper account/portfolio snapshot, auto-detecting 4002 then 7497."""
+    """Read one complete Paper account/portfolio snapshot, trying 4002 then 7497."""
     collected: list[str] = []
     for use_gateway in (True, False):
         cfg = create_ibkr_paper_config(use_gateway=use_gateway)
@@ -238,13 +238,25 @@ def preview_ibkr_paper_account_snapshot(*, timeout: float = 10.0) -> IbkrPaperAc
                 "All",
                 "NetLiquidation,AvailableFunds,GrossPositionValue,TotalCashValue",
             )
-            probe.download_ready.wait(timeout)
-            probe.summary_ready.wait(timeout)
+            download_complete = probe.download_ready.wait(timeout)
+            summary_complete = probe.summary_ready.wait(timeout)
             try:
                 probe.cancelAccountSummary(991)
             except Exception:
                 pass
             probe.reqAccountUpdates(False, account_id)
+
+            if not download_complete or not summary_complete or probe.fatal_error:
+                collected.extend(probe.errors)
+                if not download_complete:
+                    collected.append(
+                        f"{cfg.port}: account download did not complete before timeout"
+                    )
+                if not summary_complete:
+                    collected.append(
+                        f"{cfg.port}: account summary did not complete before timeout"
+                    )
+                continue
 
             base_currency = _base_currency(probe)
             snapshot = IbkrPaperAccountSnapshot(
