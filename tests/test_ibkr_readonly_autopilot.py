@@ -2,6 +2,9 @@ from pathlib import Path
 import subprocess
 
 
+STRICT_MONITOR = "python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"
+
+
 def test_readonly_autopilot_has_valid_bash_syntax():
     result = subprocess.run(
         ["bash", "-n", "ibkr_readonly_autopilot.sh"],
@@ -14,7 +17,7 @@ def test_readonly_autopilot_has_valid_bash_syntax():
 
 def test_readonly_autopilot_only_invokes_strict_readonly_monitor():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
-    assert "python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor" in script
+    assert STRICT_MONITOR in script
     assert "bash ./ibkr_auto.sh" not in script
     assert "ibkr_operator_checkpoint" not in script
     assert "ibkr_overnight_whatif" not in script
@@ -53,7 +56,7 @@ def test_readonly_autopilot_requires_main_but_tolerates_remote_outage():
     switch_at = script.index("git switch main")
     pull_at = script.index("if git pull --ff-only origin main; then")
     warning_at = script.index("origin/main unavailable; continuing from unchanged local main")
-    monitor_at = script.index("python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor")
+    monitor_at = script.index(STRICT_MONITOR)
     assert switch_at < pull_at < warning_at < monitor_at
 
 
@@ -80,6 +83,7 @@ def test_installer_runs_only_readonly_autopilot_service():
     assert "IBKR_PAPER_MONITOR_EMAIL_ALERTS=auto" in script
     assert "IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS=12" in script
     assert "tests/test_ibkr_paper_operations_monitor.py" in script
+    assert "tests/test_ibkr_paper_operations_monitor_strict.py" in script
     assert "systemctl --user enable ibkr-readonly-autopilot.service" in script
     assert "systemctl --user restart ibkr-readonly-autopilot.service" in script
     assert "systemctl --user enable --now ibkr-readonly-autopilot.service" not in script
@@ -87,7 +91,8 @@ def test_installer_runs_only_readonly_autopilot_service():
 
 def test_paper_operations_monitor_once_wrapper_is_readonly():
     script = Path("ibkr_paper_operations_monitor_once.sh").read_text(encoding="utf-8")
-    assert "ai_asset_platform.brokers.ibkr_paper_operations_monitor" in script
+    assert STRICT_MONITOR in script
+    assert "tests/test_ibkr_paper_operations_monitor_strict.py" in script
     assert "RUN_VERIFIED_PAPER_ONLY" not in script
     assert "AI_ASSET_ENABLE_IBKR_PAPER" not in script
     assert "ibkr_verified_paper_runtime_once.sh" not in script

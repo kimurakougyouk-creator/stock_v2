@@ -19,7 +19,8 @@ export PYTHONPATH="$PWD/src:$PWD"
 pytest -q \
   tests/test_ibkr_all_open_orders_snapshot.py \
   tests/test_ibkr_paper_operations_monitor.py \
+  tests/test_ibkr_paper_operations_monitor_strict.py \
   tests/test_ibkr_reconciliation_evidence_audit.py \
   tests/test_ibkr_verified_paper_runtime.py
 
-python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor
+python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict

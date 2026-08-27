@@ -17,7 +17,8 @@ export PYTHONPATH="$PWD/src:$PWD"
 pytest -q \
   tests/test_ibkr_readonly_autopilot.py \
   tests/test_ibkr_all_open_orders_snapshot.py \
-  tests/test_ibkr_paper_operations_monitor.py
+  tests/test_ibkr_paper_operations_monitor.py \
+  tests/test_ibkr_paper_operations_monitor_strict.py
 
 mkdir -p "$UNIT_DIR"
 cat >"$SERVICE_FILE" <<EOF

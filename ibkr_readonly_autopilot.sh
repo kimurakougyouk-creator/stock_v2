@@ -53,12 +53,11 @@ while true; do
       source .venv/bin/activate
       export PYTHONPATH="$PWD/src:$PWD"
       set +e
-      # Strict unattended policy: run only the comprehensive read-only monitor.
-      # Do not invoke ibkr_auto.sh/operator checkpoint here because that path
-      # performs an IBKR What-If placeOrder request. What-If is non-transmitting,
-      # but it is still an order API request and therefore requires deliberate,
-      # separately authorized operator execution rather than unattended repeats.
-      python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor \
+      # Strict unattended policy: run only the IBKR-scoped read-only monitor.
+      # Legacy local PAPER simulation rows are excluded from live Paper-account
+      # risk state, while a complete broker snapshot is checked for every actual
+      # non-zero position. No order API request is used by this path.
+      python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict \
         2>&1 | tee "$MONITOR_LOG"
       monitor_status=${PIPESTATUS[0]}
       set -e
