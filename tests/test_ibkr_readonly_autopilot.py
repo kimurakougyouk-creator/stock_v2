@@ -15,6 +15,16 @@ def test_readonly_autopilot_has_valid_bash_syntax():
     assert result.returncode == 0, result.stderr
 
 
+def test_readonly_autopilot_installer_has_valid_bash_syntax():
+    result = subprocess.run(
+        ["bash", "-n", "install_ibkr_readonly_autopilot.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_readonly_autopilot_only_invokes_strict_readonly_monitor():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
     assert STRICT_MONITOR in script
