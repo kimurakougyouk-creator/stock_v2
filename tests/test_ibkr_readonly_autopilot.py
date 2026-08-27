@@ -41,23 +41,44 @@ def test_readonly_autopilot_keeps_running_when_monitor_is_not_ready():
     assert "sleep \"$INTERVAL_SECONDS\"" in script
 
 
-def test_readonly_autopilot_self_reloads_after_successful_fast_forward():
+def test_readonly_autopilot_never_updates_or_executes_remote_source_unattended():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
-    assert 'before_head="$(git rev-parse HEAD)"' in script
-    assert "if git pull --ff-only origin main; then" in script
-    assert 'after_head="$(git rev-parse HEAD)"' in script
-    assert '[[ "$after_head" != "$before_head" ]]' in script
-    assert 'exec /usr/bin/env bash "$REPO_DIR/ibkr_readonly_autopilot.sh"' in script
-    assert script.index("if git pull --ff-only origin main; then") < script.index("exec /usr/bin/env bash")
+    assert "git pull" not in script
+    assert "git fetch" not in script
+    assert "git switch" not in script
+    assert "git checkout" not in script
+    assert "exec /usr/bin/env bash" not in script
+    assert "PINNED_HEAD" in script
+    assert "AUTOPILOT SOURCE BLOCKED" in script
 
 
-def test_readonly_autopilot_requires_main_but_tolerates_remote_outage():
+def test_readonly_autopilot_requires_main_and_exact_pinned_head_before_monitor():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
-    switch_at = script.index("git switch main")
-    pull_at = script.index("if git pull --ff-only origin main; then")
-    warning_at = script.index("origin/main unavailable; continuing from unchanged local main")
+    branch_at = script.index('current_branch="$(git branch --show-current')
+    head_at = script.index('current_head="$(git rev-parse HEAD')
+    branch_block_at = script.index('if [[ "$current_branch" != "main" ]]')
+    head_block_at = script.index('elif [[ "$current_head" != "$PINNED_HEAD" ]]')
     monitor_at = script.index(STRICT_MONITOR)
-    assert switch_at < pull_at < warning_at < monitor_at
+    assert branch_at < branch_block_at < monitor_at
+    assert head_at < head_block_at < monitor_at
+
+
+def test_readonly_autopilot_blocks_tracked_source_changes_but_allows_runtime_outputs():
+    script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
+    assert "tracked_source_is_clean" in script
+    assert "git diff --quiet HEAD" in script
+    assert "git diff --cached --quiet HEAD" in script
+    assert "':(exclude)results/**'" in script
+    assert "':(exclude)data/**'" in script
+
+
+def test_readonly_autopilot_has_one_time_safe_migration_pin():
+    script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
+    assert "IBKR_AUTOPILOT_PIN_FILE" in script
+    assert "IBKR_AUTOPILOT_PINNED_HEAD" in script
+    assert "AUTOPILOT MIGRATION PIN" in script
+    assert 'chmod 600 "$pin_tmp"' in script
+    assert 'mv -f "$pin_tmp" "$PIN_FILE"' in script
 
 
 def test_readonly_autopilot_bounds_interval_and_log_growth():
@@ -82,8 +103,12 @@ def test_installer_runs_only_readonly_autopilot_service():
     assert "IBKR_PAPER_MONITOR_MAX_HISTORY_BYTES=10485760" in script
     assert "IBKR_PAPER_MONITOR_EMAIL_ALERTS=auto" in script
     assert "IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS=12" in script
+    assert "tests/test_ibkr_account_snapshot.py" in script
     assert "tests/test_ibkr_paper_operations_monitor.py" in script
     assert "tests/test_ibkr_paper_operations_monitor_strict.py" in script
+    assert "IBKR_AUTOPILOT_PIN_FILE=" in script
+    assert "IBKR_AUTOPILOT_PINNED_HEAD=" in script
+    assert 'chmod 600 "$pin_tmp"' in script
     assert "systemctl --user enable ibkr-readonly-autopilot.service" in script
     assert "systemctl --user restart ibkr-readonly-autopilot.service" in script
     assert "systemctl --user enable --now ibkr-readonly-autopilot.service" not in script
