@@ -1,6 +1,6 @@
 """Strict unattended adapter for the IBKR Paper operations monitor.
 
-This adapter fixes two operational-scope hazards without weakening fail-closed
+This adapter fixes operational-scope hazards without weakening fail-closed
 behavior:
 
 * An unavailable broker account snapshot must not be misreported as a confirmed
@@ -8,10 +8,13 @@ behavior:
 * Legacy local PAPER simulation rows must not be treated as current IBKR Paper
   positions. Accounting and active-risk checks here use only broker-confirmed
   ``IBKR_PAPER`` ``FILLED`` rows.
+* Broker positions are verified by symbol, security type, currency, and total
+  quantity so an option/derivative sharing an underlying symbol cannot masquerade
+  as a verified stock/ETF position.
 
 When the broker account snapshot is fully ready, every non-zero broker position
-is also checked against the exact verified Paper scope so a position created
-outside this program cannot be silently ignored.
+is checked against the exact verified Paper scope so a position created outside
+this program cannot be silently ignored.
 
 The adapter only uses read-only account, execution, and open-order snapshot
 APIs. It never places, changes, cancels, closes, or retries an order. The
@@ -20,6 +23,7 @@ existing monitor continues to own persistence, notification, and CLI output.
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 from pathlib import Path
 
 import order_manager
@@ -34,10 +38,10 @@ from ai_asset_platform.brokers.ibkr_execution_snapshot import (
 
 
 _CURRENCY_MISMATCH_REASON = "broker and configured account currencies do not match"
-_BROKER_SYMBOL_TO_VERIFIED_TICKER = {
-    "AAPL": "AAPL",
-    "SPY": "SPY",
-    "9432": "9432.T",
+_VERIFIED_BROKER_CONTRACTS = {
+    "AAPL": ("AAPL", "STK", "USD"),
+    "SPY": ("SPY", "STK", "USD"),
+    "9432": ("9432.T", "STK", "JPY"),
 }
 
 
@@ -66,16 +70,21 @@ def _combine_error(current: str | None, message: str) -> str:
 
 
 def _broker_position_critical_reasons(account) -> tuple[str, ...]:
-    """Check every current broker position only when the snapshot is complete."""
+    """Check every complete-snapshot broker position against exact contracts."""
     if account is None or not bool(getattr(account, "ready", False)):
         return ()
 
     critical: list[str] = []
+    totals: dict[str, float] = {}
     for position in tuple(getattr(account, "positions", ()) or ()):
         broker_symbol = str(getattr(position, "symbol", "") or "").strip().upper()
+        sec_type = str(getattr(position, "sec_type", "") or "").strip().upper()
+        currency = str(getattr(position, "currency", "") or "").strip().upper()
         try:
             quantity = float(getattr(position, "quantity"))
         except (TypeError, ValueError):
+            quantity = float("nan")
+        if not math.isfinite(quantity):
             _append_unique(
                 critical,
                 f"broker position quantity is invalid: {broker_symbol or 'UNKNOWN'}",
@@ -84,19 +93,31 @@ def _broker_position_critical_reasons(account) -> tuple[str, ...]:
         if quantity == 0:
             continue
 
-        ticker = _BROKER_SYMBOL_TO_VERIFIED_TICKER.get(broker_symbol)
-        if ticker is None:
+        expected = _VERIFIED_BROKER_CONTRACTS.get(broker_symbol)
+        if expected is None:
             _append_unique(
                 critical,
                 f"unverified broker position exists: {broker_symbol or 'UNKNOWN'}",
             )
             continue
 
-        verified_quantity = base.VERIFIED_SCOPE[ticker]
-        if quantity != float(verified_quantity):
+        ticker, expected_sec_type, expected_currency = expected
+        if sec_type != expected_sec_type or currency != expected_currency:
             _append_unique(
                 critical,
-                f"{ticker} broker held quantity {quantity:g} differs from verified quantity {verified_quantity}",
+                "unverified broker contract exists: "
+                f"{broker_symbol} sec_type={sec_type or 'UNKNOWN'} "
+                f"currency={currency or 'UNKNOWN'}",
+            )
+            continue
+        totals[ticker] = totals.get(ticker, 0.0) + quantity
+
+    for ticker, quantity in totals.items():
+        verified_quantity = float(base.VERIFIED_SCOPE[ticker])
+        if quantity != verified_quantity:
+            _append_unique(
+                critical,
+                f"{ticker} broker held quantity {quantity:g} differs from verified quantity {verified_quantity:g}",
             )
     return tuple(critical)
 
