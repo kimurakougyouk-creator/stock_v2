@@ -1,0 +1,68 @@
+name: windows-readonly-autopilot
+
+on:
+  push:
+    paths:
+      - "ibkr_readonly_autopilot_windows.ps1"
+      - "install_ibkr_readonly_autopilot_windows.ps1"
+      - "tests/test_ibkr_windows_readonly_autopilot.py"
+      - ".github/workflows/windows-readonly-autopilot.yml"
+      - "src/ai_asset_platform/brokers/ibkr_paper_operations_monitor.py"
+      - "src/ai_asset_platform/brokers/ibkr_paper_operations_monitor_strict.py"
+  pull_request:
+    paths:
+      - "ibkr_readonly_autopilot_windows.ps1"
+      - "install_ibkr_readonly_autopilot_windows.ps1"
+      - "tests/test_ibkr_windows_readonly_autopilot.py"
+      - ".github/workflows/windows-readonly-autopilot.yml"
+      - "src/ai_asset_platform/brokers/ibkr_paper_operations_monitor.py"
+      - "src/ai_asset_platform/brokers/ibkr_paper_operations_monitor_strict.py"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-readonly-autopilot:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ibapi==9.81.1.post1
+
+      - name: Parse Windows PowerShell scripts
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($path in @("ibkr_readonly_autopilot_windows.ps1", "install_ibkr_readonly_autopilot_windows.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -ne 0) {
+              $failed = $true
+              Write-Host "PowerShell parse errors in $path"
+              $errors | ForEach-Object { Write-Host $_.Message }
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Run Windows read-only monitor tests
+        shell: pwsh
+        run: |
+          pytest -q `
+            tests/test_ibkr_windows_readonly_autopilot.py `
+            tests/test_ibkr_account_snapshot.py `
+            tests/test_ibkr_all_open_orders_snapshot.py `
+            tests/test_ibkr_paper_operations_monitor.py `
+            tests/test_ibkr_paper_operations_monitor_strict.py
