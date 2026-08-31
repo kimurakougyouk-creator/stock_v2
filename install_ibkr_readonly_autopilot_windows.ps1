@@ -96,7 +96,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Parse both PowerShell files with the same Windows PowerShell parser used by
-# the scheduled task. Syntax errors block installation before any task changes.
+# the scheduled task. Syntax errors block staging before any task changes.
 foreach ($scriptPath in @($AutopilotScript, $PSCommandPath)) {
     $tokens = $null
     $errors = $null
@@ -115,7 +115,7 @@ Set-PrivatePinFile -Path $PinFile -Value $PinnedHead
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 if (-not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) {
-    throw "BLOCKED: Windows PowerShell executable not found. No task was installed."
+    throw "BLOCKED: Windows PowerShell executable not found. No task was staged."
 }
 
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -143,21 +143,32 @@ $task = New-ScheduledTask `
     -Settings $settings `
     -Description "Pinned, fail-closed IBKR Paper read-only operations monitor. Never places, changes, cancels, closes, or retries orders."
 
+# Migration safety: registration is deliberately staged DISABLED. Do not let
+# the Surface create a second/parallel monitoring history before the Chromebook
+# final snapshot is preserved, verified, and the IBKR session is deliberately
+# handed over. A later cutover step must explicitly enable and start this task.
 Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force | Out-Null
 try {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 } catch {
     # An inactive task needs no stop action.
 }
-Start-ScheduledTask -TaskName $TaskName
+Disable-ScheduledTask -TaskName $TaskName | Out-Null
 
-Write-Host "IBKR Windows read-only autopilot installed and started."
+$staged = Get-ScheduledTask -TaskName $TaskName
+if ($staged.State -ne "Disabled") {
+    throw "BLOCKED: Windows read-only autopilot task did not remain disabled after staging."
+}
+
+Write-Host "IBKR Windows read-only autopilot staged DISABLED."
 Write-Host "TASK NAME: $TaskName"
+Write-Host "TASK STATE: Disabled"
 Write-Host "PINNED AUDITED HEAD: $PinnedHead"
 Write-Host "INTERVAL: 300 seconds by default"
-Write-Host "AUTO START: current-user logon"
-Write-Host "AUTO RESTART: enabled after process failure"
+Write-Host "AUTO START AFTER CUTOVER: current-user logon"
+Write-Host "AUTO RESTART AFTER CUTOVER: enabled after process failure"
 Write-Host "EXECUTION TIME LIMIT: disabled"
+Write-Host "MONITOR STARTED: False"
 Write-Host "ORDER API REQUEST SENT: False"
 Write-Host "REAL ORDER SENT: False"
 Write-Host "LIVE ORDER SENT: False"
