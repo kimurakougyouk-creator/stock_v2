@@ -99,6 +99,15 @@ def test_windows_installer_is_fail_closed_and_non_elevated():
     assert "enable_live_trading" not in lower
 
 
+def test_windows_installer_task_definition_is_disabled_before_registration():
+    script = _text(INSTALLER)
+    settings_at = script.index("$settings = New-ScheduledTaskSettingsSet")
+    disable_setting_at = script.index("-Disable", settings_at)
+    task_at = script.index("$task = New-ScheduledTask")
+    register_at = script.index("Register-ScheduledTask")
+    assert settings_at < disable_setting_at < task_at < register_at
+
+
 def test_windows_installer_stages_disabled_after_revision_pin():
     script = _text(INSTALLER)
     pin_at = script.index("Set-PrivatePinFile -Path $PinFile -Value $PinnedHead")
