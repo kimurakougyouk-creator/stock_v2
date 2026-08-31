@@ -92,18 +92,22 @@ def test_windows_installer_is_fail_closed_and_non_elevated():
     assert "-DontStopIfGoingOnBatteries" in script
     assert "-MultipleInstances IgnoreNew" in script
     assert "Register-ScheduledTask" in script
-    assert "Start-ScheduledTask" in script
+    assert "Disable-ScheduledTask" in script
+    assert "Start-ScheduledTask" not in script
     assert "RunLevel Highest" not in script
     assert "placeorder(" not in lower
     assert "enable_live_trading" not in lower
 
 
-def test_windows_installer_pins_exact_revision_before_task_start():
+def test_windows_installer_stages_disabled_after_revision_pin():
     script = _text(INSTALLER)
     pin_at = script.index("Set-PrivatePinFile -Path $PinFile -Value $PinnedHead")
     register_at = script.index("Register-ScheduledTask")
-    start_at = script.index("Start-ScheduledTask")
-    assert pin_at < register_at < start_at
+    disable_at = script.index("Disable-ScheduledTask")
+    state_check_at = script.index('$staged.State -ne "Disabled"')
+    assert pin_at < register_at < disable_at < state_check_at
+    assert 'Write-Host "TASK STATE: Disabled"' in script
+    assert 'Write-Host "MONITOR STARTED: False"' in script
 
 
 def test_windows_autopilot_marks_all_order_paths_false_even_after_error():
