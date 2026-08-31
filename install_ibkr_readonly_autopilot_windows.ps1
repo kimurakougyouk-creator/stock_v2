@@ -129,6 +129,7 @@ $principal = New-ScheduledTaskPrincipal `
     -LogonType Interactive `
     -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
+    -Disable `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
@@ -143,16 +144,12 @@ $task = New-ScheduledTask `
     -Settings $settings `
     -Description "Pinned, fail-closed IBKR Paper read-only operations monitor. Never places, changes, cancels, closes, or retries orders."
 
-# Migration safety: registration is deliberately staged DISABLED. Do not let
-# the Surface create a second/parallel monitoring history before the Chromebook
-# final snapshot is preserved, verified, and the IBKR session is deliberately
-# handed over. A later cutover step must explicitly enable and start this task.
+# Migration safety: the task definition itself is disabled before registration.
+# There is therefore no registration-to-disable window in which StartWhenAvailable
+# or any trigger can begin a second/parallel Surface monitoring history. A later
+# cutover step must explicitly enable and start this task only after the Chromebook
+# final snapshot is preserved, verified, and the IBKR session is handed over.
 Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force | Out-Null
-try {
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-} catch {
-    # An inactive task needs no stop action.
-}
 Disable-ScheduledTask -TaskName $TaskName | Out-Null
 
 $staged = Get-ScheduledTask -TaskName $TaskName
