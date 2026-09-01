@@ -36,6 +36,10 @@ DEFAULT_REPORT_PATH = Path("results/strategy_profitability_evidence_latest.json"
 REPORT_SCHEMA_VERSION = 1
 
 
+class StrategyProfitabilityEvidenceError(ValueError):
+    """Raised when source evidence cannot be read without guessing."""
+
+
 @dataclass(frozen=True)
 class StrategyProfitabilityEvidence:
     evidence_status: str
@@ -57,16 +61,24 @@ def _load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     rows: list[dict] = []
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line_number, raw in enumerate(
+        path.read_text(encoding="utf-8", errors="strict").splitlines(),
+        start=1,
+    ):
         text = raw.strip()
         if not text:
             continue
         try:
             row = json.loads(text)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
+        except json.JSONDecodeError as exc:
+            raise StrategyProfitabilityEvidenceError(
+                f"order log line {line_number} is malformed JSON"
+            ) from exc
+        if not isinstance(row, dict):
+            raise StrategyProfitabilityEvidenceError(
+                f"order log line {line_number} is not a JSON object"
+            )
+        rows.append(row)
     return rows
 
 
@@ -101,6 +113,22 @@ def _empty_metrics() -> tuple[dict, dict]:
     performance = calculate_performance([])
     health = calculate_performance_health(performance)
     return _json_safe_performance(performance), asdict(health)
+
+
+def _blocked_input_evidence(*, reason: str, account_currency: str) -> StrategyProfitabilityEvidence:
+    performance, health = _empty_metrics()
+    return StrategyProfitabilityEvidence(
+        evidence_status="BLOCKED_INPUT_EVIDENCE",
+        gross_result="UNKNOWN",
+        reason=reason,
+        account_currency=str(account_currency).strip().upper(),
+        strategy_fill_count=0,
+        closed_trade_count=0,
+        excluded_ibkr_fill_count=0,
+        gross_performance=performance,
+        performance_health=health,
+        realized_trades=(),
+    )
 
 
 def build_strategy_profitability_evidence(
@@ -221,10 +249,17 @@ def audit_strategy_profitability_evidence(
     order_log_path: Path = DEFAULT_ORDER_LOG_PATH,
     account_currency: str | None = None,
 ) -> StrategyProfitabilityEvidence:
-    account = account_currency or SETTINGS.account_currency
+    account = str(account_currency or SETTINGS.account_currency)
+    try:
+        records = _load_jsonl(order_log_path)
+    except (StrategyProfitabilityEvidenceError, UnicodeError, OSError) as exc:
+        return _blocked_input_evidence(
+            reason=f"Profitability source evidence is unreadable; report blocked: {exc}",
+            account_currency=account,
+        )
     return build_strategy_profitability_evidence(
-        _load_jsonl(order_log_path),
-        account_currency=str(account),
+        records,
+        account_currency=account,
     )
 
 
@@ -265,7 +300,7 @@ def main() -> int:
     print("BROKER CONNECTION USED: False")
     print("ORDER SENT            : False")
     print("LIVE TRADING          : PROHIBITED")
-    return 0 if result.evidence_status != "BLOCKED_ACCOUNTING_EVIDENCE" else 1
+    return 1 if result.evidence_status.startswith("BLOCKED_") else 0
 
 
 if __name__ == "__main__":
