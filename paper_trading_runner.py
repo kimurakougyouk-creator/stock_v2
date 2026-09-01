@@ -17,6 +17,9 @@ from ai_asset_platform.execution.signal_order_bridge import (
     verified_paper_test_quantity_for_ticker,
     verified_paper_tickers,
 )
+from ai_asset_platform.execution.verified_market_session import (
+    evaluate_verified_market_session,
+)
 from ai_asset_platform.execution.verified_paper_preflight import (
     VerifiedPaperPreflightError,
     evaluate_verified_paper_preflight,
@@ -204,6 +207,14 @@ def _execute_confirmed_ibkr_paper_order(
     if verified_quantity is None:
         raise RuntimeError(
             f"{ticker}: broker-verified Paper pilot quantity is not registered; order blocked."
+        )
+
+    session = evaluate_verified_market_session(ticker)
+    if not session.allowed:
+        raise RuntimeError(
+            "verified Paper market-session guard blocked order: "
+            f"{session.reason} / venue={session.venue} / "
+            f"local={session.local_timestamp}"
         )
 
     instrument = _instrument_for_ticker(ticker)

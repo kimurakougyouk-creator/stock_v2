@@ -171,3 +171,29 @@ def isolate_position_exists_test_from_holding_age(monkeypatch, request):
         "calculate_position_holding_days",
         lambda ticker: None,
     )
+
+
+@pytest.fixture(autouse=True)
+def isolate_paper_execution_tests_from_wall_clock(monkeypatch, request):
+    """Execution unit/e2e tests exercise fill logic, not the real wall-clock calendar."""
+
+    if request.node.fspath.basename not in {
+        "test_paper_trading_runner.py",
+        "test_confirmed_fill_evidence_shared.py",
+        "test_ibkr_fill_to_equity_e2e.py",
+    }:
+        return
+
+    import paper_trading_runner
+
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "evaluate_verified_market_session",
+        lambda ticker: SimpleNamespace(
+            allowed=True,
+            reason="test core session open",
+            venue="TEST",
+            local_timestamp="2026-09-01T10:00:00-04:00",
+            session="TEST_OPEN",
+        ),
+    )
