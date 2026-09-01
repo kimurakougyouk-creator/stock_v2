@@ -174,10 +174,14 @@ def isolate_position_exists_test_from_holding_age(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def isolate_paper_runner_unit_tests_from_wall_clock(monkeypatch, request):
-    """Existing Paper runner unit tests exercise sizing/risk, not wall-clock calendars."""
+def isolate_paper_execution_tests_from_wall_clock(monkeypatch, request):
+    """Execution unit/e2e tests exercise fill logic, not the real wall-clock calendar."""
 
-    if request.node.fspath.basename != "test_paper_trading_runner.py":
+    if request.node.fspath.basename not in {
+        "test_paper_trading_runner.py",
+        "test_confirmed_fill_evidence_shared.py",
+        "test_ibkr_fill_to_equity_e2e.py",
+    }:
         return
 
     import paper_trading_runner
