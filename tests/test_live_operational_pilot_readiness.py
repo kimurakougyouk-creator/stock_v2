@@ -51,6 +51,29 @@ def _live_open_orders(count: int = 0, *, checked_at: str | None = None) -> dict:
     }
 
 
+def _live_fx(
+    *,
+    rate: float = 150.0,
+    checked_at: str | None = None,
+    base_currency: str = "USD",
+    quote_currency: str = "JPY",
+    endpoint_port: int = 4001,
+    ready: bool = True,
+) -> dict:
+    return {
+        "ready": ready,
+        "checked_at": checked_at or _stamp(),
+        "connection_mode": "LIVE_READ_ONLY",
+        "base_currency": base_currency,
+        "quote_currency": quote_currency,
+        "rate": rate,
+        "source": "LIVE_MARKET_DATA",
+        "endpoint_port": endpoint_port,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
+
+
 def _paper_monitor(*, checked_at: str | None = None) -> dict:
     return {
         "status": "WARNING",
@@ -79,10 +102,12 @@ def _evaluate(**overrides):
         "ticker": "AAPL",
         "side": "BUY",
         "quantity": 1,
-        "estimated_notional_jpy": 40_000,
+        "limit_price": 250.0,
+        "estimated_notional_jpy": 37_500.0,
         "expected_account_fingerprint": FINGERPRINT,
         "live_account_report": _live_account(),
         "live_open_orders_report": _live_open_orders(),
+        "live_fx_report": _live_fx(),
         "paper_monitor_report": _paper_monitor(),
         "market_session": _open_session(),
         "now": NOW,
@@ -99,6 +124,12 @@ def test_one_operational_pilot_does_not_require_strategy_profitability_proof():
     assert result.operational_pilot_ready is True
     assert result.strategy_deployment_ready is False
     assert result.status == "READY_FOR_ONE_OPERATIONAL_PILOT"
+    assert result.limit_price == 250.0
+    assert result.fx_rate_to_jpy == 150.0
+    assert result.estimated_notional_jpy == 37_500.0
+    assert result.notional_source == "LIMIT_PRICE_X_QUANTITY_X_FRESH_LIVE_USDJPY"
+    assert result.live_fx_ready is True
+    assert result.live_fx_fresh is True
     assert result.live_account_fresh is True
     assert result.live_open_orders_fresh is True
     assert result.paper_monitor_fresh is True
@@ -107,11 +138,67 @@ def test_one_operational_pilot_does_not_require_strategy_profitability_proof():
     assert result.live_order_sent is False
 
 
-def test_absolute_first_pilot_notional_ceiling_blocks_large_order():
-    result = _evaluate(estimated_notional_jpy=50_001)
+def test_absolute_first_pilot_notional_ceiling_uses_derived_notional():
+    result = _evaluate(
+        limit_price=400.0,
+        estimated_notional_jpy=60_000.0,
+    )
+
+    assert result.estimated_notional_jpy == 60_000.0
+    assert result.operational_pilot_ready is False
+    assert any("derived notional" in blocker for blocker in result.blockers)
+
+
+def test_caller_notional_cannot_override_bound_price_fx_derivation():
+    result = _evaluate(estimated_notional_jpy=10_000.0)
+
+    assert result.estimated_notional_jpy == 37_500.0
+    assert result.operational_pilot_ready is False
+    assert "caller-supplied notional differs from derived bound notional" in result.blockers
+
+
+def test_missing_limit_price_blocks_even_if_caller_supplies_small_notional():
+    result = _evaluate(limit_price=None, estimated_notional_jpy=1.0)
 
     assert result.operational_pilot_ready is False
-    assert any("ceiling" in blocker for blocker in result.blockers)
+    assert result.estimated_notional_jpy is None
+    assert "exact positive LIMIT price is required for pilot notional" in result.blockers
+
+
+def test_stale_live_fx_evidence_blocks_usd_pilot():
+    stale = _stamp(NOW - timedelta(seconds=121))
+    result = _evaluate(live_fx_report=_live_fx(checked_at=stale))
+
+    assert result.operational_pilot_ready is False
+    assert result.live_fx_fresh is False
+    assert "Live USD/JPY FX evidence is missing or stale" in result.blockers
+
+
+def test_wrong_fx_pair_or_non_live_endpoint_blocks_usd_pilot():
+    wrong_pair = _evaluate(live_fx_report=_live_fx(quote_currency="EUR"))
+    assert wrong_pair.operational_pilot_ready is False
+    assert wrong_pair.live_fx_ready is False
+
+    paper_endpoint = _evaluate(live_fx_report=_live_fx(endpoint_port=4002))
+    assert paper_endpoint.operational_pilot_ready is False
+    assert paper_endpoint.live_fx_ready is False
+
+
+def test_jpy_pilot_derives_notional_without_fx_report():
+    result = _evaluate(
+        ticker="9432.T",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        live_fx_report=None,
+    )
+
+    assert result.operational_pilot_ready is True
+    assert result.instrument_currency == "JPY"
+    assert result.live_fx_required is False
+    assert result.fx_rate_to_jpy == 1.0
+    assert result.estimated_notional_jpy == 40_000.0
+    assert result.notional_source == "JPY_LIMIT_PRICE_X_QUANTITY"
 
 
 def test_unexpected_live_open_order_blocks_pilot():
@@ -143,10 +230,12 @@ def test_market_closed_blocks_pilot_without_broker_action():
     assert result.market_session_allowed is False
 
 
-def test_scope_is_exact_and_spy_one_share_can_still_be_blocked_by_notional():
+def test_scope_is_exact():
     result = _evaluate(
         ticker="SPY",
         quantity=2,
+        limit_price=125.0,
+        estimated_notional_jpy=37_500.0,
     )
     assert result.operational_pilot_ready is False
     assert any("quantity" in blocker for blocker in result.blockers)

@@ -32,7 +32,7 @@ DEFAULT_LIVE_FX_REPORT = Path("results/ibkr_live_fx_evidence_latest.json")
 DEFAULT_PAPER_MONITOR_REPORT = Path("results/ibkr_paper_operations_monitor_latest.json")
 DEFAULT_STRATEGY_DEPLOYMENT_REPORT = Path("results/live_cash_readiness_latest.json")
 DEFAULT_REPORT_PATH = Path("results/live_operational_pilot_readiness_latest.json")
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 DEFAULT_MAX_EVIDENCE_AGE_SECONDS = 120.0
 
 # Absolute ceiling for the very first operational Live order. The operator may
@@ -47,6 +47,12 @@ LIVE_PILOT_SCOPE = {
     "SPY": 1,
     "9432.T": 100,
 }
+LIVE_PILOT_CURRENCY = {
+    "AAPL": "USD",
+    "SPY": "USD",
+    "9432.T": "JPY",
+}
+_VALID_LIVE_ENDPOINT_PORTS = {4001, 7496}
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,12 @@ class LiveOperationalPilotReadiness:
     ticker: str
     side: str
     quantity: int
+    limit_price: float | None
+    instrument_currency: str | None
+    fx_rate_to_jpy: float | None
+    live_fx_required: bool
+    live_fx_ready: bool
+    live_fx_fresh: bool
     estimated_notional_jpy: float | None
     absolute_notional_ceiling_jpy: float
     live_account_ready: bool
@@ -74,6 +86,7 @@ class LiveOperationalPilotReadiness:
     live_global_lock_intact_during_preparation: bool
     operational_pilot_ready: bool
     strategy_deployment_ready: bool
+    notional_source: str = "UNAVAILABLE"
     broker_connection_used: bool = False
     order_sent: bool = False
     live_order_sent: bool = False
@@ -130,6 +143,50 @@ def _report_fresh(
             max_age_seconds=max_age_seconds,
         )
     )
+
+
+def _positive_finite(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return parsed
+
+
+def _live_usd_jpy_fx(
+    report: dict | None,
+    *,
+    now: datetime,
+    max_age_seconds: float,
+) -> tuple[bool, bool, float | None]:
+    fresh = _report_fresh(
+        report,
+        field="checked_at",
+        now=now,
+        max_age_seconds=max_age_seconds,
+    )
+    if not isinstance(report, dict):
+        return False, fresh, None
+    try:
+        endpoint_port = int(report.get("endpoint_port"))
+    except (TypeError, ValueError):
+        endpoint_port = 0
+    rate = _positive_finite(report.get("rate"))
+    source = str(report.get("source") or "").strip().upper()
+    ready = bool(
+        report.get("ready") is True
+        and report.get("connection_mode") == "LIVE_READ_ONLY"
+        and str(report.get("base_currency") or "").strip().upper() == "USD"
+        and str(report.get("quote_currency") or "").strip().upper() == "JPY"
+        and endpoint_port in _VALID_LIVE_ENDPOINT_PORTS
+        and source not in {"", "BLOCKED", "IDENTITY"}
+        and rate is not None
+        and not report.get("order_sent")
+        and not report.get("live_order_sent")
+    )
+    return ready, fresh, rate if ready else None
 
 
 def _target_position_quantity(account_report: dict, ticker: str) -> float | None:
@@ -199,6 +256,8 @@ def evaluate_live_operational_pilot_readiness(
     market_session: VerifiedMarketSessionResult | None = None,
     now: datetime | None = None,
     max_evidence_age_seconds: float = DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
+    limit_price: float | None = None,
+    live_fx_report: dict | None = None,
 ) -> LiveOperationalPilotReadiness:
     current = now if now is not None else datetime.now(timezone.utc)
     if current.tzinfo is None or current.utcoffset() is None:
@@ -218,6 +277,7 @@ def evaluate_live_operational_pilot_readiness(
         normalized_quantity = 0
 
     verified_quantity = LIVE_PILOT_SCOPE.get(normalized_ticker)
+    instrument_currency = LIVE_PILOT_CURRENCY.get(normalized_ticker)
     if verified_quantity is None:
         blockers.append("ticker is outside the exact first-Live-pilot scope")
     elif normalized_quantity != verified_quantity:
@@ -227,18 +287,50 @@ def evaluate_live_operational_pilot_readiness(
     if normalized_side not in {"BUY", "SELL"}:
         blockers.append("side must be BUY or SELL")
 
-    notional: float | None = None
-    if estimated_notional_jpy is not None:
-        try:
-            notional = float(estimated_notional_jpy)
-        except (TypeError, ValueError):
-            notional = None
-    if notional is None or not math.isfinite(notional) or notional <= 0:
-        blockers.append("verified estimated notional in JPY is missing")
-    elif notional > ABSOLUTE_FIRST_PILOT_NOTIONAL_JPY:
-        blockers.append(
-            "estimated notional exceeds the absolute first-pilot ceiling"
+    parsed_limit_price = _positive_finite(limit_price)
+    if parsed_limit_price is None:
+        blockers.append("exact positive LIMIT price is required for pilot notional")
+
+    live_fx_required = instrument_currency == "USD"
+    live_fx_ready = not live_fx_required
+    live_fx_fresh = not live_fx_required
+    fx_rate_to_jpy: float | None = 1.0 if instrument_currency == "JPY" else None
+    notional_source = "JPY_LIMIT_PRICE_X_QUANTITY" if instrument_currency == "JPY" else "UNAVAILABLE"
+    if live_fx_required:
+        live_fx_ready, live_fx_fresh, fx_rate_to_jpy = _live_usd_jpy_fx(
+            live_fx_report,
+            now=current,
+            max_age_seconds=max_evidence_age_seconds,
         )
+        if not live_fx_ready:
+            blockers.append("Live USD/JPY FX evidence is not ready for notional derivation")
+        if not live_fx_fresh:
+            blockers.append("Live USD/JPY FX evidence is missing or stale")
+        if live_fx_ready and live_fx_fresh:
+            notional_source = "LIMIT_PRICE_X_QUANTITY_X_FRESH_LIVE_USDJPY"
+
+    notional: float | None = None
+    if (
+        parsed_limit_price is not None
+        and normalized_quantity > 0
+        and fx_rate_to_jpy is not None
+        and (not live_fx_required or (live_fx_ready and live_fx_fresh))
+    ):
+        candidate = parsed_limit_price * float(normalized_quantity) * fx_rate_to_jpy
+        if math.isfinite(candidate) and candidate > 0:
+            notional = candidate
+    if notional is None:
+        blockers.append("verified pilot notional could not be derived from bound evidence")
+    elif notional > ABSOLUTE_FIRST_PILOT_NOTIONAL_JPY:
+        blockers.append("derived notional exceeds the absolute first-pilot ceiling")
+
+    caller_notional = _positive_finite(estimated_notional_jpy)
+    if estimated_notional_jpy is not None and caller_notional is None:
+        blockers.append("caller-supplied notional is invalid and cannot override derived evidence")
+    elif caller_notional is not None and notional is not None:
+        tolerance = max(0.01, abs(notional) * 1e-9)
+        if abs(caller_notional - notional) > tolerance:
+            blockers.append("caller-supplied notional differs from derived bound notional")
 
     live_lock_intact = (
         not bool(settings.enable_live_trading)
@@ -372,6 +464,12 @@ def evaluate_live_operational_pilot_readiness(
         ticker=normalized_ticker,
         side=normalized_side,
         quantity=normalized_quantity,
+        limit_price=parsed_limit_price,
+        instrument_currency=instrument_currency,
+        fx_rate_to_jpy=fx_rate_to_jpy,
+        live_fx_required=live_fx_required,
+        live_fx_ready=live_fx_ready,
+        live_fx_fresh=live_fx_fresh,
         estimated_notional_jpy=notional,
         absolute_notional_ceiling_jpy=ABSOLUTE_FIRST_PILOT_NOTIONAL_JPY,
         live_account_ready=account_ready,
@@ -389,6 +487,7 @@ def evaluate_live_operational_pilot_readiness(
         live_global_lock_intact_during_preparation=live_lock_intact,
         operational_pilot_ready=ready,
         strategy_deployment_ready=strategy_ready,
+        notional_source=notional_source,
     )
 
 
@@ -401,7 +500,9 @@ def readiness_record(result: LiveOperationalPilotReadiness) -> dict:
         "live_order_sent": False,
         "interpretation": (
             "Operational-pilot readiness validates one bounded execution-mechanics test only. "
-            "It is not evidence that normal Live strategy deployment is profitable or approved."
+            "The JPY notional is derived from the exact LIMIT price, exact quantity, and "
+            "fresh Live USD/JPY evidence when required. It is not evidence that normal "
+            "Live strategy deployment is profitable or approved."
         ),
     }
 
@@ -416,6 +517,7 @@ def audit_live_operational_pilot_readiness(
     settings: PlatformSettings = SETTINGS,
     now: datetime | None = None,
     max_evidence_age_seconds: float = DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
+    limit_price: float | None = None,
 ) -> LiveOperationalPilotReadiness:
     def safe_load(path: Path) -> dict | None:
         try:
@@ -431,11 +533,13 @@ def audit_live_operational_pilot_readiness(
         expected_account_fingerprint=expected_account_fingerprint,
         live_account_report=safe_load(DEFAULT_LIVE_ACCOUNT_REPORT),
         live_open_orders_report=safe_load(DEFAULT_LIVE_OPEN_ORDERS_REPORT),
+        live_fx_report=safe_load(DEFAULT_LIVE_FX_REPORT),
         paper_monitor_report=safe_load(DEFAULT_PAPER_MONITOR_REPORT),
         strategy_deployment_report=safe_load(DEFAULT_STRATEGY_DEPLOYMENT_REPORT),
         settings=settings,
         now=now,
         max_evidence_age_seconds=max_evidence_age_seconds,
+        limit_price=limit_price,
     )
 
 
