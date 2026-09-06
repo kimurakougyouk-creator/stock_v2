@@ -36,13 +36,24 @@ def _fill(
     return row
 
 
-def test_natural_strategy_filter_requires_exact_runtime_prefix():
+def _natural_intent(
+    *, ticker: str, side: str, shares: int, bar_key: str = "2026-09-01T10:00:00+09:00"
+) -> str:
+    return f"{STRATEGY_INTENT_PREFIX}{ticker}:{side}:{shares}:{bar_key}"
+
+
+def test_natural_strategy_filter_matches_actual_signal_runner_intent_shape():
     natural = _fill(
-        intent=f"{STRATEGY_INTENT_PREFIX}9432.T:BUY:100:2026-09-01",
+        intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
         side="BUY",
         price=150.0,
     )
     validation = _fill(
+        intent="signal-runner:paper-pilot:9432.T:BUY:100:2026-09-01",
+        side="BUY",
+        price=150.0,
+    )
+    recovery = _fill(
         intent="broker-recovery:controlled-proof",
         side="BUY",
         price=150.0,
@@ -51,7 +62,19 @@ def test_natural_strategy_filter_requires_exact_runtime_prefix():
 
     assert is_natural_strategy_fill(natural) is True
     assert is_natural_strategy_fill(validation) is False
+    assert is_natural_strategy_fill(recovery) is False
     assert is_natural_strategy_fill(legacy) is False
+
+
+def test_natural_strategy_filter_requires_record_identity_to_match_intent():
+    intent = _natural_intent(ticker="9432.T", side="BUY", shares=100)
+    assert is_natural_strategy_fill(_fill(intent=intent, side="SELL", price=150.0)) is False
+    assert is_natural_strategy_fill(
+        _fill(intent=intent, side="BUY", price=150.0, ticker="AAPL", shares=100)
+    ) is False
+    assert is_natural_strategy_fill(
+        _fill(intent=intent, side="BUY", price=150.0, shares=99)
+    ) is False
 
 
 def test_metrics_use_only_natural_strategy_closed_trades():
@@ -59,12 +82,17 @@ def test_metrics_use_only_natural_strategy_closed_trades():
         _fill(intent="controlled-proof:buy", side="BUY", price=100.0),
         _fill(intent="controlled-proof:sell", side="SELL", price=300.0),
         _fill(
-            intent=f"{STRATEGY_INTENT_PREFIX}9432.T:BUY:100:2026-09-01",
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
             side="BUY",
             price=150.0,
         ),
         _fill(
-            intent=f"{STRATEGY_INTENT_PREFIX}9432.T:SELL:100:2026-09-02",
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
             side="SELL",
             price=160.0,
         ),
@@ -80,6 +108,8 @@ def test_metrics_use_only_natural_strategy_closed_trades():
     assert result.gross_result == "POSITIVE_GROSS_SO_FAR"
     assert result.evidence_status == "GROSS_RESULT_ONLY_FEES_NOT_ACCOUNTED"
     assert result.fees_accounted is False
+    assert result.fee_aware is False
+    assert result.net_realized_pnl is None
     assert result.net_profitability_proven is False
     assert result.live_ready is False
 
@@ -88,6 +118,16 @@ def test_no_natural_strategy_fill_never_reuses_validation_profit():
     records = [
         _fill(intent="controlled-proof:buy", side="BUY", price=100.0),
         _fill(intent="controlled-proof:sell", side="SELL", price=300.0),
+        _fill(
+            intent="signal-runner:paper-pilot:9432.T:BUY:100:2026-09-01",
+            side="BUY",
+            price=100.0,
+        ),
+        _fill(
+            intent="signal-runner:paper-pilot:9432.T:SELL:100:2026-09-02",
+            side="SELL",
+            price=300.0,
+        ),
     ]
 
     result = build_strategy_profitability_evidence(records, account_currency="JPY")
@@ -96,14 +136,14 @@ def test_no_natural_strategy_fill_never_reuses_validation_profit():
     assert result.gross_result == "INSUFFICIENT_EVIDENCE"
     assert result.strategy_fill_count == 0
     assert result.closed_trade_count == 0
-    assert result.excluded_ibkr_fill_count == 2
+    assert result.excluded_ibkr_fill_count == 4
     assert result.gross_performance["net_profit"] == 0.0
 
 
 def test_open_natural_position_is_not_counted_as_profit():
     records = [
         _fill(
-            intent=f"{STRATEGY_INTENT_PREFIX}9432.T:BUY:100:2026-09-01",
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
             side="BUY",
             price=150.0,
         )
@@ -119,7 +159,7 @@ def test_open_natural_position_is_not_counted_as_profit():
 def test_missing_strategy_cost_basis_fails_closed():
     records = [
         _fill(
-            intent=f"{STRATEGY_INTENT_PREFIX}9432.T:SELL:100:2026-09-01",
+            intent=_natural_intent(ticker="9432.T", side="SELL", shares=100),
             side="SELL",
             price=160.0,
         )
@@ -136,7 +176,7 @@ def test_missing_strategy_cost_basis_fails_closed():
 def test_cross_currency_fx_is_required_instead_of_guessed():
     records = [
         _fill(
-            intent=f"{STRATEGY_INTENT_PREFIX}AAPL:BUY:1:2026-09-01",
+            intent=_natural_intent(ticker="AAPL", side="BUY", shares=1),
             side="BUY",
             price=100.0,
             ticker="AAPL",
@@ -152,7 +192,7 @@ def test_cross_currency_fx_is_required_instead_of_guessed():
     assert "FX" in result.reason or "fx" in result.reason
 
 
-def test_serialized_evidence_explicitly_prohibits_live_and_orders():
+def test_serialized_evidence_matches_live_cash_readiness_schema_and_blocks_live():
     result = build_strategy_profitability_evidence([], account_currency="JPY")
     record = evidence_record(result)
 
@@ -161,7 +201,12 @@ def test_serialized_evidence_explicitly_prohibits_live_and_orders():
     assert record["order_sent"] is False
     assert record["live_trading"] == "PROHIBITED"
     assert record["live_ready"] is False
+    assert record["fee_aware"] is False
+    assert record["net_realized_pnl"] is None
     assert record["net_profitability_proven"] is False
+    assert record["strategy_intent_shape"] == (
+        "signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>"
+    )
 
 
 def test_module_contains_no_broker_mutation_api_calls():
