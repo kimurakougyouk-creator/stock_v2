@@ -1,15 +1,19 @@
 """Read-only profitability evidence for natural verified IBKR Paper strategy fills.
 
-Only fills whose durable ``order_intent_id`` starts with the exact
-``signal-runner:paper-pilot:`` prefix are treated as strategy evidence. This
-keeps capability proofs, resets, recovery fills, derivatives, and legacy local
-Paper simulations out of strategy-performance metrics.
+Natural strategy fills are identified from the durable order-intent structure
+actually emitted by ``signal_runner._build_signal_order_intent_id``:
+``signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>``.
+
+The identity is validated against the fill record itself so deliberate proof,
+reset, recovery, derivative, and legacy local Paper rows are not silently mixed
+into strategy-performance metrics. Older ``signal-runner:paper-pilot:...`` proof
+identifiers do not match the natural runtime structure and are excluded.
 
 This module never connects to a broker and never creates, changes, cancels, or
 transmits an order. Reported PnL is explicitly gross of commissions/fees because
-the current durable fill schema does not persist commission evidence. Therefore
-this report must never claim that net profitability is proven or that Live
-Trading is ready.
+the current profitability path has not yet joined durable commission evidence to
+every strategy execution. Therefore this report must never claim that net
+profitability is proven or that Live Trading is ready.
 """
 from __future__ import annotations
 
@@ -30,10 +34,10 @@ from ai_asset_platform.reports.performance import (
 )
 
 
-STRATEGY_INTENT_PREFIX = "signal-runner:paper-pilot:"
+STRATEGY_INTENT_PREFIX = "signal-runner:"
 DEFAULT_ORDER_LOG_PATH = Path("results/paper_orders.jsonl")
 DEFAULT_REPORT_PATH = Path("results/strategy_profitability_evidence_latest.json")
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 
 
 class StrategyProfitabilityEvidenceError(ValueError):
@@ -53,6 +57,8 @@ class StrategyProfitabilityEvidence:
     performance_health: dict
     realized_trades: tuple[dict, ...]
     fees_accounted: bool = False
+    fee_aware: bool = False
+    net_realized_pnl: float | None = None
     net_profitability_proven: bool = False
     live_ready: bool = False
 
@@ -89,12 +95,51 @@ def _is_confirmed_ibkr_fill(record: dict) -> bool:
     )
 
 
+def _natural_runtime_intent_matches_record(record: dict) -> bool:
+    """Validate the exact durable identity shape emitted by signal_runner.
+
+    Expected shape:
+    signal-runner:<ticker>:<BUY|SELL>:<whole quantity>:<non-empty bar key>
+
+    The bar key can itself contain colons, so only the first four separators are
+    structural. Record ticker/side/quantity must agree with the identifier.
+    """
+    intent = str(record.get("order_intent_id", "")).strip()
+    parts = intent.split(":", 4)
+    if len(parts) != 5 or parts[0] != "signal-runner":
+        return False
+
+    intent_ticker = parts[1].strip().upper()
+    intent_side = parts[2].strip().upper()
+    quantity_text = parts[3].strip()
+    bar_key = parts[4].strip()
+    if not intent_ticker or intent_side not in {"BUY", "SELL"} or not bar_key:
+        return False
+
+    try:
+        intent_quantity = int(quantity_text)
+        record_quantity = int(record.get("shares"))
+    except (TypeError, ValueError):
+        return False
+    if intent_quantity <= 0 or record_quantity <= 0:
+        return False
+
+    record_ticker = str(record.get("ticker", "")).strip().upper()
+    record_side = str(record.get("side", "")).strip().upper()
+    return (
+        intent_ticker == record_ticker
+        and intent_side == record_side
+        and intent_quantity == record_quantity
+    )
+
+
 def is_natural_strategy_fill(record: dict) -> bool:
     """Return True only for confirmed fills created by the natural signal runtime."""
-    if not isinstance(record, dict) or not _is_confirmed_ibkr_fill(record):
-        return False
-    intent = str(record.get("order_intent_id", "")).strip()
-    return intent.startswith(STRATEGY_INTENT_PREFIX)
+    return bool(
+        isinstance(record, dict)
+        and _is_confirmed_ibkr_fill(record)
+        and _natural_runtime_intent_matches_record(record)
+    )
 
 
 def select_natural_strategy_fills(records: Iterable[dict]) -> list[dict]:
@@ -219,8 +264,8 @@ def build_strategy_profitability_evidence(
         gross_result=gross_result,
         reason=(
             "Natural strategy closed trades are measurable, but durable commission/fee "
-            "evidence is not yet included in this accounting path. Net profitability "
-            "therefore remains unverified."
+            "evidence is not yet joined to every execution in this accounting path. "
+            "Net profitability therefore remains unverified."
         ),
         account_currency=account,
         strategy_fill_count=len(strategy_fills),
@@ -237,6 +282,7 @@ def evidence_record(result: StrategyProfitabilityEvidence) -> dict:
         "schema_version": REPORT_SCHEMA_VERSION,
         **asdict(result),
         "strategy_intent_prefix": STRATEGY_INTENT_PREFIX,
+        "strategy_intent_shape": "signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>",
         "paper_only": True,
         "broker_connection_used": False,
         "order_sent": False,
@@ -293,6 +339,8 @@ def main() -> int:
     print("PROFIT FACTOR         :", result.gross_performance["profit_factor"])
     print("MAX DRAWDOWN          :", result.gross_performance["maximum_drawdown"])
     print("FEES ACCOUNTED        :", result.fees_accounted)
+    print("FEE AWARE             :", result.fee_aware)
+    print("NET REALIZED PNL      :", result.net_realized_pnl)
     print("NET PROFIT PROVEN     :", result.net_profitability_proven)
     print("LIVE READY            :", result.live_ready)
     print("REASON                :", result.reason)
