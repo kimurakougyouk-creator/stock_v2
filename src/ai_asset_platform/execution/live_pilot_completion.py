@@ -1,9 +1,14 @@
 """Fail-closed completion judge for the first bounded IBKR Live pilot.
 
 This module is post-transport evidence processing only. It connects to no broker
-and sends no order. A pilot is COMPLETE only when the durable send journal, exact
-execution+commission proof, final Live account position, final Live open-order
-snapshot, and Paper safety monitor all agree while fresh.
+and sends no order. A pilot is COMPLETE only when the durable send journal, all
+matching execution+commission proof, final Live account position, final Live
+open-order snapshot, and Paper safety monitor all agree while fresh.
+
+One broker order may be split into multiple execution rows. Completion therefore
+aggregates every matching execution for the exact orderId/permId and requires one
+commission record per unique exec_id. Duplicate, missing, overfilled, underfilled,
+or conflicting evidence fails closed.
 """
 from __future__ import annotations
 
@@ -31,7 +36,7 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
 DEFAULT_PAPER_MONITOR_REPORT = Path("results/ibkr_paper_operations_monitor_latest.json")
 DEFAULT_COMPLETION_REPORT = Path("results/live_pilot_completion_latest.json")
 DEFAULT_OPERATOR_ALERT = Path("results/live_pilot_completion_alert_latest.json")
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 DEFAULT_MAX_EVIDENCE_AGE_SECONDS = 120.0
 _VALID_LIVE_PORTS = {4001, 7496}
 
@@ -61,6 +66,10 @@ class LivePilotCompletion:
     broker_connection_used: bool = False
     order_sent: bool = False
     live_order_sent: bool = False
+    exec_ids: tuple[str, ...] = ()
+    execution_count: int = 0
+    filled_quantity: float | None = None
+    commission_count: int = 0
 
 
 def _utc(value: datetime | None) -> datetime:
@@ -278,59 +287,115 @@ def evaluate_live_pilot_completion(
     execution_price: float | None = None
     commission: float | None = None
     commission_currency: str | None = None
+    exec_ids: tuple[str, ...] = ()
+    execution_count = 0
+    filled_quantity: float | None = None
+    commission_count = 0
+
     if journal_ready and isinstance(postfill_report, dict):
         expected_symbol = "9432" if normalized_ticker == "9432.T" else normalized_ticker
         executions = postfill_report.get("executions")
         executions = executions if isinstance(executions, list) else []
-        matches = []
+        matches: list[dict] = []
         for row in executions:
             if not isinstance(row, dict):
                 continue
             try:
                 row_order = int(row.get("order_id"))
                 row_perm = int(row.get("perm_id"))
-                row_qty = float(row.get("quantity"))
             except (TypeError, ValueError):
                 continue
             if (
-                str(row.get("exec_id") or "").strip() == exec_id
-                and row_order == order_id
+                row_order == order_id
                 and row_perm == perm_id
                 and str(row.get("symbol") or "").strip().upper() == expected_symbol
                 and str(row.get("sec_type") or "").strip().upper() == "STK"
                 and str(row.get("side") or "").strip().upper() == normalized_side
-                and row_qty == float(normalized_quantity)
                 and str(row.get("account_fingerprint") or "").strip().lower() == fingerprint
             ):
                 matches.append(row)
-        if len(matches) != 1:
-            blockers.append(f"expected exactly one exact final Live execution; found {len(matches)}")
+
+        execution_count = len(matches)
+        if not matches:
+            blockers.append("no matching final Live execution rows were found")
         else:
-            execution_price = _positive(matches[0].get("price"))
-            if execution_price is None:
-                blockers.append("final execution price is invalid")
-            execution_currency = str(matches[0].get("currency") or "").strip().upper()
+            ids = [str(row.get("exec_id") or "").strip() for row in matches]
+            exec_ids = tuple(ids)
+            if any(not value for value in ids) or len(ids) != len(set(ids)):
+                blockers.append("final Live executions contain missing or duplicate exec_id evidence")
+            if exec_id not in ids:
+                blockers.append("durable journal exec_id is not present in final Live execution evidence")
+
+            total_quantity = 0.0
+            gross = 0.0
+            currencies: set[str] = set()
+            rows_valid = True
+            for row in matches:
+                row_qty = _positive(row.get("quantity"))
+                row_price = _positive(row.get("price"))
+                currency = str(row.get("currency") or "").strip().upper()
+                if row_qty is None or row_price is None:
+                    blockers.append("final Live execution contains invalid quantity or price")
+                    rows_valid = False
+                    continue
+                if len(currency) != 3:
+                    blockers.append("final Live execution contains invalid currency")
+                    rows_valid = False
+                currencies.add(currency)
+                total_quantity += row_qty
+                gross += row_qty * row_price
+
+            filled_quantity = total_quantity
+            if not math.isclose(
+                total_quantity,
+                float(normalized_quantity),
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            ):
+                blockers.append(
+                    f"final Live execution total quantity does not equal pilot quantity: {total_quantity} != {normalized_quantity}"
+                )
+            if len(currencies) != 1:
+                blockers.append("final Live execution rows do not share one currency")
+            execution_currency = next(iter(currencies)) if len(currencies) == 1 else None
+            if rows_valid and total_quantity > 0:
+                execution_price = gross / total_quantity
+
             commissions = postfill_report.get("commissions")
             commissions = commissions if isinstance(commissions, list) else []
-            commission_matches = [
-                row
-                for row in commissions
-                if isinstance(row, dict)
-                and str(row.get("exec_id") or "").strip() == exec_id
-            ]
-            if len(commission_matches) != 1:
-                blockers.append(
-                    f"expected exactly one exact final commission; found {len(commission_matches)}"
-                )
-            else:
-                commission = _finite(commission_matches[0].get("commission"))
-                commission_currency = str(
-                    commission_matches[0].get("currency") or ""
-                ).strip().upper()
-                if commission is None:
-                    blockers.append("final commission is non-finite")
-                if commission_currency != execution_currency:
-                    blockers.append("final commission currency does not match execution currency")
+            commission_total = 0.0
+            valid_commission_count = 0
+            for execution_row in matches:
+                execution_exec_id = str(execution_row.get("exec_id") or "").strip()
+                commission_matches = [
+                    row
+                    for row in commissions
+                    if isinstance(row, dict)
+                    and str(row.get("exec_id") or "").strip() == execution_exec_id
+                ]
+                if len(commission_matches) != 1:
+                    blockers.append(
+                        f"expected exactly one final commission for exec_id {execution_exec_id}; found {len(commission_matches)}"
+                    )
+                    continue
+                commission_row = commission_matches[0]
+                parsed_commission = _finite(commission_row.get("commission"))
+                observed_currency = str(commission_row.get("currency") or "").strip().upper()
+                if parsed_commission is None:
+                    blockers.append(f"final commission for exec_id {execution_exec_id} is non-finite")
+                    continue
+                if execution_currency is None or observed_currency != execution_currency:
+                    blockers.append(
+                        f"final commission currency for exec_id {execution_exec_id} does not match execution currency"
+                    )
+                    continue
+                commission_total += parsed_commission
+                valid_commission_count += 1
+
+            commission_count = valid_commission_count
+            if matches and valid_commission_count == len(matches):
+                commission = commission_total
+                commission_currency = execution_currency
 
     final_position = _target_position_quantity(final_account_report, normalized_ticker)
     expected_final_position = (
@@ -374,6 +439,10 @@ def evaluate_live_pilot_completion(
         evidence_fresh=evidence_fresh,
         paper_monitor_safe=paper_safe,
         complete=complete,
+        exec_ids=exec_ids,
+        execution_count=execution_count,
+        filled_quantity=filled_quantity,
+        commission_count=commission_count,
     )
 
 
@@ -456,8 +525,9 @@ def persist_live_pilot_completion(
         "schema_version": REPORT_SCHEMA_VERSION,
         **asdict(result),
         "interpretation": (
-            "COMPLETE means the single pilot has exact post-fill commission, final position, "
-            "zero final Live open orders, matching account/endpoint, and clean Paper safety evidence."
+            "COMPLETE means every matching execution and per-exec commission reconciles to the exact "
+            "pilot quantity, with final position, zero final Live open orders, matching account/endpoint, "
+            "and clean Paper safety evidence."
         ),
     }
     temporary = report_path.with_suffix(report_path.suffix + ".tmp")
