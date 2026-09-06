@@ -143,12 +143,147 @@ def test_exact_complete_buy_evidence_is_complete():
     assert result.complete is True
     assert result.status == "COMPLETE"
     assert result.exec_id == EXEC_ID
+    assert result.exec_ids == (EXEC_ID,)
+    assert result.execution_count == 1
+    assert result.filled_quantity == 100.0
     assert result.execution_price == 402.0
     assert result.commission == 80.0
+    assert result.commission_count == 1
     assert result.commission_currency == "JPY"
     assert result.final_position_quantity == 100.0
     assert result.final_open_order_count == 0
     assert result.endpoint_port == 4001
+
+
+def test_split_fill_completion_aggregates_exec_ids_vwap_and_commissions():
+    second = "0001.abc.02"
+    result = _evaluate(
+        postfill_report=_postfill(
+            executions=[
+                {
+                    "exec_id": EXEC_ID,
+                    "order_id": 77,
+                    "perm_id": 880077,
+                    "symbol": "9432",
+                    "sec_type": "STK",
+                    "currency": "JPY",
+                    "side": "BUY",
+                    "quantity": 40.0,
+                    "price": 400.0,
+                    "account_fingerprint": FINGERPRINT,
+                },
+                {
+                    "exec_id": second,
+                    "order_id": 77,
+                    "perm_id": 880077,
+                    "symbol": "9432",
+                    "sec_type": "STK",
+                    "currency": "JPY",
+                    "side": "BUY",
+                    "quantity": 60.0,
+                    "price": 402.0,
+                    "account_fingerprint": FINGERPRINT,
+                },
+            ],
+            commissions=[
+                {"exec_id": EXEC_ID, "commission": 30.0, "currency": "JPY"},
+                {"exec_id": second, "commission": 50.0, "currency": "JPY"},
+            ],
+        )
+    )
+    assert result.complete is True
+    assert result.exec_ids == (EXEC_ID, second)
+    assert result.execution_count == 2
+    assert result.filled_quantity == 100.0
+    assert result.execution_price == 401.2
+    assert result.commission == 80.0
+    assert result.commission_count == 2
+    assert result.commission_currency == "JPY"
+
+
+def test_split_fill_underfilled_or_overfilled_never_completes():
+    second = "0001.abc.02"
+    base_commissions = [
+        {"exec_id": EXEC_ID, "commission": 30.0, "currency": "JPY"},
+        {"exec_id": second, "commission": 50.0, "currency": "JPY"},
+    ]
+    under = _postfill(
+        executions=[
+            {
+                "exec_id": EXEC_ID,
+                "order_id": 77,
+                "perm_id": 880077,
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "side": "BUY",
+                "quantity": 40.0,
+                "price": 400.0,
+                "account_fingerprint": FINGERPRINT,
+            },
+            {
+                "exec_id": second,
+                "order_id": 77,
+                "perm_id": 880077,
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "side": "BUY",
+                "quantity": 50.0,
+                "price": 402.0,
+                "account_fingerprint": FINGERPRINT,
+            },
+        ],
+        commissions=base_commissions,
+    )
+    result = _evaluate(postfill_report=under)
+    assert result.complete is False
+    assert any("total quantity" in item for item in result.blockers)
+
+    over = _postfill(
+        executions=[
+            dict(under["executions"][0]),
+            {**under["executions"][1], "quantity": 70.0},
+        ],
+        commissions=base_commissions,
+    )
+    result = _evaluate(postfill_report=over)
+    assert result.complete is False
+    assert any("total quantity" in item for item in result.blockers)
+
+
+def test_duplicate_exec_id_or_missing_per_exec_commission_blocks():
+    duplicate = _postfill(
+        executions=[
+            {**_postfill()["executions"][0], "quantity": 50.0},
+            {**_postfill()["executions"][0], "quantity": 50.0},
+        ]
+    )
+    result = _evaluate(postfill_report=duplicate)
+    assert result.complete is False
+    assert any("duplicate exec_id" in item for item in result.blockers)
+
+    second = "0001.abc.02"
+    missing_commission = _postfill(
+        executions=[
+            {**_postfill()["executions"][0], "quantity": 40.0},
+            {
+                **_postfill()["executions"][0],
+                "exec_id": second,
+                "quantity": 60.0,
+            },
+        ],
+        commissions=[{"exec_id": EXEC_ID, "commission": 30.0, "currency": "JPY"}],
+    )
+    result = _evaluate(postfill_report=missing_commission)
+    assert result.complete is False
+    assert any(second in item for item in result.blockers)
+
+
+def test_journal_anchor_exec_id_must_exist_in_final_execution_set():
+    result = _evaluate(send_journal=_journal(exec_id="not-in-final-evidence"))
+    assert result.complete is False
+    assert any("journal exec_id" in item for item in result.blockers)
 
 
 def test_sell_completion_requires_final_flat_position():
@@ -191,7 +326,7 @@ def test_execution_identity_mismatch_blocks():
     postfill["executions"][0]["perm_id"] = 999
     result = _evaluate(postfill_report=postfill)
     assert result.complete is False
-    assert any("exact final Live execution" in item for item in result.blockers)
+    assert any("no matching final Live execution" in item for item in result.blockers)
 
 
 def test_missing_or_duplicate_commission_blocks():
@@ -202,7 +337,7 @@ def test_missing_or_duplicate_commission_blocks():
     duplicate["commissions"].append(dict(duplicate["commissions"][0]))
     result = _evaluate(postfill_report=duplicate)
     assert result.complete is False
-    assert any("exact final commission" in item for item in result.blockers)
+    assert any("found 2" in item for item in result.blockers)
 
 
 def test_commission_currency_mismatch_blocks():
@@ -212,7 +347,7 @@ def test_commission_currency_mismatch_blocks():
         )
     )
     assert result.complete is False
-    assert "final commission currency does not match execution currency" in result.blockers
+    assert any("commission currency" in item for item in result.blockers)
 
 
 def test_wrong_final_position_blocks():
@@ -264,6 +399,7 @@ def test_persist_writes_durable_success_alert(tmp_path: Path):
     report_payload = json.loads(report.read_text(encoding="utf-8"))
     alert_payload = json.loads(alert.read_text(encoding="utf-8"))
     assert report_payload["complete"] is True
+    assert report_payload["execution_count"] == 1
     assert alert_payload["severity"] == "SUCCESS"
     assert alert_payload["delivery"] == "LOCAL_DURABLE_OPERATOR_ALERT"
     assert alert_payload["external_notification_claimed"] is False
