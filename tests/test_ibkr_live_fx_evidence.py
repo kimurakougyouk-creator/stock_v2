@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from ai_asset_platform.brokers.ibkr_fx_snapshot import IbkrFxSnapshotResult
 import ai_asset_platform.brokers.ibkr_live_fx_evidence as module
@@ -145,6 +146,73 @@ def test_missing_market_data_uses_live_account_exchange_rate(monkeypatch):
     assert result.ready is True
     assert result.rate == 149.8
     assert result.source == "LIVE_ACCOUNT_EXCHANGE_RATE"
+
+
+def test_account_exchange_rate_fallback_requires_quote_match(monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "preview_ibkr_live_readonly_account_snapshot",
+        lambda **kwargs: SimpleNamespace(
+            ready=True,
+            connected=True,
+            endpoint_port=4001,
+            base_currency="USD",
+            errors=(),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_AccountFxProbe",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("ExchangeRate probe must not start on quote mismatch")
+        ),
+    )
+
+    result = module._request_live_account_fx(
+        base_currency="EUR",
+        quote_currency="JPY",
+        timeout=1.0,
+        confirmation=module.CONFIRMATION_VALUE,
+    )
+
+    assert result.ready is False
+    assert result.rate is None
+    assert result.source == "LIVE_ACCOUNT_EXCHANGE_RATE"
+    assert any("account base currency is USD" in error for error in result.errors)
+    assert any("requested quote currency is JPY" in error for error in result.errors)
+
+
+def test_account_exchange_rate_fallback_requires_ready_live_account(monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "preview_ibkr_live_readonly_account_snapshot",
+        lambda **kwargs: SimpleNamespace(
+            ready=False,
+            connected=False,
+            endpoint_port=None,
+            base_currency=None,
+            errors=("account snapshot incomplete",),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_AccountFxProbe",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("ExchangeRate probe must not start without ready account evidence")
+        ),
+    )
+
+    result = module._request_live_account_fx(
+        base_currency="USD",
+        quote_currency="JPY",
+        timeout=1.0,
+        confirmation=module.CONFIRMATION_VALUE,
+    )
+
+    assert result.ready is False
+    assert result.rate is None
+    assert any("account snapshot incomplete" in error for error in result.errors)
+    assert any("not ready for ExchangeRate fallback" in error for error in result.errors)
 
 
 def test_module_contains_no_order_mutation_or_preview_api():
