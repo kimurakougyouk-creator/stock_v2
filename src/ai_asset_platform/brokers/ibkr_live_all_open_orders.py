@@ -8,6 +8,7 @@ cancels, retries, closes, or previews an order.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -133,6 +134,7 @@ def persist_live_all_open_orders(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "attempted": snapshot.attempted,
         "connected": snapshot.connected,
         "ready": snapshot.ready,
