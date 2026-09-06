@@ -2,19 +2,20 @@
 
 Last verified: 2026-09-06 JST
 
-This file exists to prevent chat-memory drift and repeated project-management mistakes. Memory is convenience only; it is never the project source of truth.
+This file exists to prevent chat-memory drift and repeated project-management mistakes. Memory is convenience only; it is never the project source of truth. `COMPLETION_ROADMAP.md` freezes the current V1 finish line and critical path; do not invent a different completion sequence from chat memory.
 
 ## Mandatory startup sequence for every new chat / agent
 
 Before asking the user for any project action:
 
 1. Read `HANDOFF_MASTER.md`.
-2. Verify current GitHub `main` SHA and open PRs/issues.
-3. Read the current safety issue / milestone that governs the active stage (currently Issue #255 for the first Live cash pilot).
-4. Distinguish `DONE / VERIFIED / UNVERIFIED / TODO` from current evidence.
-5. Build an **operator dependency map** for the next milestone before giving instructions. This map must include not only code, but also broker account state, settled funds, market/data permissions, market calendar, required registrations, authentication, device/runtime readiness, broker settings, and any explicit human approval.
-6. Perform every GitHub-side investigation, implementation, review, CI check, documentation update, and evidence collection that AI/tools can perform.
-7. Only after all AI-side work is exhausted may the user be called.
+2. Read `COMPLETION_ROADMAP.md` and identify the first unfinished critical-path gate.
+3. Verify current GitHub `main` SHA and open PRs/issues.
+4. Read the current safety issue / milestone that governs the active stage (currently Issue #255 for the first Live cash pilot).
+5. Distinguish `DONE / VERIFIED / UNVERIFIED / TODO` from current evidence.
+6. Build an **operator dependency map** for the next milestone before giving instructions. This map must include not only code, but also broker account state, settled funds, market/data permissions, market calendar, required registrations, authentication, device/runtime readiness, broker settings, and any explicit human approval.
+7. Perform every GitHub-side investigation, implementation, review, CI check, documentation update, and evidence collection that AI/tools can perform.
+8. Only after all AI-side work is exhausted may the user be called.
 
 ## User interaction gate
 
