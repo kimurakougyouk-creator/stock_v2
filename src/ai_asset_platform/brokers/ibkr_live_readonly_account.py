@@ -1,9 +1,9 @@
 """Explicit read-only IBKR Live account preflight.
 
 This module exists only to prove that a future real-cash pilot is pointed at the
-intended Live account/session before any Live order transport is implemented.
-It has no order API calls, never enables Live Trading, and requires an exact
-operator confirmation before it will even open a Live socket connection.
+intended Live account/session before any Live order transport is used. It has no
+order API calls, never enables Live Trading, and requires an exact operator
+confirmation before it will even open a Live socket connection.
 
 Default IBKR endpoints are tried in this order:
 - IB Gateway Live: 4001
@@ -11,7 +11,9 @@ Default IBKR endpoints are tried in this order:
 
 The raw account identifier is never written to the report. A SHA-256 fingerprint
 is stored instead so later pilot steps can pin the same account without exposing
-the identifier in ordinary logs.
+the identifier in ordinary logs. Per-currency SettledCash values from the same
+read-only account download are persisted so the pilot can require actual settled
+cash in the instrument currency instead of relying on margin buying power.
 """
 from __future__ import annotations
 
@@ -39,7 +41,7 @@ CONFIRMATION_VALUE = "READ_LIVE_ACCOUNT_ONLY"
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_readonly_account_latest.json")
 LIVE_GATEWAY_PORT = 4001
 LIVE_TWS_PORT = 7496
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,7 @@ class IbkrLiveReadOnlyAccountSnapshot:
     available_funds: float | None
     gross_position_value: float | None
     total_cash_value: float | None
+    settled_cash_by_currency: dict[str, float] = field(default_factory=dict)
     positions: tuple[IbkrBrokerPosition, ...] = ()
     blocked_reason: str | None = None
     order_sent: bool = False
@@ -83,6 +86,23 @@ def _account_fingerprint(account_id: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
+    """Return exact finite SettledCash values observed in account updates."""
+    balances: dict[str, float] = {}
+    for (key, currency), value in probe.account_values.items():
+        normalized_currency = str(currency or "").strip().upper()
+        if key != "SettledCash":
+            continue
+        if (
+            len(normalized_currency) != 3
+            or not normalized_currency.isalpha()
+            or normalized_currency == "BASE"
+        ):
+            continue
+        balances[normalized_currency] = float(value)
+    return dict(sorted(balances.items()))
+
+
 def _blocked(reason: str) -> IbkrLiveReadOnlyAccountSnapshot:
     return IbkrLiveReadOnlyAccountSnapshot(
         attempted=False,
@@ -95,6 +115,7 @@ def _blocked(reason: str) -> IbkrLiveReadOnlyAccountSnapshot:
         available_funds=None,
         gross_position_value=None,
         total_cash_value=None,
+        settled_cash_by_currency={},
         positions=(),
         blocked_reason=reason,
         order_sent=False,
@@ -183,18 +204,13 @@ def preview_ibkr_live_readonly_account_snapshot(
                 account_fingerprint=_account_fingerprint(account_id),
                 account_ready=bool(probe.account_ready),
                 base_currency=base_currency,
-                net_liquidation=_summary_value(
-                    probe, "NetLiquidation", base_currency
-                ),
-                available_funds=_summary_value(
-                    probe, "AvailableFunds", base_currency
-                ),
+                net_liquidation=_summary_value(probe, "NetLiquidation", base_currency),
+                available_funds=_summary_value(probe, "AvailableFunds", base_currency),
                 gross_position_value=_summary_value(
                     probe, "GrossPositionValue", base_currency
                 ),
-                total_cash_value=_summary_value(
-                    probe, "TotalCashValue", base_currency
-                ),
+                total_cash_value=_summary_value(probe, "TotalCashValue", base_currency),
+                settled_cash_by_currency=_settled_cash_by_currency(probe),
                 positions=tuple(probe.portfolio),
                 blocked_reason=None,
                 order_sent=False,
@@ -216,6 +232,7 @@ def preview_ibkr_live_readonly_account_snapshot(
         available_funds=None,
         gross_position_value=None,
         total_cash_value=None,
+        settled_cash_by_currency={},
         positions=(),
         blocked_reason="no Live endpoint produced a complete read-only snapshot",
         order_sent=False,
@@ -259,6 +276,7 @@ def main() -> int:
     print("READY              :", snapshot.ready)
     print("ACCOUNT READY      :", snapshot.account_ready)
     print("BASE CURRENCY      :", snapshot.base_currency)
+    print("SETTLED CASH CCYS  :", sorted(snapshot.settled_cash_by_currency))
     print("POSITION COUNT     :", len(snapshot.positions))
     print("RAW ACCOUNT ID     : NOT PERSISTED")
     print("BLOCKED REASON     :", snapshot.blocked_reason)
