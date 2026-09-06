@@ -3,6 +3,10 @@
 The collector uses one Live socket to identify the managed account, request
 execution history, and receive matching commissionReport callbacks. Raw account
 IDs are used only in memory and are never persisted. No order API exists here.
+
+A single order may produce multiple execution rows. Evidence is therefore kept
+per ``exec_id`` and must reconcile all matching executions and one commission
+record per execution before a fill is considered proven.
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ from ai_asset_platform.brokers.ibkr_live_readonly_account import (
 from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
 
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_postfill_evidence_latest.json")
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,11 @@ class LivePostFillMatch:
     execution: LiveExecutionEvidence | None
     commission: LiveCommissionEvidence | None
     native_cash_effect: float | None
+    executions: tuple[LiveExecutionEvidence, ...] = ()
+    commissions: tuple[LiveCommissionEvidence, ...] = ()
+    filled_quantity: float | None = None
+    vwap_price: float | None = None
+    commission_total: float | None = None
 
 
 def _finite(value: object) -> float | None:
@@ -96,6 +105,11 @@ def _finite(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _positive(value: object) -> float | None:
+    parsed = _finite(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 class _LivePostFillProbe(EWrapper, EClient):
@@ -167,7 +181,14 @@ def _execution_row(contract, execution, account_id: str) -> LiveExecutionEvidenc
     except (TypeError, ValueError):
         return None
     exec_id = str(getattr(execution, "execId", "") or "").strip()
-    if not exec_id or quantity <= 0 or price <= 0 or side not in {"BUY", "SELL"}:
+    if (
+        not exec_id
+        or not math.isfinite(quantity)
+        or not math.isfinite(price)
+        or quantity <= 0
+        or price <= 0
+        or side not in {"BUY", "SELL"}
+    ):
         return None
     return LiveExecutionEvidence(
         exec_id=exec_id,
@@ -218,16 +239,21 @@ def preview_ibkr_live_postfill_snapshot(
                 continue
             if settle_seconds:
                 time.sleep(settle_seconds)
-            rows = [row for contract, execution in probe.raw_executions if (row := _execution_row(contract, execution, account_id)) is not None]
-            by_exec = {row.exec_id: row for row in rows}
-            commissions = {row.exec_id: row for row in probe.commissions}
+            rows = [
+                row
+                for contract, execution in probe.raw_executions
+                if (row := _execution_row(contract, execution, account_id)) is not None
+            ]
+            # Keep every row. Duplicate/conflicting exec_id or commission evidence
+            # must remain visible so reconciliation can fail closed rather than
+            # silently overwriting one broker callback with another.
             return IbkrLivePostFillSnapshot(
                 attempted=True,
                 connected=True,
                 endpoint_port=port,
                 account_fingerprint=_account_fingerprint(account_id),
-                executions=tuple(by_exec.values()),
-                commissions=tuple(commissions.values()),
+                executions=tuple(rows),
+                commissions=tuple(probe.commissions),
                 errors=tuple(errors + probe.errors),
             )
         finally:
@@ -247,24 +273,109 @@ def match_live_postfill(
     expected_fp = str(expected_account_fingerprint or "").strip().lower()
     if snapshot.account_fingerprint != expected_fp:
         blockers.append("Live account fingerprint mismatch")
+
     symbol = "9432" if str(ticker).strip().upper() == "9432.T" else str(ticker).strip().upper()
-    side = str(side).strip().upper()
-    matches = [row for row in snapshot.executions if row.symbol == symbol and row.side == side and row.quantity == float(quantity) and row.order_id == int(order_id) and row.perm_id == int(perm_id) and row.account_fingerprint == expected_fp]
-    if len(matches) != 1:
-        blockers.append(f"expected exactly one matching Live execution; found {len(matches)}")
+    normalized_side = str(side).strip().upper()
+    expected_quantity = _positive(quantity)
+    if normalized_side not in {"BUY", "SELL"}:
+        blockers.append("side must be BUY or SELL")
+    if expected_quantity is None:
+        blockers.append("quantity must be positive and finite")
+
+    matches = [
+        row
+        for row in snapshot.executions
+        if row.symbol == symbol
+        and row.sec_type == "STK"
+        and row.side == normalized_side
+        and row.order_id == int(order_id)
+        and row.perm_id == int(perm_id)
+        and row.account_fingerprint == expected_fp
+    ]
+    if not matches:
+        blockers.append("no matching Live execution rows were found")
         return LivePostFillMatch(False, tuple(blockers), None, None, None)
-    execution = matches[0]
-    commissions = [row for row in snapshot.commissions if row.exec_id == execution.exec_id]
-    if len(commissions) != 1:
-        blockers.append(f"expected exactly one commission for exec_id; found {len(commissions)}")
-        return LivePostFillMatch(False, tuple(blockers), execution, None, None)
-    commission = commissions[0]
-    if commission.currency != execution.currency:
-        blockers.append("commission currency does not match execution currency")
-        return LivePostFillMatch(False, tuple(blockers), execution, commission, None)
-    gross = execution.quantity * execution.price
-    cash_effect = -(gross + commission.commission) if execution.side == "BUY" else gross - commission.commission
-    return LivePostFillMatch(not blockers, tuple(blockers), execution, commission, cash_effect)
+
+    exec_ids = [str(row.exec_id or "").strip() for row in matches]
+    if any(not value for value in exec_ids) or len(exec_ids) != len(set(exec_ids)):
+        blockers.append("matching Live executions contain missing or duplicate exec_id evidence")
+
+    currencies = {str(row.currency or "").strip().upper() for row in matches}
+    if len(currencies) != 1 or any(len(value) != 3 for value in currencies):
+        blockers.append("matching Live executions do not share one valid currency")
+    execution_currency = next(iter(currencies)) if len(currencies) == 1 else None
+
+    total_quantity = 0.0
+    gross = 0.0
+    for row in matches:
+        row_quantity = _positive(row.quantity)
+        row_price = _positive(row.price)
+        if row_quantity is None or row_price is None:
+            blockers.append("matching Live execution contains non-positive or non-finite quantity/price")
+            continue
+        total_quantity += row_quantity
+        gross += row_quantity * row_price
+
+    if expected_quantity is not None and not math.isclose(
+        total_quantity,
+        expected_quantity,
+        rel_tol=1e-12,
+        abs_tol=1e-9,
+    ):
+        blockers.append(
+            f"matching Live execution quantity does not equal expected total: {total_quantity} != {expected_quantity}"
+        )
+
+    matched_commissions: list[LiveCommissionEvidence] = []
+    commission_total = 0.0
+    for execution in matches:
+        rows = [row for row in snapshot.commissions if row.exec_id == execution.exec_id]
+        if len(rows) != 1:
+            blockers.append(
+                f"expected exactly one commission for exec_id {execution.exec_id}; found {len(rows)}"
+            )
+            continue
+        commission = rows[0]
+        parsed_commission = _finite(commission.commission)
+        if parsed_commission is None:
+            blockers.append(f"commission for exec_id {execution.exec_id} is non-finite")
+            continue
+        if execution_currency is None or commission.currency != execution_currency:
+            blockers.append(
+                f"commission currency for exec_id {execution.exec_id} does not match execution currency"
+            )
+            continue
+        matched_commissions.append(commission)
+        commission_total += parsed_commission
+
+    if blockers:
+        return LivePostFillMatch(
+            False,
+            tuple(blockers),
+            matches[0] if matches else None,
+            matched_commissions[0] if matched_commissions else None,
+            None,
+            executions=tuple(matches),
+            commissions=tuple(matched_commissions),
+            filled_quantity=total_quantity if matches else None,
+            vwap_price=(gross / total_quantity) if total_quantity > 0 else None,
+            commission_total=commission_total if matched_commissions else None,
+        )
+
+    vwap = gross / total_quantity
+    cash_effect = -(gross + commission_total) if normalized_side == "BUY" else gross - commission_total
+    return LivePostFillMatch(
+        True,
+        (),
+        matches[0],
+        matched_commissions[0],
+        cash_effect,
+        executions=tuple(matches),
+        commissions=tuple(matched_commissions),
+        filled_quantity=total_quantity,
+        vwap_price=vwap,
+        commission_total=commission_total,
+    )
 
 
 def persist_live_postfill_snapshot(snapshot: IbkrLivePostFillSnapshot, *, report_path: Path = DEFAULT_REPORT_PATH) -> None:
