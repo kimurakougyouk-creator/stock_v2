@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,8 @@ from ai_asset_platform.execution.live_pilot_same_run_preflight import LivePilotS
 PINNED_ACCOUNT = "U_TEST_ONLY"
 PINNED_FINGERPRINT = hashlib.sha256(PINNED_ACCOUNT.encode("utf-8")).hexdigest()
 APPROVED_SHA = "a" * 40
+NOW = datetime(2026, 9, 6, 10, 0, tzinfo=timezone.utc)
+CHECKED_AT = NOW.isoformat(timespec="seconds")
 
 
 def _request() -> subject.LivePilotSendRequest:
@@ -29,21 +32,28 @@ def _request() -> subject.LivePilotSendRequest:
 def _readiness() -> dict:
     return {
         "status": "READY_FOR_ONE_OPERATIONAL_PILOT",
+        "checked_at": CHECKED_AT,
         "operational_pilot_ready": True,
         "ticker": "9432.T",
         "side": "BUY",
         "quantity": 100,
         "limit_price": 400.0,
         "estimated_notional_jpy": 40_000.0,
+        "live_account_ready": True,
+        "live_open_orders_ready": True,
+        "live_open_order_count": 0,
+        "paper_monitor_safe": True,
+        "market_session_allowed": True,
+        "live_global_lock_intact_during_preparation": True,
         "order_sent": False,
         "live_order_sent": False,
     }
 
 
-def _preflight(*, ready: bool = True) -> LivePilotSameRunPreflight:
+def _preflight(*, ready: bool = True, checked_at: str = CHECKED_AT) -> LivePilotSameRunPreflight:
     return LivePilotSameRunPreflight(
         status="READY_FOR_OPERATOR_AUTHORIZATION" if ready else "BLOCKED",
-        checked_at="2026-09-06T09:00:00+00:00",
+        checked_at=checked_at,
         blockers=() if ready else ("blocked",),
         ticker="9432.T",
         account_fingerprint_match=ready,
@@ -60,7 +70,13 @@ def _preflight(*, ready: bool = True) -> LivePilotSameRunPreflight:
 
 
 class FakeClient:
-    def __init__(self, *, account: str = PINNED_ACCOUNT, ack: bool = True, place_error: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        account: str = PINNED_ACCOUNT,
+        ack: bool = True,
+        place_error: Exception | None = None,
+    ):
         from threading import Event
 
         self.connected_ready = Event()
@@ -109,9 +125,17 @@ class FakeClient:
 
 
 def _patch_prereqs(monkeypatch, *, stop_values=(False, False)):
-    monkeypatch.setattr(subject, "audit_live_pilot_source_cutover", lambda **kwargs: SimpleNamespace(ready=True))
+    monkeypatch.setattr(
+        subject,
+        "audit_live_pilot_source_cutover",
+        lambda **kwargs: SimpleNamespace(ready=True),
+    )
     values = iter(stop_values)
-    monkeypatch.setattr(subject, "live_pilot_stop_is_active", lambda **kwargs: next(values))
+    monkeypatch.setattr(
+        subject,
+        "live_pilot_stop_is_active",
+        lambda **kwargs: next(values),
+    )
     events = []
     monkeypatch.setattr(
         subject,
@@ -124,10 +148,26 @@ def _patch_prereqs(monkeypatch, *, stop_values=(False, False)):
             "live_order_sent": False,
         },
     )
-    monkeypatch.setattr(subject, "create_consumed_authorization_journal", lambda **kwargs: events.append("journal") or {})
-    monkeypatch.setattr(subject, "record_send_attempt", lambda *args, **kwargs: events.append("attempt") or {})
-    monkeypatch.setattr(subject, "mark_order_acknowledged", lambda *args, **kwargs: events.append("ack") or {})
-    monkeypatch.setattr(subject, "mark_unknown", lambda *args, **kwargs: events.append("unknown") or {})
+    monkeypatch.setattr(
+        subject,
+        "create_consumed_authorization_journal",
+        lambda **kwargs: events.append("journal") or {},
+    )
+    monkeypatch.setattr(
+        subject,
+        "record_send_attempt",
+        lambda *args, **kwargs: events.append("attempt") or {},
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_order_acknowledged",
+        lambda *args, **kwargs: events.append("ack") or {},
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_unknown",
+        lambda *args, **kwargs: events.append("unknown") or {},
+    )
     return events
 
 
@@ -142,6 +182,7 @@ def _send(monkeypatch, client: FakeClient, **overrides):
         final_confirmation=subject.FINAL_SEND_CONFIRMATION_VALUE,
         repository_root=Path("."),
         timeout_seconds=0.01,
+        now=NOW,
         client_factory=lambda: client,
     )
     args.update(overrides)
@@ -234,6 +275,25 @@ def test_not_ready_preflight_blocks_before_connection(monkeypatch):
     assert client.place_calls == []
 
 
+def test_stale_same_run_preflight_blocks_before_connection(monkeypatch):
+    _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    stale = "2026-09-06T09:59:00+00:00"
+    with pytest.raises(PermissionError, match="freshness window"):
+        _send(monkeypatch, client, same_run_preflight=_preflight(checked_at=stale))
+    assert client.connected is False
+
+
+def test_stale_readiness_blocks_before_connection(monkeypatch):
+    _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    report = _readiness()
+    report["checked_at"] = "2026-09-06T09:59:00+00:00"
+    with pytest.raises(PermissionError, match="freshness window"):
+        _send(monkeypatch, client, readiness_report=report)
+    assert client.connected is False
+
+
 def test_missing_final_confirmation_blocks_before_connection(monkeypatch):
     _patch_prereqs(monkeypatch)
     client = FakeClient()
@@ -249,6 +309,43 @@ def test_readiness_price_mismatch_blocks(monkeypatch):
     bad["limit_price"] = 399.0
     with pytest.raises(PermissionError, match="limit_price"):
         _send(monkeypatch, client, readiness_report=bad)
+    assert client.connected is False
+
+
+def test_jpy_notional_must_equal_limit_times_quantity(monkeypatch):
+    _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    request = subject.LivePilotSendRequest(
+        intent_id="live-pilot:9432:BUY:100:test",
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=39_000.0,
+    )
+    report = _readiness()
+    report["estimated_notional_jpy"] = 39_000.0
+    with pytest.raises(PermissionError, match="LIMIT price x quantity"):
+        _send(monkeypatch, client, request=request, readiness_report=report)
+    assert client.connected is False
+
+
+def test_absolute_notional_cap_is_rechecked_in_sender(monkeypatch):
+    _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    request = subject.LivePilotSendRequest(
+        intent_id="live-pilot:9432:BUY:100:test",
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=501.0,
+        estimated_notional_jpy=50_100.0,
+    )
+    report = _readiness()
+    report["limit_price"] = 501.0
+    report["estimated_notional_jpy"] = 50_100.0
+    with pytest.raises(PermissionError, match="absolute first-pilot ceiling"):
+        _send(monkeypatch, client, request=request, readiness_report=report)
     assert client.connected is False
 
 
@@ -269,7 +366,11 @@ def test_exact_scope_rejects_wrong_quantity(monkeypatch):
 
 
 def test_source_pin_failure_blocks_before_connection(monkeypatch):
-    monkeypatch.setattr(subject, "audit_live_pilot_source_cutover", lambda **kwargs: SimpleNamespace(ready=False))
+    monkeypatch.setattr(
+        subject,
+        "audit_live_pilot_source_cutover",
+        lambda **kwargs: SimpleNamespace(ready=False),
+    )
     monkeypatch.setattr(subject, "live_pilot_stop_is_active", lambda **kwargs: False)
     client = FakeClient()
     with pytest.raises(PermissionError, match="source/PIN"):
