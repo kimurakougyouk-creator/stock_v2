@@ -185,7 +185,6 @@ def test_unknown_can_only_be_resolved_by_matching_read_only_postfill_identity(tm
     )
 
     with pytest.raises(PermissionError, match="conflicts"):
-        # First bind one acknowledged identity into the durable summary.
         payload = load_send_journal(INTENT, directory=tmp_path)
         assert payload is not None
         payload["order_id"] = 101
@@ -200,6 +199,9 @@ def test_unknown_can_only_be_resolved_by_matching_read_only_postfill_identity(tm
             now=NOW + timedelta(seconds=3),
         )
 
+    assert load_send_journal(INTENT, directory=tmp_path)["state"] == "UNKNOWN"
+    assert send_attempt_permitted(INTENT, directory=tmp_path) is False
+
     proven = mark_postfill_proven(
         INTENT,
         exec_id="exec-9432-001",
@@ -209,6 +211,7 @@ def test_unknown_can_only_be_resolved_by_matching_read_only_postfill_identity(tm
         now=NOW + timedelta(seconds=4),
     )
     assert proven["state"] == "POSTFILL_PROVEN"
+    assert send_attempt_permitted(INTENT, directory=tmp_path) is False
 
 
 def test_corrupt_journal_fails_closed_for_send_permission(tmp_path: Path):
