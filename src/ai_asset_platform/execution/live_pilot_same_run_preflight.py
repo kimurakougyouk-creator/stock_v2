@@ -1,9 +1,13 @@
 """Final same-run evidence binding for one operational Live pilot.
 
-This gate is intentionally stricter than the broader readiness report.  It is
+This gate is intentionally stricter than the broader readiness report. It is
 meant to be evaluated immediately before the operator-authorization/send phase
 so evidence from different Live endpoints or widely separated snapshots cannot
 be mixed together.
+
+For the first cash pilot it also requires settled cash in the instrument currency
+plus an explicit conservative reserve, so margin buying power or an implicit FX
+conversion cannot silently substitute for prepared cash.
 
 The module is read-only: it opens no broker connection and contains no order API.
 """
@@ -25,6 +29,9 @@ DEFAULT_MAX_AGE_SECONDS = 30.0
 DEFAULT_MAX_SKEW_SECONDS = 15.0
 _VALID_LIVE_ENDPOINT_PORTS = {4001, 7496}
 _USD_TICKERS = {"AAPL", "SPY"}
+_INSTRUMENT_CURRENCY = {"AAPL": "USD", "SPY": "USD", "9432.T": "JPY"}
+_SETTLED_CASH_RESERVE = {"JPY": 1_000.0, "USD": 10.0}
+_BASE_AVAILABLE_FUNDS_RESERVE_JPY = 1_000.0
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,13 @@ class LivePilotSameRunPreflight:
     emergency_stop_clear: bool
     live_global_lock_intact: bool
     ready: bool
+    available_funds_jpy: float | None = None
+    required_available_funds_jpy: float | None = None
+    available_funds_ready: bool = False
+    settled_cash_currency: str | None = None
+    settled_cash_amount: float | None = None
+    required_settled_cash_amount: float | None = None
+    settled_cash_ready: bool = False
     broker_connection_used: bool = False
     order_sent: bool = False
     live_order_sent: bool = False
@@ -63,6 +77,19 @@ def _timestamp(value: object) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed.astimezone(timezone.utc)
+
+
+def _finite(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _positive(value: object) -> float | None:
+    parsed = _finite(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _port(report: dict | None) -> int | None:
@@ -104,6 +131,72 @@ def _paper_safe(report: dict | None) -> bool:
         and open_orders == 0
         and not report.get("monitor_order_sent")
         and not report.get("live_order_sent")
+    )
+
+
+def _cash_gate(
+    *,
+    ticker: str,
+    readiness_report: dict | None,
+    account_report: dict | None,
+) -> tuple[float | None, float | None, bool, str | None, float | None, float | None, bool, list[str]]:
+    blockers: list[str] = []
+    currency = _INSTRUMENT_CURRENCY.get(ticker)
+    if currency is None or not isinstance(readiness_report, dict) or not isinstance(account_report, dict):
+        return None, None, False, currency, None, None, False, [
+            "same-run cash evidence cannot be derived"
+        ]
+
+    notional_jpy = _positive(readiness_report.get("estimated_notional_jpy"))
+    limit_price = _positive(readiness_report.get("limit_price"))
+    try:
+        quantity = int(readiness_report.get("quantity"))
+    except (TypeError, ValueError):
+        quantity = 0
+    native_notional = limit_price * quantity if limit_price is not None and quantity > 0 else None
+
+    available = _finite(account_report.get("available_funds"))
+    required_available = (
+        notional_jpy + _BASE_AVAILABLE_FUNDS_RESERVE_JPY
+        if notional_jpy is not None
+        else None
+    )
+    available_ready = bool(
+        available is not None
+        and required_available is not None
+        and available >= required_available
+    )
+    if not available_ready:
+        blockers.append("Live available funds do not cover pilot notional plus JPY reserve")
+
+    balances = account_report.get("settled_cash_by_currency")
+    balances = balances if isinstance(balances, dict) else {}
+    settled = _finite(balances.get(currency))
+    reserve = _SETTLED_CASH_RESERVE.get(currency)
+    required_settled = (
+        native_notional + reserve
+        if native_notional is not None and reserve is not None
+        else None
+    )
+    settled_ready = bool(
+        settled is not None
+        and required_settled is not None
+        and settled >= required_settled
+    )
+    if not settled_ready:
+        blockers.append(
+            f"settled {currency} cash does not cover LIMIT value plus first-pilot reserve"
+        )
+
+    return (
+        available,
+        required_available,
+        available_ready,
+        currency,
+        settled,
+        required_settled,
+        settled_ready,
+        blockers,
     )
 
 
@@ -238,6 +331,22 @@ def evaluate_live_pilot_same_run_preflight(
     else:
         evidence_fresh = False
 
+    (
+        available_funds_jpy,
+        required_available_funds_jpy,
+        available_funds_ready,
+        settled_cash_currency,
+        settled_cash_amount,
+        required_settled_cash_amount,
+        settled_cash_ready,
+        cash_blockers,
+    ) = _cash_gate(
+        ticker=normalized_ticker,
+        readiness_report=readiness_report,
+        account_report=live_account_report,
+    )
+    blockers.extend(cash_blockers)
+
     paper_safe = _paper_safe(paper_monitor_report)
     if not paper_safe:
         blockers.append("same-run Paper safety evidence is not clean")
@@ -271,15 +380,28 @@ def evaluate_live_pilot_same_run_preflight(
         emergency_stop_clear=emergency_clear,
         live_global_lock_intact=live_lock_intact,
         ready=ready,
+        available_funds_jpy=available_funds_jpy,
+        required_available_funds_jpy=required_available_funds_jpy,
+        available_funds_ready=available_funds_ready,
+        settled_cash_currency=settled_cash_currency,
+        settled_cash_amount=settled_cash_amount,
+        required_settled_cash_amount=required_settled_cash_amount,
+        settled_cash_ready=settled_cash_ready,
     )
 
 
 def preflight_record(result: LivePilotSameRunPreflight) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         **asdict(result),
+        "cash_policy": {
+            "base_available_funds_reserve_jpy": _BASE_AVAILABLE_FUNDS_RESERVE_JPY,
+            "settled_cash_reserve_by_currency": dict(_SETTLED_CASH_RESERVE),
+            "interpretation": "operational safety reserve, not a commission estimate",
+        },
         "interpretation": (
-            "This only proves a fresh, internally consistent read-only pre-send snapshot. "
-            "It does not authorize or transmit a Live order."
+            "This only proves a fresh, internally consistent read-only pre-send snapshot, "
+            "including prepared settled instrument cash. It does not authorize or transmit "
+            "a Live order."
         ),
     }
