@@ -17,52 +17,26 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     send_attempt_recorded,
 )
 
-
 NOW = datetime(2026, 9, 6, 8, 0, 0, tzinfo=timezone.utc)
 INTENT = "live-pilot:9432.T:BUY:100:20260907"
 NONCE = "nonce_ABC-123"
 
 
 def _consumed(**overrides) -> dict:
-    payload = {
-        "status": "CONSUMED",
-        "intent_id": INTENT,
-        "nonce": NONCE,
-        "order_sent": False,
-        "live_order_sent": False,
-    }
+    payload = {"status": "CONSUMED", "intent_id": INTENT, "nonce": NONCE, "order_sent": False, "live_order_sent": False}
     payload.update(overrides)
     return payload
 
 
 def _create(tmp_path: Path):
-    return create_consumed_authorization_journal(
-        intent_id=INTENT,
-        nonce=NONCE,
-        consumed_authorization=_consumed(),
-        directory=tmp_path,
-        now=NOW,
-    )
+    return create_consumed_authorization_journal(intent_id=INTENT, nonce=NONCE, consumed_authorization=_consumed(), directory=tmp_path, now=NOW)
 
 
 def test_unconsumed_or_mismatched_authorization_cannot_create_journal(tmp_path: Path):
     with pytest.raises(PermissionError, match="not been consumed"):
-        create_consumed_authorization_journal(
-            intent_id=INTENT,
-            nonce=NONCE,
-            consumed_authorization=_consumed(status="AUTHORIZED_ONCE"),
-            directory=tmp_path,
-            now=NOW,
-        )
-
+        create_consumed_authorization_journal(intent_id=INTENT, nonce=NONCE, consumed_authorization=_consumed(status="AUTHORIZED_ONCE"), directory=tmp_path, now=NOW)
     with pytest.raises(PermissionError, match="nonce mismatch"):
-        create_consumed_authorization_journal(
-            intent_id=INTENT,
-            nonce=NONCE,
-            consumed_authorization=_consumed(nonce="different"),
-            directory=tmp_path,
-            now=NOW,
-        )
+        create_consumed_authorization_journal(intent_id=INTENT, nonce=NONCE, consumed_authorization=_consumed(nonce="different"), directory=tmp_path, now=NOW)
 
 
 def test_clean_consumed_authorization_allows_exactly_one_future_attempt(tmp_path: Path):
@@ -71,13 +45,7 @@ def test_clean_consumed_authorization_allows_exactly_one_future_attempt(tmp_path
     assert created["send_attempt_count"] == 0
     assert send_attempt_recorded(INTENT, directory=tmp_path) is False
     assert send_attempt_permitted(INTENT, directory=tmp_path) is True
-    for key in (
-        "automatic_resend_allowed",
-        "automatic_cancel_allowed",
-        "automatic_modify_allowed",
-        "automatic_flatten_allowed",
-        "automatic_close_allowed",
-    ):
+    for key in ("automatic_resend_allowed", "automatic_cancel_allowed", "automatic_modify_allowed", "automatic_flatten_allowed", "automatic_close_allowed"):
         assert created[key] is False
 
 
@@ -112,13 +80,7 @@ def test_unknown_state_never_reenables_automatic_action(tmp_path: Path):
     unknown = mark_unknown(INTENT, reason="socket disconnected before broker state was proven", directory=tmp_path, now=NOW + timedelta(seconds=2))
     assert unknown["state"] == "UNKNOWN"
     assert unknown["recovery_required"] is True
-    for key in (
-        "automatic_resend_allowed",
-        "automatic_cancel_allowed",
-        "automatic_modify_allowed",
-        "automatic_flatten_allowed",
-        "automatic_close_allowed",
-    ):
+    for key in ("automatic_resend_allowed", "automatic_cancel_allowed", "automatic_modify_allowed", "automatic_flatten_allowed", "automatic_close_allowed"):
         assert unknown[key] is False
     assert send_attempt_permitted(INTENT, directory=tmp_path) is False
 
@@ -167,18 +129,6 @@ def test_corrupt_journal_fails_closed_for_send_permission(tmp_path: Path):
 
 def test_module_contains_no_broker_transport_or_automatic_recovery_action():
     source = Path("src/ai_asset_platform/execution/live_pilot_send_journal.py").read_text(encoding="utf-8")
-    forbidden = (
-        ".placeOrder(",
-        ".cancelOrder(",
-        "reqOpenOrders(",
-        "reqAllOpenOrders(",
-        "reqExecutions(",
-        "enable_live_trading = True",
-        "automatic_resend_allowed=True",
-        "automatic_cancel_allowed=True",
-        "automatic_modify_allowed=True",
-        "automatic_flatten_allowed=True",
-        "automatic_close_allowed=True",
-    )
+    forbidden = (".placeOrder(", ".cancelOrder(", "reqOpenOrders(", "reqAllOpenOrders(", "reqExecutions(", "enable_live_trading = True", "automatic_resend_allowed=True", "automatic_cancel_allowed=True", "automatic_modify_allowed=True", "automatic_flatten_allowed=True", "automatic_close_allowed=True")
     for token in forbidden:
         assert token not in source
