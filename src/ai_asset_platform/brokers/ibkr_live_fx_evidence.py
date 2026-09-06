@@ -8,9 +8,10 @@ Evidence order:
 1. Live CASH/IDEALPRO bid/ask snapshot.
 2. Delayed market-data bid/ask snapshot.
 3. Delayed-frozen market-data bid/ask snapshot.
-4. Live-account ExchangeRate from read-only account updates.
+4. Live-account ExchangeRate from read-only account updates, but only when the
+   requested quote currency is verified to equal the Live account base currency.
 
-Missing evidence fails closed; no FX rate is guessed.
+Missing or semantically ambiguous evidence fails closed; no FX rate is guessed.
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ from ai_asset_platform.brokers.ibkr_live_readonly_account import (
     CONFIRMATION_VALUE,
     LIVE_GATEWAY_PORT,
     LIVE_TWS_PORT,
+    preview_ibkr_live_readonly_account_snapshot,
 )
 from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
 
@@ -140,9 +142,62 @@ def _request_live_market_snapshot(
 
 
 def _request_live_account_fx(
-    *, base_currency: str, quote_currency: str, timeout: float,
+    *,
+    base_currency: str,
+    quote_currency: str,
+    timeout: float,
+    confirmation: str,
 ) -> IbkrFxSnapshotResult:
-    collected: list[str] = []
+    """Read ExchangeRate only when its quote semantics are proven for this account.
+
+    IBKR account-value ExchangeRate is expressed against the account's base
+    currency. It is therefore valid for BASE->QUOTE only when QUOTE equals the
+    currently observed Live account base currency. Any mismatch fails closed.
+    """
+    account_snapshot = preview_ibkr_live_readonly_account_snapshot(
+        timeout=timeout,
+        confirmation=confirmation,
+    )
+    observed_account_base = str(account_snapshot.base_currency or "").strip().upper()
+    snapshot_errors = list(account_snapshot.errors)
+    if not account_snapshot.ready:
+        snapshot_errors.append(
+            "Live read-only account snapshot is not ready for ExchangeRate fallback"
+        )
+        return IbkrFxSnapshotResult(
+            connected=bool(account_snapshot.connected),
+            endpoint_port=account_snapshot.endpoint_port,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            exchange="ACCOUNT",
+            bid=None,
+            ask=None,
+            rate=None,
+            source="LIVE_ACCOUNT_EXCHANGE_RATE",
+            order_sent=False,
+            errors=tuple(snapshot_errors),
+        )
+    if observed_account_base != quote_currency:
+        snapshot_errors.append(
+            "Live account ExchangeRate quote mismatch: "
+            f"account base currency is {observed_account_base or 'UNKNOWN'}, "
+            f"requested quote currency is {quote_currency}"
+        )
+        return IbkrFxSnapshotResult(
+            connected=True,
+            endpoint_port=account_snapshot.endpoint_port,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            exchange="ACCOUNT",
+            bid=None,
+            ask=None,
+            rate=None,
+            source="LIVE_ACCOUNT_EXCHANGE_RATE",
+            order_sent=False,
+            errors=tuple(snapshot_errors),
+        )
+
+    collected: list[str] = snapshot_errors
     for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
         probe = _AccountFxProbe(currency=base_currency)
         try:
@@ -265,6 +320,7 @@ def resolve_ibkr_live_fx_evidence(
         base_currency=base,
         quote_currency=quote,
         timeout=timeout,
+        confirmation=supplied,
     )
     return IbkrFxSnapshotResult(
         connected=account.connected,
