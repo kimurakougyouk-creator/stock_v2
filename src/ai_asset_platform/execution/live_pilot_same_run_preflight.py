@@ -1,0 +1,285 @@
+"""Final same-run evidence binding for one operational Live pilot.
+
+This gate is intentionally stricter than the broader readiness report.  It is
+meant to be evaluated immediately before the operator-authorization/send phase
+so evidence from different Live endpoints or widely separated snapshots cannot
+be mixed together.
+
+The module is read-only: it opens no broker connection and contains no order API.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import math
+from pathlib import Path
+
+from ai_asset_platform.core.settings import SETTINGS, PlatformSettings
+from ai_asset_platform.execution.live_pilot_emergency_stop import (
+    DEFAULT_STOP_PATH,
+    live_pilot_stop_is_active,
+)
+
+
+DEFAULT_MAX_AGE_SECONDS = 30.0
+DEFAULT_MAX_SKEW_SECONDS = 15.0
+_VALID_LIVE_ENDPOINT_PORTS = {4001, 7496}
+_USD_TICKERS = {"AAPL", "SPY"}
+
+
+@dataclass(frozen=True)
+class LivePilotSameRunPreflight:
+    status: str
+    checked_at: str
+    blockers: tuple[str, ...]
+    ticker: str
+    account_fingerprint_match: bool
+    endpoint_port: int | None
+    endpoint_binding_ready: bool
+    evidence_fresh: bool
+    evidence_skew_seconds: float | None
+    operational_readiness_ready: bool
+    paper_monitor_safe: bool
+    emergency_stop_clear: bool
+    live_global_lock_intact: bool
+    ready: bool
+    broker_connection_used: bool = False
+    order_sent: bool = False
+    live_order_sent: bool = False
+
+
+def _now_utc(value: datetime | None) -> datetime:
+    current = value if value is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("same-run preflight clock must be timezone-aware")
+    return current.astimezone(timezone.utc)
+
+
+def _timestamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _port(report: dict | None) -> int | None:
+    if not isinstance(report, dict):
+        return None
+    try:
+        value = int(report.get("endpoint_port"))
+    except (TypeError, ValueError):
+        return None
+    return value if value in _VALID_LIVE_ENDPOINT_PORTS else None
+
+
+def _read_only_clean(report: dict | None) -> bool:
+    return bool(
+        isinstance(report, dict)
+        and report.get("ready") is True
+        and report.get("connection_mode") == "LIVE_READ_ONLY"
+        and not report.get("order_sent")
+        and not report.get("cancel_sent")
+        and not report.get("live_order_sent")
+    )
+
+
+def _paper_safe(report: dict | None) -> bool:
+    if not isinstance(report, dict):
+        return False
+    broker = report.get("broker")
+    broker = broker if isinstance(broker, dict) else {}
+    try:
+        blockers = int(broker.get("reconciliation_blocker_count", 0) or 0)
+        open_orders = int(broker.get("open_order_count", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        str(report.get("status") or "").strip().upper() != "CRITICAL"
+        and report.get("accounting_safe") is True
+        and report.get("risk_safe") is True
+        and blockers == 0
+        and open_orders == 0
+        and not report.get("monitor_order_sent")
+        and not report.get("live_order_sent")
+    )
+
+
+def evaluate_live_pilot_same_run_preflight(
+    *,
+    ticker: str,
+    expected_account_fingerprint: str,
+    readiness_report: dict | None,
+    live_account_report: dict | None,
+    live_open_orders_report: dict | None,
+    live_fx_report: dict | None,
+    paper_monitor_report: dict | None,
+    settings: PlatformSettings = SETTINGS,
+    stop_path: Path = DEFAULT_STOP_PATH,
+    now: datetime | None = None,
+    max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
+    max_skew_seconds: float = DEFAULT_MAX_SKEW_SECONDS,
+) -> LivePilotSameRunPreflight:
+    current = _now_utc(now)
+    for name, value in (
+        ("max_age_seconds", max_age_seconds),
+        ("max_skew_seconds", max_skew_seconds),
+    ):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be positive and finite") from exc
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+
+    normalized_ticker = str(ticker or "").strip().upper()
+    expected_fingerprint = str(expected_account_fingerprint or "").strip().lower()
+    blockers: list[str] = []
+
+    readiness_ready = bool(
+        isinstance(readiness_report, dict)
+        and readiness_report.get("operational_pilot_ready") is True
+        and readiness_report.get("status") == "READY_FOR_ONE_OPERATIONAL_PILOT"
+        and str(readiness_report.get("ticker") or "").strip().upper() == normalized_ticker
+        and not readiness_report.get("order_sent")
+        and not readiness_report.get("live_order_sent")
+    )
+    if not readiness_ready:
+        blockers.append("operational Live pilot readiness is not ready for this ticker")
+
+    account_clean = _read_only_clean(live_account_report)
+    open_orders_clean = _read_only_clean(live_open_orders_report)
+    if not account_clean:
+        blockers.append("same-run Live account evidence is not clean read-only evidence")
+    if not open_orders_clean:
+        blockers.append("same-run Live open-order evidence is not clean read-only evidence")
+    if open_orders_clean:
+        try:
+            open_order_count = int(live_open_orders_report.get("open_order_count", 0))
+        except (TypeError, ValueError):
+            open_order_count = -1
+        if open_order_count != 0:
+            blockers.append("same-run Live open-order evidence is not empty")
+
+    observed_fingerprint = (
+        str(live_account_report.get("account_fingerprint") or "").strip().lower()
+        if isinstance(live_account_report, dict)
+        else ""
+    )
+    fingerprint_match = bool(
+        expected_fingerprint
+        and len(expected_fingerprint) == 64
+        and observed_fingerprint == expected_fingerprint
+    )
+    if not fingerprint_match:
+        blockers.append("same-run Live account fingerprint does not match the pinned account")
+
+    account_port = _port(live_account_report)
+    open_orders_port = _port(live_open_orders_report)
+    required_ports = [account_port, open_orders_port]
+    if account_port is None or open_orders_port is None:
+        blockers.append("same-run Live endpoint is missing or not an audited Live port")
+
+    fx_required = normalized_ticker in _USD_TICKERS
+    fx_clean = True
+    fx_port: int | None = None
+    if fx_required:
+        fx_clean = bool(
+            _read_only_clean(live_fx_report)
+            and str(live_fx_report.get("base_currency") or "").strip().upper() == "USD"
+            and str(live_fx_report.get("quote_currency") or "").strip().upper() == "JPY"
+        )
+        fx_port = _port(live_fx_report)
+        required_ports.append(fx_port)
+        if not fx_clean:
+            blockers.append("same-run Live USD/JPY evidence is not clean read-only evidence")
+        if fx_port is None:
+            blockers.append("same-run Live FX endpoint is missing or not an audited Live port")
+
+    endpoint_binding_ready = bool(
+        required_ports
+        and all(port is not None for port in required_ports)
+        and len(set(required_ports)) == 1
+    )
+    endpoint_port = account_port if endpoint_binding_ready else None
+    if not endpoint_binding_ready:
+        blockers.append("same-run Live evidence is mixed across different endpoints")
+
+    timestamp_reports: list[tuple[str, dict | None]] = [
+        ("readiness", readiness_report),
+        ("account", live_account_report),
+        ("open_orders", live_open_orders_report),
+        ("paper_monitor", paper_monitor_report),
+    ]
+    if fx_required:
+        timestamp_reports.append(("fx", live_fx_report))
+
+    observed_times: list[datetime] = []
+    evidence_fresh = True
+    for label, report in timestamp_reports:
+        observed = _timestamp(report.get("checked_at") if isinstance(report, dict) else None)
+        if observed is None:
+            evidence_fresh = False
+            blockers.append(f"{label} evidence has no timezone-aware checked_at")
+            continue
+        age = (current - observed).total_seconds()
+        if age < 0 or age > float(max_age_seconds):
+            evidence_fresh = False
+            blockers.append(f"{label} evidence is outside the same-run freshness window")
+        observed_times.append(observed)
+
+    skew_seconds: float | None = None
+    if observed_times:
+        skew_seconds = (max(observed_times) - min(observed_times)).total_seconds()
+        if skew_seconds > float(max_skew_seconds):
+            blockers.append("same-run evidence timestamps are too far apart")
+    else:
+        evidence_fresh = False
+
+    paper_safe = _paper_safe(paper_monitor_report)
+    if not paper_safe:
+        blockers.append("same-run Paper safety evidence is not clean")
+
+    emergency_clear = not live_pilot_stop_is_active(settings=settings, stop_path=stop_path)
+    if not emergency_clear:
+        blockers.append("Live pilot emergency stop is active")
+
+    live_lock_intact = bool(
+        not settings.enable_live_trading
+        and not settings.live_trading_unlocked
+        and isinstance(readiness_report, dict)
+        and readiness_report.get("live_global_lock_intact_during_preparation") is True
+    )
+    if not live_lock_intact:
+        blockers.append("global Live Trading lock is not intact during preparation")
+
+    ready = not blockers
+    return LivePilotSameRunPreflight(
+        status="READY_FOR_OPERATOR_AUTHORIZATION" if ready else "BLOCKED",
+        checked_at=current.isoformat(timespec="seconds"),
+        blockers=tuple(blockers),
+        ticker=normalized_ticker,
+        account_fingerprint_match=fingerprint_match,
+        endpoint_port=endpoint_port,
+        endpoint_binding_ready=endpoint_binding_ready,
+        evidence_fresh=evidence_fresh,
+        evidence_skew_seconds=skew_seconds,
+        operational_readiness_ready=readiness_ready,
+        paper_monitor_safe=paper_safe,
+        emergency_stop_clear=emergency_clear,
+        live_global_lock_intact=live_lock_intact,
+        ready=ready,
+    )
+
+
+def preflight_record(result: LivePilotSameRunPreflight) -> dict:
+    return {
+        "schema_version": 1,
+        **asdict(result),
+        "interpretation": (
+            "This only proves a fresh, internally consistent read-only pre-send snapshot. "
+            "It does not authorize or transmit a Live order."
+        ),
+    }
