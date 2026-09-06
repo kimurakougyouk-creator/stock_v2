@@ -23,6 +23,9 @@ def _readiness(**overrides) -> dict:
         "status": "READY_FOR_ONE_OPERATIONAL_PILOT",
         "checked_at": _stamp(),
         "ticker": "AAPL",
+        "quantity": 1,
+        "limit_price": 250.0,
+        "estimated_notional_jpy": 37_500.0,
         "operational_pilot_ready": True,
         "live_global_lock_intact_during_preparation": True,
         "order_sent": False,
@@ -39,6 +42,8 @@ def _account(**overrides) -> dict:
         "connection_mode": "LIVE_READ_ONLY",
         "endpoint_port": 4001,
         "account_fingerprint": FINGERPRINT,
+        "available_funds": 100_000.0,
+        "settled_cash_by_currency": {"USD": 1_000.0, "JPY": 100_000.0},
         "order_sent": False,
         "live_order_sent": False,
     }
@@ -120,8 +125,39 @@ def test_clean_same_run_evidence_is_ready_only_for_operator_authorization(tmp_pa
     assert result.endpoint_binding_ready is True
     assert result.account_fingerprint_match is True
     assert result.evidence_fresh is True
+    assert result.available_funds_ready is True
+    assert result.settled_cash_currency == "USD"
+    assert result.settled_cash_ready is True
     assert result.order_sent is False
     assert result.live_order_sent is False
+
+
+def test_missing_or_insufficient_available_funds_fail_closed(tmp_path: Path):
+    missing = _evaluate(tmp_path, live_account_report=_account(available_funds=None))
+    assert missing.ready is False
+    assert missing.available_funds_ready is False
+
+    insufficient = _evaluate(tmp_path, live_account_report=_account(available_funds=38_000.0))
+    assert insufficient.ready is False
+    assert insufficient.required_available_funds_jpy == 38_500.0
+    assert any("available funds" in item for item in insufficient.blockers)
+
+
+def test_missing_or_insufficient_settled_instrument_cash_fail_closed(tmp_path: Path):
+    missing = _evaluate(
+        tmp_path,
+        live_account_report=_account(settled_cash_by_currency={"JPY": 100_000.0}),
+    )
+    assert missing.ready is False
+    assert missing.settled_cash_ready is False
+
+    insufficient = _evaluate(
+        tmp_path,
+        live_account_report=_account(settled_cash_by_currency={"USD": 259.99}),
+    )
+    assert insufficient.ready is False
+    assert insufficient.required_settled_cash_amount == 260.0
+    assert any("settled USD cash" in item for item in insufficient.blockers)
 
 
 def test_mixed_live_endpoints_fail_closed(tmp_path: Path):
@@ -205,16 +241,46 @@ def test_global_live_unlock_during_preparation_fails_closed(tmp_path: Path):
     assert result.live_global_lock_intact is False
 
 
-def test_jpy_pilot_does_not_require_fx_but_still_binds_live_endpoint(tmp_path: Path):
+def test_jpy_pilot_requires_settled_jpy_cash_plus_reserve(tmp_path: Path):
     result = _evaluate(
         tmp_path,
         ticker="9432.T",
-        readiness_report=_readiness(ticker="9432.T"),
+        readiness_report=_readiness(
+            ticker="9432.T",
+            quantity=100,
+            limit_price=400.0,
+            estimated_notional_jpy=40_000.0,
+        ),
+        live_account_report=_account(
+            available_funds=60_000.0,
+            settled_cash_by_currency={"JPY": 41_000.0},
+        ),
         live_fx_report=None,
     )
 
     assert result.ready is True
     assert result.endpoint_port == 4001
+    assert result.settled_cash_currency == "JPY"
+    assert result.required_settled_cash_amount == 41_000.0
+    assert result.settled_cash_ready is True
+
+    blocked = _evaluate(
+        tmp_path,
+        ticker="9432.T",
+        readiness_report=_readiness(
+            ticker="9432.T",
+            quantity=100,
+            limit_price=400.0,
+            estimated_notional_jpy=40_000.0,
+        ),
+        live_account_report=_account(
+            available_funds=60_000.0,
+            settled_cash_by_currency={"JPY": 40_999.0},
+        ),
+        live_fx_report=None,
+    )
+    assert blocked.ready is False
+    assert blocked.settled_cash_ready is False
 
 
 def test_module_contains_no_broker_order_transport():
