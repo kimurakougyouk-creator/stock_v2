@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import ai_asset_platform.brokers.ibkr_live_readonly_account as module
 
@@ -39,6 +40,22 @@ def test_account_fingerprint_is_deterministic_and_does_not_expose_raw_id():
     assert raw not in fingerprint
 
 
+def test_settled_cash_by_currency_uses_only_exact_currency_rows():
+    probe = SimpleNamespace(
+        account_values={
+            ("SettledCash", "JPY"): 61000.0,
+            ("SettledCash", "USD"): 125.5,
+            ("SettledCash", "BASE"): 999999.0,
+            ("CashBalance", "JPY"): 62000.0,
+            ("SettledCash", ""): 1.0,
+        }
+    )
+    assert module._settled_cash_by_currency(probe) == {
+        "JPY": 61000.0,
+        "USD": 125.5,
+    }
+
+
 def test_ready_requires_complete_live_readonly_evidence():
     ready = module.IbkrLiveReadOnlyAccountSnapshot(
         attempted=True,
@@ -51,6 +68,7 @@ def test_ready_requires_complete_live_readonly_evidence():
         available_funds=100000.0,
         gross_position_value=0.0,
         total_cash_value=100000.0,
+        settled_cash_by_currency={"JPY": 100000.0},
         positions=(),
         blocked_reason=None,
         order_sent=False,
@@ -69,6 +87,7 @@ def test_ready_requires_complete_live_readonly_evidence():
         available_funds=None,
         gross_position_value=None,
         total_cash_value=None,
+        settled_cash_by_currency={},
         positions=(),
         blocked_reason=None,
         order_sent=False,
