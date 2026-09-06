@@ -74,6 +74,139 @@ def test_exact_execution_and_commission_prove_native_cash_effect():
     assert result.execution is not None
     assert result.commission is not None
     assert result.native_cash_effect == -250.35
+    assert result.filled_quantity == 1.0
+    assert result.vwap_price == 250.0
+    assert result.commission_total == 0.35
+    assert len(result.executions) == 1
+    assert len(result.commissions) == 1
+
+
+def test_split_fill_aggregates_all_exec_ids_and_commissions():
+    snapshot = _snapshot(
+        executions=(
+            _execution(exec_id="exec-1", quantity=0.4, price=250.0),
+            _execution(exec_id="exec-2", quantity=0.6, price=251.0),
+        ),
+        commissions=(
+            _commission(exec_id="exec-1", commission=0.15),
+            _commission(exec_id="exec-2", commission=0.20),
+        ),
+    )
+    result = match_live_postfill(
+        snapshot,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is True
+    assert result.filled_quantity == 1.0
+    assert result.vwap_price == 250.6
+    assert result.commission_total == 0.35
+    assert result.native_cash_effect == -250.95
+    assert tuple(row.exec_id for row in result.executions) == ("exec-1", "exec-2")
+
+
+def test_split_fill_missing_one_commission_fails_closed():
+    snapshot = _snapshot(
+        executions=(
+            _execution(exec_id="exec-1", quantity=0.4),
+            _execution(exec_id="exec-2", quantity=0.6),
+        ),
+        commissions=(_commission(exec_id="exec-1"),),
+    )
+    result = match_live_postfill(
+        snapshot,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert result.native_cash_effect is None
+    assert any("exec-2" in item for item in result.blockers)
+
+
+def test_split_fill_under_or_over_quantity_fails_closed():
+    under = _snapshot(
+        executions=(
+            _execution(exec_id="exec-1", quantity=0.4),
+            _execution(exec_id="exec-2", quantity=0.5),
+        ),
+        commissions=(
+            _commission(exec_id="exec-1"),
+            _commission(exec_id="exec-2"),
+        ),
+    )
+    assert match_live_postfill(
+        under,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    ).ready is False
+
+    over = _snapshot(
+        executions=(
+            _execution(exec_id="exec-1", quantity=0.4),
+            _execution(exec_id="exec-2", quantity=0.7),
+        ),
+        commissions=(
+            _commission(exec_id="exec-1"),
+            _commission(exec_id="exec-2"),
+        ),
+    )
+    assert match_live_postfill(
+        over,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    ).ready is False
+
+
+def test_duplicate_execution_or_commission_evidence_fails_closed():
+    duplicate_exec = _snapshot(
+        executions=(
+            _execution(exec_id="exec-1", quantity=0.5),
+            _execution(exec_id="exec-1", quantity=0.5),
+        ),
+        commissions=(_commission(exec_id="exec-1"),),
+    )
+    result = match_live_postfill(
+        duplicate_exec,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any("duplicate exec_id" in item for item in result.blockers)
+
+    duplicate_commission = _snapshot(
+        commissions=(_commission(), _commission(commission=0.36)),
+    )
+    result = match_live_postfill(
+        duplicate_commission,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any("found 2" in item for item in result.blockers)
 
 
 def test_wrong_order_identity_fails_closed():
