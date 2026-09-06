@@ -16,6 +16,7 @@ Missing or semantically ambiguous evidence fails closed; no FX rate is guessed.
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -345,6 +346,7 @@ def persist_live_fx_evidence(
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
         **asdict(result),
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ready": result.ready,
         "connection_mode": "LIVE_READ_ONLY",
         "broker_connection_used": result.source not in {"BLOCKED", "IDENTITY"},

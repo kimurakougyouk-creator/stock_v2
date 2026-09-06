@@ -16,6 +16,7 @@ the identifier in ordinary logs.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -232,6 +233,7 @@ def persist_live_readonly_account_snapshot(
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
         **asdict(snapshot),
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ready": snapshot.ready,
         "raw_account_id_persisted": False,
         "connection_mode": "LIVE_READ_ONLY",

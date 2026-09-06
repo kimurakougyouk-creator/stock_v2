@@ -14,7 +14,9 @@ readiness gate. This module is read-only and sends no order.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 
 from ai_asset_platform.core.settings import SETTINGS, PlatformSettings
@@ -26,10 +28,12 @@ from ai_asset_platform.execution.verified_market_session import (
 
 DEFAULT_LIVE_ACCOUNT_REPORT = Path("results/ibkr_live_readonly_account_latest.json")
 DEFAULT_LIVE_OPEN_ORDERS_REPORT = Path("results/ibkr_live_all_open_orders_latest.json")
+DEFAULT_LIVE_FX_REPORT = Path("results/ibkr_live_fx_evidence_latest.json")
 DEFAULT_PAPER_MONITOR_REPORT = Path("results/ibkr_paper_operations_monitor_latest.json")
 DEFAULT_STRATEGY_DEPLOYMENT_REPORT = Path("results/live_cash_readiness_latest.json")
 DEFAULT_REPORT_PATH = Path("results/live_operational_pilot_readiness_latest.json")
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
+DEFAULT_MAX_EVIDENCE_AGE_SECONDS = 120.0
 
 # Absolute ceiling for the very first operational Live order. The operator may
 # choose a lower limit later, but code cannot exceed this first-pilot ceiling.
@@ -48,6 +52,7 @@ LIVE_PILOT_SCOPE = {
 @dataclass(frozen=True)
 class LiveOperationalPilotReadiness:
     status: str
+    checked_at: str
     blockers: tuple[str, ...]
     ticker: str
     side: str
@@ -55,12 +60,16 @@ class LiveOperationalPilotReadiness:
     estimated_notional_jpy: float | None
     absolute_notional_ceiling_jpy: float
     live_account_ready: bool
+    live_account_fresh: bool
     live_account_fingerprint_match: bool
     live_open_orders_ready: bool
+    live_open_orders_fresh: bool
     live_open_order_count: int | None
     target_live_position_quantity: float | None
     paper_monitor_safe: bool
+    paper_monitor_fresh: bool
     market_session_allowed: bool
+    market_session_fresh: bool
     market_session: str | None
     live_global_lock_intact_during_preparation: bool
     operational_pilot_ready: bool
@@ -81,6 +90,46 @@ def _load_json(path: Path) -> dict | None:
 
 def _normalized_ticker(value: object) -> str:
     return str(value or "").strip().upper()
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _fresh_timestamp(
+    value: object,
+    *,
+    now: datetime,
+    max_age_seconds: float,
+) -> bool:
+    observed = _parse_timestamp(value)
+    if observed is None:
+        return False
+    age = (now.astimezone(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
+    return 0.0 <= age <= max_age_seconds
+
+
+def _report_fresh(
+    report: dict | None,
+    *,
+    field: str,
+    now: datetime,
+    max_age_seconds: float,
+) -> bool:
+    return bool(
+        isinstance(report, dict)
+        and _fresh_timestamp(
+            report.get(field),
+            now=now,
+            max_age_seconds=max_age_seconds,
+        )
+    )
 
 
 def _target_position_quantity(account_report: dict, ticker: str) -> float | None:
@@ -106,7 +155,7 @@ def _target_position_quantity(account_report: dict, ticker: str) -> float | None
             quantity = float(row.get("quantity"))
         except (TypeError, ValueError):
             return None
-        if quantity != quantity or quantity in {float("inf"), float("-inf")}:
+        if not math.isfinite(quantity):
             return None
         matched = True
         total += quantity
@@ -148,7 +197,18 @@ def evaluate_live_operational_pilot_readiness(
     strategy_deployment_report: dict | None = None,
     settings: PlatformSettings = SETTINGS,
     market_session: VerifiedMarketSessionResult | None = None,
+    now: datetime | None = None,
+    max_evidence_age_seconds: float = DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
 ) -> LiveOperationalPilotReadiness:
+    current = now if now is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("readiness time must be timezone-aware")
+    if (
+        not math.isfinite(float(max_evidence_age_seconds))
+        or max_evidence_age_seconds <= 0
+    ):
+        raise ValueError("max_evidence_age_seconds must be positive")
+
     blockers: list[str] = []
     normalized_ticker = _normalized_ticker(ticker)
     normalized_side = str(side or "").strip().upper()
@@ -173,7 +233,7 @@ def evaluate_live_operational_pilot_readiness(
             notional = float(estimated_notional_jpy)
         except (TypeError, ValueError):
             notional = None
-    if notional is None or notional <= 0 or notional != notional:
+    if notional is None or not math.isfinite(notional) or notional <= 0:
         blockers.append("verified estimated notional in JPY is missing")
     elif notional > ABSOLUTE_FIRST_PILOT_NOTIONAL_JPY:
         blockers.append(
@@ -194,8 +254,16 @@ def evaluate_live_operational_pilot_readiness(
         and not live_account_report.get("order_sent")
         and not live_account_report.get("live_order_sent")
     )
+    account_fresh = _report_fresh(
+        live_account_report,
+        field="checked_at",
+        now=current,
+        max_age_seconds=max_evidence_age_seconds,
+    )
     if not account_ready:
         blockers.append("Live read-only account preflight is not ready")
+    if not account_fresh:
+        blockers.append("Live read-only account evidence is missing or stale")
 
     observed_fingerprint = (
         str(live_account_report.get("account_fingerprint") or "").strip()
@@ -240,6 +308,12 @@ def evaluate_live_operational_pilot_readiness(
         and not live_open_orders_report.get("cancel_sent")
         and not live_open_orders_report.get("live_order_sent")
     )
+    open_orders_fresh = _report_fresh(
+        live_open_orders_report,
+        field="checked_at",
+        now=current,
+        max_age_seconds=max_evidence_age_seconds,
+    )
     open_order_count: int | None = None
     if open_orders_ready:
         try:
@@ -248,21 +322,42 @@ def evaluate_live_operational_pilot_readiness(
             open_order_count = None
     if not open_orders_ready:
         blockers.append("Live all-open-orders preflight is not ready")
-    elif open_order_count != 0:
+    if not open_orders_fresh:
+        blockers.append("Live open-order evidence is missing or stale")
+    if open_orders_ready and open_order_count != 0:
         blockers.append("unexpected open Live orders exist")
 
     paper_safe = _paper_monitor_safe(paper_monitor_report)
+    paper_fresh = _report_fresh(
+        paper_monitor_report,
+        field="checked_at",
+        now=current,
+        max_age_seconds=max_evidence_age_seconds,
+    )
     if not paper_safe:
         blockers.append("existing Paper safety monitor evidence is not clean")
+    if not paper_fresh:
+        blockers.append("Paper safety monitor evidence is missing or stale")
 
     session = market_session or (
-        evaluate_verified_market_session(normalized_ticker)
+        evaluate_verified_market_session(normalized_ticker, now=current)
         if normalized_ticker
         else None
     )
     session_allowed = bool(session and session.allowed)
+    session_timestamp = getattr(session, "local_timestamp", None) if session else None
+    session_fresh = bool(
+        session
+        and _fresh_timestamp(
+            session_timestamp,
+            now=current,
+            max_age_seconds=max_evidence_age_seconds,
+        )
+    )
     if not session_allowed:
         blockers.append("target market session is not currently open/audited")
+    if not session_fresh:
+        blockers.append("market-session evidence is missing or stale")
 
     strategy_ready = bool(
         isinstance(strategy_deployment_report, dict)
@@ -272,6 +367,7 @@ def evaluate_live_operational_pilot_readiness(
     ready = not blockers
     return LiveOperationalPilotReadiness(
         status="READY_FOR_ONE_OPERATIONAL_PILOT" if ready else "BLOCKED",
+        checked_at=current.astimezone(timezone.utc).isoformat(timespec="seconds"),
         blockers=tuple(blockers),
         ticker=normalized_ticker,
         side=normalized_side,
@@ -279,12 +375,16 @@ def evaluate_live_operational_pilot_readiness(
         estimated_notional_jpy=notional,
         absolute_notional_ceiling_jpy=ABSOLUTE_FIRST_PILOT_NOTIONAL_JPY,
         live_account_ready=account_ready,
+        live_account_fresh=account_fresh,
         live_account_fingerprint_match=fingerprint_match,
         live_open_orders_ready=open_orders_ready,
+        live_open_orders_fresh=open_orders_fresh,
         live_open_order_count=open_order_count,
         target_live_position_quantity=target_position,
         paper_monitor_safe=paper_safe,
+        paper_monitor_fresh=paper_fresh,
         market_session_allowed=session_allowed,
+        market_session_fresh=session_fresh,
         market_session=(session.session if session else None),
         live_global_lock_intact_during_preparation=live_lock_intact,
         operational_pilot_ready=ready,
@@ -314,6 +414,8 @@ def audit_live_operational_pilot_readiness(
     estimated_notional_jpy: float | None,
     expected_account_fingerprint: str | None,
     settings: PlatformSettings = SETTINGS,
+    now: datetime | None = None,
+    max_evidence_age_seconds: float = DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
 ) -> LiveOperationalPilotReadiness:
     def safe_load(path: Path) -> dict | None:
         try:
@@ -332,6 +434,8 @@ def audit_live_operational_pilot_readiness(
         paper_monitor_report=safe_load(DEFAULT_PAPER_MONITOR_REPORT),
         strategy_deployment_report=safe_load(DEFAULT_STRATEGY_DEPLOYMENT_REPORT),
         settings=settings,
+        now=now,
+        max_evidence_age_seconds=max_evidence_age_seconds,
     )
 
 
