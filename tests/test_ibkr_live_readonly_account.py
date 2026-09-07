@@ -56,6 +56,42 @@ def test_settled_cash_by_currency_uses_only_exact_currency_rows():
     }
 
 
+def test_settled_cash_accepts_ibkr_ledger_prefixed_per_currency_keys():
+    probe = SimpleNamespace(
+        account_values={
+            ("$LEDGER-SettledCash", "JPY"): 61000.0,
+            ("$LEDGER-SettledCash", "USD"): 125.5,
+            ("$LEDGER-SettledCash", "BASE"): 999999.0,
+        }
+    )
+    assert module._settled_cash_by_currency(probe) == {
+        "JPY": 61000.0,
+        "USD": 125.5,
+    }
+
+
+def test_conflicting_prefixed_and_legacy_settled_cash_fails_closed_for_currency():
+    probe = SimpleNamespace(
+        account_values={
+            ("SettledCash", "JPY"): 61000.0,
+            ("$LEDGER-SettledCash", "JPY"): 60000.0,
+            ("SettledCash", "USD"): 125.5,
+            ("$LEDGER-SettledCash", "USD"): 125.5,
+        }
+    )
+    assert module._settled_cash_by_currency(probe) == {"USD": 125.5}
+
+
+def test_nonfinite_settled_cash_is_never_accepted():
+    probe = SimpleNamespace(
+        account_values={
+            ("SettledCash", "JPY"): float("nan"),
+            ("$LEDGER-SettledCash", "USD"): float("inf"),
+        }
+    )
+    assert module._settled_cash_by_currency(probe) == {}
+
+
 def test_ready_requires_complete_live_readonly_evidence():
     ready = module.IbkrLiveReadOnlyAccountSnapshot(
         attempted=True,
