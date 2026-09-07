@@ -1,6 +1,6 @@
 # stock_v2 / AI Asset Platform — Canonical Handoff Master
 
-Last verified: 2026-09-06 JST
+Last verified: 2026-09-08 JST
 
 This is the canonical cross-chat handoff entry point. **Do not rely on chat memory alone.** Read `AI_PM_RUNBOOK.md` before asking the user for project work. Detailed capability evidence remains in `PROJECT_STATE.md`; current code/evidence is determined from GitHub `main` plus fresh broker/runtime evidence.
 
@@ -51,7 +51,7 @@ When sources disagree:
 
 ## Current verified GitHub state
 
-Verified `main` before this documentation branch: `4d956e353ff7972b1468af8af9cced26c165babb`, merge commit for PR #268.
+Verified `main` before this documentation branch: `59a3bf7980efebd5f079f3311540da8c78dabd2c`, merge commit for PR #278.
 
 Recent Live-preparation work merged includes:
 
@@ -69,8 +69,17 @@ Recent Live-preparation work merged includes:
 - PR #266 — audited source/PIN cutover gate.
 - PR #267 — read-only Live post-fill execution/commission evidence.
 - PR #268 — crash-safe irreversible send-attempt marker and UNKNOWN/no-resend state handling.
+- PR #271 — fail-closed single-send Live pilot transport: same-socket raw account ID bound to pinned fingerprint, last-point emergency-stop check, exactly one `placeOrder` call site, UNKNOWN/no-resend on timeout or ambiguous acknowledgement.
+- PR #272 — settled-cash-in-instrument-currency gate (plus reserve) required in the same-run preflight before the first Live pilot.
+- PR #273 — exact post-pilot completion judge: journal identity, execution + commission evidence, final account/position, zero Live open orders, endpoint/fingerprint/freshness/Paper-safety evidence, durable local alert.
+- PR #274 — split/partial-execution aggregation by exact orderId/permId/account/ticker/side; duplicate/missing/underfill/overfill/conflicting evidence fails closed.
+- PR #275 — Paper daily risk limits use the account calendar/timezone.
+- PR #276 — support for IBKR's current `$LEDGER-`-prefixed per-currency SettledCash evidence; conflicting prefixed/legacy evidence fails closed.
+- PR #277/#278 — AI operating-role documents (`AGENTS.md`/`CLAUDE.md`/`AI_PM_RUNBOOK.md`) aligned to Claude-primary implementation, Codex independent review.
 
-The full test suite reported `1533 passed` for the latest PR #268 CI before merge.
+**Independent-review gate note (2026-09-08):** no GitHub PR review is recorded on PR #271, #273, or #274 (`gh pr view <n> --json reviews,comments` returns empty for all three). These are safety-critical under `AGENTS.md` (Live order transport / `placeOrder` path, post-fill reconciliation, execution/commission matching). Per the mandatory multi-agent gate, implementation completeness alone does not close this line item until Codex has independently reviewed the actual diff/tests for these three PRs and any finding is resolved. Treat this as open until that review is recorded.
+
+The full test suite reported `1581 passed` locally on this exact `main` commit on 2026-09-08 (matches the PR #276 CI figure; no drift since).
 
 ## Current development stage
 
@@ -88,23 +97,37 @@ Current verdict: **NO-GO for any real-cash `placeOrder`** until every remaining 
 - fresh endpoint/account-fingerprint/notional evidence binding;
 - audited source/PIN cutover gate;
 - crash-safe UNKNOWN / no-resend journal;
-- read-only Live execution + commission post-fill evidence.
+- read-only Live execution + commission post-fill evidence;
+- same-final-session raw account-ID → pinned-fingerprint binding, implemented inside the actual sender (PR #271);
+- last-possible-point emergency-stop check implemented inside the actual sender, after the one-shot authorization is irreversibly consumed (PR #271);
+- single-send Live transport/orchestrator implemented (PR #271), including settled-cash-plus-reserve gating (PR #272);
+- integrated post-pilot completion judge with split/partial-fill aggregation (PR #273, PR #274).
 
 ### Still mandatory before first real-cash send
 
-- bind the raw ephemeral account ID used by the final order to the same final Live session and verify its fingerprint;
-- check emergency stop at the last possible point inside the actual sender;
-- implement and independently audit the single-send Live transport/orchestrator;
-- complete post-pilot completion judgment with final position, unexpected-open-order check, account/risk/reconciliation evidence, and alert result;
+- **Codex independent review** of the merged safety-critical sender/completion/reconciliation code (PR #271, #273, #274) — not yet recorded on GitHub as of 2026-09-08; see the independent-review gate note above;
 - on the Chromebook, run the exact approved pinned source with a clean safety-critical working tree and verify Paper monitoring remains intact;
 - obtain fresh Live read-only evidence immediately before the operator step: account/fingerprint, funds, permissions, target position, open orders, quote/FX, notional, session state;
+- external/operator prerequisites not provable from GitHub (see the 2026-09-07 operator-state handoff below): JPY funding settlement, Japanese-stock trading permission approval, JASDEC registration completion, and a proven Live TWS/IB Gateway read-only API socket;
 - keep broker-side API Read-Only enabled throughout preparation;
 - removing Read-Only and the first real-cash transmission are separate explicit operator actions and are never date/time triggered.
 
-## 2026-09-07 execution-calendar note
+## 2026-09-07 operator-state handoff (from Issue #255)
 
-- NYSE is closed for Labor Day; AAPL/SPY cannot be a regular-session pilot candidate on 2026-09-07.
-- JPX is scheduled open; within the existing bounded scope, `9432.T` is the calendar-compatible execution-mechanics candidate, subject to every other gate.
+Canonical external/runtime state while broker-side prerequisites are pending — do not repeat or reverse these:
+
+- IBKR Live Client Portal login: verified working.
+- JPY funding: operator submitted a JPY 60,000 domestic transfer scheduled for 2026-09-08. Do not resend or create another funding instruction. Live `SettledCash`/`AvailableFunds` are not yet verified as credited.
+- Domestic bank instruction registration: completed.
+- JASDEC shareholder-information form: fields were filled and the portal showed a save confirmation; whether the backend status is formally submitted/processing/completed is UNVERIFIED.
+- Japanese stock trading permission: portal shows pending approval. Do not remove/re-submit the permission request.
+- Live TWS/IB Gateway API runtime: Live read-only socket proof is still UNVERIFIED. Read-Only stays ON.
+- No real-cash order, What-If, cancel, modify, close/flatten, retry, or Read-Only removal is authorized.
+
+## Execution-calendar note (verified 2026-09-08 from `verified_market_session.py`, not re-guessed)
+
+- 2026-09-07 (Mon): NYSE closed for Labor Day; JPX scheduled open — `9432.T` was the only calendar-compatible candidate that day.
+- 2026-09-08 (Tue, today): both the US core session and the TSE cash session evaluate as regular open sessions (no weekend/holiday block) per the pinned calendar in `verified_market_session.py`; this does not by itself change NO-GO status — every other gate above still applies, and the external/operator prerequisites remain the binding constraint.
 
 This is not an investment recommendation.
 

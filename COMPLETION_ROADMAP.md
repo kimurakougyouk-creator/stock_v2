@@ -1,6 +1,6 @@
 # stock_v2 — Reverse-Engineered Completion Roadmap
 
-Last verified: 2026-09-06 JST
+Last verified: 2026-09-08 JST
 
 This document defines what **completion** means and works backward from that end state. It is intentionally stricter than a percentage estimate. A phase is complete only when its exit evidence exists; a high percentage never substitutes for a missing mandatory gate.
 
@@ -177,16 +177,15 @@ Validate execution mechanics only. It is not a recommendation to buy an instrume
 8. Transmit at most once.
 9. Immediately enter Phase 4 reconciliation; never infer success from timeout or silence.
 
-### Current 2026-09-07 calendar constraint
-- NYSE regular session is closed for Labor Day; AAPL/SPY are not regular-session pilot candidates on 2026-09-07.
-- JPX is scheduled open; within the already-bounded scope, `9432.T` 100 shares is the calendar-compatible execution-mechanics candidate **only if every other gate is green**.
+### Calendar note (verified 2026-09-08 from `verified_market_session.py`)
+- 2026-09-07 (Mon): NYSE regular session closed for Labor Day; AAPL/SPY were not regular-session pilot candidates that day. JPX was scheduled open; `9432.T` 100 shares was the calendar-compatible execution-mechanics candidate **only if every other gate was green**.
+- 2026-09-08 (Tue, today): both the US core session and the TSE cash session evaluate as regular open sessions per the pinned calendar. Calendar openness alone never overrides any other gate below.
 
 ### Current blockers before any send
-- Same-final-session raw account ID must be bound to pinned fingerprint in the final sender.
-- Emergency stop must be checked at the last possible point inside that sender.
-- The audited single-send Live transport/orchestrator must be implemented and independently reviewed.
-- The Phase 4 completion judge must be fully integrated.
-- Actual Chromebook/runtime and fresh Live account evidence must be verified on the execution day.
+- Same-final-session raw account ID → pinned fingerprint binding, the last-point emergency-stop check, the single-send Live transport/orchestrator, and the Phase 4 completion judge are all **implemented** on `main` (PR #271/#272/#273/#274) and covered by passing tests.
+- **Not yet closed:** independent Codex review of that implementation is not recorded on GitHub (PR #271/#273/#274 show no reviews/comments as of 2026-09-08); the multi-agent gate in `AGENTS.md` treats this line item as open until that review happens and any finding is resolved.
+- Actual Chromebook/runtime and fresh Live account evidence must still be verified on the execution day.
+- External/operator prerequisites remain outstanding: JPY funding settlement, Japanese-stock trading permission, JASDEC registration completion, and a proven Live read-only API socket (see `HANDOFF_MASTER.md`'s 2026-09-07 operator-state handoff).
 - The user must explicitly authorize the exact real-cash action; a date or general instruction to continue is not authorization.
 
 ### Exit criterion
@@ -305,7 +304,7 @@ Every expansion — new ticker quantity, market, broker, derivative, crypto, wid
 
 ---
 
-# Current state at 2026-09-06
+# Current state at 2026-09-08
 
 ## DONE / VERIFIED
 - Exact bounded Paper milestone.
@@ -313,19 +312,21 @@ Every expansion — new ticker quantity, market, broker, derivative, crypto, wid
 - Live read-only account/open-order/FX evidence.
 - Freshness/TOCTOU and exact-notional binding.
 - One-shot authorization and emergency-stop primitives.
-- Same-run evidence bundle.
+- Same-run evidence bundle, now including settled-cash-plus-reserve gating (PR #272) and Live-endpoint ledger-prefixed SettledCash support (PR #276).
 - Audited-source/PIN gate.
 - Crash-safe UNKNOWN/no-resend attempt journal.
 - Read-only Live post-fill execution/commission collector.
 - Durable PM/runbook/operator-prerequisite documents.
+- Same-final-session raw account-ID binding inside the final sender (PR #271, `live_pilot_single_send.py`).
+- Last-moment emergency-stop check inside the final sender, after the one-shot authorization is irreversibly consumed (PR #271).
+- Single-send Live transport/orchestrator implementation (PR #271).
+- Integrated post-pilot completion/reconciliation judge, including split/partial-fill aggregation (PR #273, PR #274).
+- Full local pytest run on current `main` (`59a3bf7`): `1581 passed` on 2026-09-08, matching the last CI figure — no drift.
 
 ## TODO before first Live send
-1. Same-final-session raw account-ID binding inside final sender.
-2. Last-moment emergency-stop check inside final sender.
-3. Single-send Live transport/orchestrator implementation + independent audit.
-4. Integrated post-pilot completion/reconciliation judge.
-5. Execution-day exact-source and fresh Live runtime evidence.
-6. One-at-a-time unavoidable operator prerequisites/approval.
+1. **Codex independent review of PR #271/#273/#274** — implementation is done and tested, but no GitHub review is recorded on any of the three safety-critical PRs (`gh pr view <n> --json reviews,comments` is empty for all three as of 2026-09-08). Per `AGENTS.md`'s mandatory multi-agent gate, this line item is not closed by implementation/CI alone.
+2. Execution-day exact-source and fresh Live runtime evidence.
+3. One-at-a-time unavoidable operator prerequisites/approval — currently pending externally: JPY funding settlement (transfer scheduled 2026-09-08), Japanese-stock trading permission (pending approval), JASDEC registration (form saved, backend status unverified), and a proven Live TWS/IB Gateway read-only API socket. See `HANDOFF_MASTER.md`'s 2026-09-07 operator-state handoff for the exact canonical wording; do not resend funds or resubmit the permission/JASDEC requests.
 
 ## TODO after first pilot but before normal Live strategy deployment
 1. Durable fee/commission join for all natural strategy executions.
