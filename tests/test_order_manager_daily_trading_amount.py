@@ -1,4 +1,4 @@
-from datetime import datetime
+from ai_asset_platform.core.account_clock import account_now
 
 import order_manager
 
@@ -6,7 +6,7 @@ import order_manager
 def test_calculate_daily_trading_amount_sums_today_buy_and_sell(
     monkeypatch,
 ):
-    today = datetime.now().isoformat(timespec="seconds")
+    today = account_now().isoformat(timespec="seconds")
 
     monkeypatch.setattr(
         order_manager,
@@ -55,7 +55,7 @@ def test_calculate_daily_trading_amount_ignores_other_days(
 def test_calculate_daily_trading_amount_ignores_invalid_orders(
     monkeypatch,
 ):
-    today = datetime.now().isoformat(timespec="seconds")
+    today = account_now().isoformat(timespec="seconds")
 
     monkeypatch.setattr(
         order_manager,
