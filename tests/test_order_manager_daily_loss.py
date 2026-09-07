@@ -89,3 +89,37 @@ def test_calculate_daily_realized_pnl_ignores_other_dates(
     )
 
     assert result == 0.0
+
+
+def test_calculate_daily_realized_pnl_maps_utc_sell_to_tokyo_day(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    order_log = tmp_path / "paper_orders.jsonl"
+    monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", order_log)
+
+    _write_orders(
+        order_log,
+        [
+            {
+                "created_at": "2026-08-21T10:00:00+00:00",
+                "ticker": "7203.T",
+                "side": "BUY",
+                "shares": 100,
+                "reference_price": 2000.0,
+            },
+            {
+                "created_at": "2026-08-21T15:30:00+00:00",
+                "ticker": "7203.T",
+                "side": "SELL",
+                "shares": 100,
+                "reference_price": 1900.0,
+            },
+        ],
+    )
+
+    result = order_manager.calculate_daily_realized_pnl(
+        date(2026, 8, 22)
+    )
+
+    assert result == -10_000.0
