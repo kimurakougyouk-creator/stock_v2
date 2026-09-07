@@ -7,6 +7,12 @@ from datetime import date, datetime
 from pathlib import Path
 import json
 
+from ai_asset_platform.core.account_clock import account_now, account_today
+from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.execution.account_calendar_ledger import (
+    record_time_in_account_zone,
+)
+
 
 ORDER_LOG_DIR = Path("results")
 ORDER_LOG_PATH = ORDER_LOG_DIR / "paper_orders.jsonl"
@@ -146,7 +152,7 @@ def create_paper_order(
         raise ValueError("sharesは1株以上を指定してください。")
 
     order = {
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": account_now(SETTINGS).isoformat(timespec="seconds"),
         "mode": "PAPER",
         "ticker": str(ticker),
         "side": signal,
@@ -535,26 +541,23 @@ def calculate_position_holding_days(
 
 
 def calculate_daily_buy_order_count() -> int:
-    """本日記録されたBUY注文数を返す。"""
+    """口座タイムゾーンで本日記録されたBUY注文数を返す。"""
 
     orders = load_paper_orders()
     if not orders:
         return 0
 
-    today = datetime.now().date()
+    today = account_today(SETTINGS)
     count = 0
 
     for order in orders:
         if str(order.get("side", "")).upper() != "BUY":
             continue
 
-        created_at = order.get("created_at")
-        if not created_at:
-            continue
-
         try:
-            order_date = datetime.fromisoformat(
-                str(created_at)
+            order_date = record_time_in_account_zone(
+                order,
+                SETTINGS,
             ).date()
         except ValueError:
             continue
@@ -566,26 +569,23 @@ def calculate_daily_buy_order_count() -> int:
 
 
 def calculate_daily_sell_order_count() -> int:
-    """本日記録されたSELL注文数を返す。"""
+    """口座タイムゾーンで本日記録されたSELL注文数を返す。"""
 
     orders = load_paper_orders()
     if not orders:
         return 0
 
-    today = datetime.now().date()
+    today = account_today(SETTINGS)
     count = 0
 
     for order in orders:
         if str(order.get("side", "")).upper() != "SELL":
             continue
 
-        created_at = order.get("created_at")
-        if not created_at:
-            continue
-
         try:
-            order_date = datetime.fromisoformat(
-                str(created_at)
+            order_date = record_time_in_account_zone(
+                order,
+                SETTINGS,
             ).date()
         except ValueError:
             continue
@@ -597,13 +597,13 @@ def calculate_daily_sell_order_count() -> int:
 
 
 def calculate_daily_trading_amount() -> float:
-    """本日記録されたBUY・SELL注文の売買代金合計を返す。"""
+    """口座タイムゾーンで本日のBUY・SELL注文の売買代金合計を返す。"""
 
     orders = load_paper_orders()
     if not orders:
         return 0.0
 
-    today = datetime.now().date()
+    today = account_today(SETTINGS)
     total_amount = 0.0
 
     for order in orders:
@@ -611,13 +611,10 @@ def calculate_daily_trading_amount() -> float:
         if side not in {"BUY", "SELL"}:
             continue
 
-        created_at = order.get("created_at")
-        if not created_at:
-            continue
-
         try:
-            order_date = datetime.fromisoformat(
-                str(created_at)
+            order_date = record_time_in_account_zone(
+                order,
+                SETTINGS,
             ).date()
             shares = int(order.get("shares", 0))
             reference_price = float(
@@ -703,11 +700,11 @@ def calculate_daily_realized_pnl(
     """指定日の売却で確定した損益を注文履歴から計算します。
 
     買付価格は銘柄ごとの移動平均取得価格を使用します。
-    target_dateを省略した場合は今日の損益を返します。
+    target_dateを省略した場合は口座タイムゾーンの今日の損益を返します。
     """
 
     if target_date is None:
-        target_date = date.today()
+        target_date = account_today(SETTINGS)
 
     positions: dict[str, int] = {}
     average_costs: dict[str, float] = {}
@@ -715,7 +712,7 @@ def calculate_daily_realized_pnl(
 
     for order in load_accounting_orders():
         try:
-            created_at = datetime.fromisoformat(str(order["created_at"]))
+            created_at = record_time_in_account_zone(order, SETTINGS)
             ticker = str(order["ticker"])
             side = str(order["side"]).upper()
             shares = int(order["shares"])
