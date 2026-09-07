@@ -1,4 +1,4 @@
-from datetime import datetime
+from ai_asset_platform.core.account_clock import account_now
 
 import order_manager
 
@@ -6,7 +6,7 @@ import order_manager
 def test_calculate_daily_sell_order_count_counts_only_today_sell_orders(
     monkeypatch,
 ):
-    today = datetime.now().isoformat(timespec="seconds")
+    today = account_now().isoformat(timespec="seconds")
 
     monkeypatch.setattr(
         order_manager,
@@ -61,7 +61,7 @@ def test_calculate_daily_sell_order_count_returns_zero_without_orders(
 def test_calculate_daily_sell_order_count_ignores_invalid_history(
     monkeypatch,
 ):
-    today = datetime.now().isoformat(timespec="seconds")
+    today = account_now().isoformat(timespec="seconds")
 
     monkeypatch.setattr(
         order_manager,
