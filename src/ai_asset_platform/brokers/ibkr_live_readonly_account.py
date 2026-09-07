@@ -14,6 +14,11 @@ is stored instead so later pilot steps can pin the same account without exposing
 the identifier in ordinary logs. Per-currency SettledCash values from the same
 read-only account download are persisted so the pilot can require actual settled
 cash in the instrument currency instead of relying on margin buying power.
+
+IBKR can prefix per-currency account-value keys with ``$LEDGER-``. Both the
+legacy ``SettledCash`` key and ``$LEDGER-SettledCash`` are accepted. If both
+forms are observed for one currency with conflicting values, that currency is
+omitted so the downstream cash gate fails closed rather than choosing one value.
 """
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from threading import Thread
@@ -41,7 +47,8 @@ CONFIRMATION_VALUE = "READ_LIVE_ACCOUNT_ONLY"
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_readonly_account_latest.json")
 LIVE_GATEWAY_PORT = 4001
 LIVE_TWS_PORT = 7496
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
+_SETTLED_CASH_KEYS = {"SettledCash", "$LEDGER-SettledCash"}
 
 
 @dataclass(frozen=True)
@@ -87,11 +94,18 @@ def _account_fingerprint(account_id: str) -> str:
 
 
 def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
-    """Return exact finite SettledCash values observed in account updates."""
-    balances: dict[str, float] = {}
+    """Return unambiguous finite per-currency SettledCash evidence.
+
+    Current IBKR sessions may emit per-currency keys either as ``SettledCash``
+    or as ``$LEDGER-SettledCash`` depending on the TWS/API setting. If both key
+    forms are present for the same currency, they must agree; otherwise that
+    currency is excluded so the pilot cannot treat conflicting cash evidence as
+    spendable settled cash.
+    """
+    observations: dict[str, list[float]] = {}
     for (key, currency), value in probe.account_values.items():
         normalized_currency = str(currency or "").strip().upper()
-        if key != "SettledCash":
+        if key not in _SETTLED_CASH_KEYS:
             continue
         if (
             len(normalized_currency) != 3
@@ -99,7 +113,19 @@ def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
             or normalized_currency == "BASE"
         ):
             continue
-        balances[normalized_currency] = float(value)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(parsed):
+            continue
+        observations.setdefault(normalized_currency, []).append(parsed)
+
+    balances: dict[str, float] = {}
+    for currency, values in observations.items():
+        first = values[0]
+        if all(math.isclose(item, first, rel_tol=1e-12, abs_tol=1e-9) for item in values[1:]):
+            balances[currency] = first
     return dict(sorted(balances.items()))
 
 
