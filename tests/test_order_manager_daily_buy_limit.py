@@ -56,7 +56,7 @@ def test_daily_buy_count_counts_three_recorded_buys(
         "load_paper_orders",
         lambda: [
             {
-                "created_at": f"2026-08-22T0{hour}:00:00+09:00",
+                "created_at": f"2026-08-22T{hour:02d}:00:00+09:00",
                 "ticker": ticker,
                 "side": "BUY",
                 "shares": 1,
