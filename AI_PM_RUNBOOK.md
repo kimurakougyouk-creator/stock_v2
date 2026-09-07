@@ -19,13 +19,15 @@ Before asking the user for any project action:
 
 ## Multi-agent execution policy
 
-Use the available AI environment as a team instead of relying on one model's memory or self-review.
+Use the available AI environment as a team without multiplying the same work.
 
-- **ChatGPT:** PM/orchestrator, current-state reconstruction, architecture/safety acceptance, GitHub evidence integration, progress control, and user handoff.
-- **Codex:** primary coding executor for repository inspection, implementation, tests, refactors, PR work, and first-pass code review.
-- **Claude Code:** independent adversarial reviewer and alternate implementer when a second implementation is useful. It must inspect actual code/diff/tests rather than merely agreeing with another agent's summary.
+- **Claude Code:** primary implementation agent. Preserve code-context continuity, implement the smallest safe blocker-closing change, add/repair tests, run relevant local tests, self-review the diff, and report evidence.
+- **ChatGPT:** PM/orchestrator, current-state reconstruction, completion-roadmap control, architecture/safety acceptance, GitHub investigation/execution, evidence integration, progress control, and user handoff.
+- **Codex:** independent second reviewer for safety-critical trading changes. Inspect the actual diff/code/tests from a clean perspective and try to break assumptions. Do not duplicate Claude's full task by default. Codex may implement only when Claude is blocked or when a task is clearly separable and non-overlapping.
 - **GitHub:** canonical state and final engineering evidence source. Current source, diff, CI, issues, and broker/runtime evidence outrank agent memory or prose.
 - **User:** operator of last resort for human-only actions.
+
+The primary implementation role is Claude Code unless the user explicitly decides otherwise. An AI must not silently change that role.
 
 ### Mandatory independent-review gate
 
@@ -35,15 +37,25 @@ Safety-critical includes Live order transport, account/session/fingerprint bindi
 
 Required sequence:
 
-1. One coding agent implements against current canonical source.
-2. Relevant tests run and the implementation agent reviews its own diff.
-3. A different agent independently audits the actual diff/code/tests and actively searches for missing edge cases, contradictory assumptions, stale evidence, unsafe fallbacks, and operator dependencies.
-4. Findings are fixed and independently rechecked.
+1. Claude Code implements against current canonical source by default.
+2. Relevant tests run and Claude reviews its own diff.
+3. Codex independently audits the actual diff/code/tests and actively searches for missing edge cases, contradictory assumptions, stale evidence, unsafe fallbacks, and operator dependencies.
+4. Findings are fixed through the primary implementation path and independently rechecked as needed.
 5. GitHub secret scan and CI pass on the exact PR/commit.
 6. ChatGPT verifies the evidence against the roadmap and governing safety issue before accepting/merging.
 7. Real-money execution remains a separate explicit operator action after fresh runtime gates are green.
 
-For low-risk documentation-only changes, one agent plus GitHub CI and ChatGPT verification may be enough.
+For low-risk documentation-only changes, one implementation path plus GitHub CI and ChatGPT verification is enough; do not spend Codex quota on routine duplication.
+
+## Critical-path freeze
+
+Until the first bounded Live pilot reaches a reconciled terminal outcome:
+
+- no unrelated feature expansion;
+- no silent widening of ticker/quantity/market/broker scope;
+- no new process/tooling layer unless it directly closes a verified blocker;
+- no primary-agent reorganization without explicit user approval;
+- prefer completion-roadmap work over tooling improvement for its own sake.
 
 ## User interaction gate
 

@@ -19,15 +19,17 @@ Complete the multi-broker, multi-market AI trading platform safely and efficient
 
 ## Roles
 
-- ChatGPT: project manager/orchestrator, architecture/safety acceptance, GitHub investigation/execution, evidence integration, progress control, and operator handoff.
-- Codex / primary coding agent: repository inspection, implementation, tests, refactors, PR work, and first-pass code review.
-- Claude Code: independent adversarial reviewer for safety-critical work and alternate implementer when useful. Inspect the actual diff/code/tests from a clean perspective; do not merely validate another agent's explanation.
+- Claude Code: primary implementation agent. Preserve implementation continuity, inspect current repository state, implement the smallest blocker-closing change, add/repair tests, run relevant local tests, self-review the diff, and report concrete evidence.
+- ChatGPT: project manager/orchestrator, completion-roadmap control, architecture/safety acceptance, GitHub investigation/execution, evidence integration, progress control, and operator handoff.
+- Codex: independent second reviewer for safety-critical work. Inspect the actual diff/code/tests from a clean perspective and actively search for contradictions, missing edge cases, stale evidence, and unsafe assumptions. Do not duplicate Claude's whole implementation by default. Codex may implement only when explicitly delegated because Claude is blocked or when a task is clearly separable and non-overlapping.
 - GitHub: canonical source of truth for source, diff, CI, issues, and merge state.
 - User: only actions AI cannot perform, such as broker login/identity verification, funding/account actions, broker-side setting changes, and explicit approval for consequential real trading actions.
 
+The primary implementation role must not be changed by an AI on its own. Any role change requires an explicit user decision and a matching update to the canonical project documents.
+
 ## Independent-review requirement
 
-For any safety-critical trading change, Claude Code must actively look for:
+For any safety-critical trading change, Codex must independently review the actual implementation evidence after Claude Code's primary implementation pass. Codex must actively look for:
 
 - assumptions not enforced in code;
 - stale or mixed evidence;
@@ -40,7 +42,18 @@ For any safety-critical trading change, Claude Code must actively look for:
 - any silent widening of Live scope;
 - any path that bypasses Read-Only preparation or explicit real-money approval.
 
-Do not mark the change accepted merely because tests pass. Report concrete evidence and remaining uncertainty. A second-agent review plus GitHub CI is required before ChatGPT final acceptance of safety-critical work.
+Do not mark a safety-critical change accepted merely because tests pass. Report concrete evidence and remaining uncertainty. Codex independent review plus GitHub CI is required before ChatGPT final acceptance of safety-critical work.
+
+For documentation-only and other low-risk changes, Codex review is not automatically required.
+
+## Critical-path freeze
+
+Until the first bounded Live pilot reaches a reconciled terminal outcome:
+
+- do not add unrelated features;
+- do not broaden ticker/quantity/market/broker scope;
+- do not add new process/tooling layers unless they directly close a verified blocker;
+- keep work on the existing completion roadmap.
 
 ## Operating rules
 
@@ -48,7 +61,7 @@ Do not mark the change accepted merely because tests pass. Report concrete evide
 2. Before acting, distinguish `DONE / VERIFIED / UNVERIFIED / TODO`.
 3. Verify current `main`, open PRs/issues and current CI before relying on historical chat state.
 4. Work on one primary task at a time and choose the shortest safe path toward completion.
-5. Batch agent work when possible: inspect -> implement/review -> test -> adversarial review -> concise evidence report.
+5. Batch work when possible: inspect -> implement -> test -> self-review -> concise evidence report; use Codex only where the independent-review gate or a clearly justified separate task requires it.
 6. Never infer success. Use Git history, tests, CI, runtime observations, and broker callbacks as evidence.
 7. If evidence is missing, say UNVERIFIED rather than guessing.
 8. Preserve runtime data/lock/state artifacts unless a task explicitly requires changing them.
@@ -108,7 +121,8 @@ Otherwise continue autonomously.
 - Has this already been done and verified?
 - Did I check the current GitHub/broker evidence?
 - Can AI/tooling perform more before calling the user?
-- Have I independently challenged the primary agent's assumptions rather than merely agreeing?
+- Is this work on the current completion-roadmap critical path?
+- If safety-critical, has Codex independently challenged the implementation assumptions rather than merely agreeing?
 - Have I audited non-code prerequisites for the next milestone?
 - Is there a shorter safe route?
 - Are facts separated from assumptions?

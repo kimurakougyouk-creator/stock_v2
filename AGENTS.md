@@ -1,4 +1,4 @@
-# AGENTS.md — Codex / coding-agent entrypoint
+# AGENTS.md — coding-agent coordination entrypoint
 
 This repository does not use chat memory as the project source of truth.
 
@@ -14,11 +14,13 @@ Then verify current `main`, open PRs/issues, and current CI. Classify work as `D
 
 ## Agent roles
 
-- **Codex / primary coding agent:** inspect repository state, implement the smallest safe change, add/repair tests, run tests, review its own diff, and leave concrete evidence.
-- **Claude Code / independent second agent:** independently audit safety-critical changes and failure modes. Do not merely paraphrase the first agent's reasoning; inspect the actual diff/code/tests and look for contradictory assumptions, missing edge cases, stale evidence, and unsafe operator dependencies.
-- **ChatGPT:** project manager, cross-agent coordinator, safety/architecture acceptance, GitHub evidence integration, progress control, and user handoff only when unavoidable.
+- **Claude Code / primary implementation agent:** preserve implementation continuity, inspect current repository state, implement the smallest safe blocker-closing change, add/repair tests, run local/relevant tests, review its own diff, and leave concrete evidence.
+- **Codex / independent second reviewer:** do not duplicate Claude's full implementation by default. For safety-critical trading changes, independently inspect the actual diff/code/tests and try to break assumptions. Codex may implement only when explicitly delegated because Claude is blocked or when the task is clearly separable and non-overlapping.
+- **ChatGPT:** project manager, cross-agent coordinator, completion-roadmap control, safety/architecture acceptance, GitHub investigation/execution, evidence integration, progress control, and user handoff only when unavoidable.
 - **GitHub:** canonical project state and evidence source. Diff + CI + broker/runtime evidence outrank any agent narrative.
 - **User:** operator of last resort for broker login, identity/authentication, funding/account actions, broker-side setting changes, and explicit approval of consequential real-money actions.
+
+Do not change the primary-agent role or introduce another development process without an explicit user decision recorded in the canonical project documents.
 
 ## Mandatory multi-agent gate
 
@@ -36,15 +38,24 @@ Safety-critical includes at least:
 
 Required acceptance sequence:
 
-1. Primary agent implements from current canonical source.
-2. Full relevant tests run locally or in the agent environment.
-3. Independent second agent reviews the actual diff/code/tests from a clean perspective and tries to break assumptions.
-4. Any finding is fixed and re-reviewed.
+1. Claude Code implements from current canonical source by default.
+2. Full relevant tests run locally or in the implementation environment.
+3. Codex independently reviews the actual diff/code/tests from a clean perspective and tries to break assumptions; it does not redo the whole task unless a separate implementation is specifically justified.
+4. Any finding is fixed by the primary implementation path and re-reviewed as needed.
 5. GitHub CI and secret scan pass on the exact proposed commit/PR.
 6. ChatGPT verifies the evidence against the current roadmap and governing issue before merge/acceptance.
 7. Real-money execution still requires separate explicit operator approval after fresh runtime gates are green.
 
-For non-safety-critical documentation or low-risk refactors, one coding agent plus passing CI and ChatGPT verification may be sufficient.
+For non-safety-critical documentation or low-risk refactors, Claude Code or another single coding agent plus passing CI and ChatGPT verification may be sufficient; Codex review is not automatically required.
+
+## Critical-path freeze
+
+Until the first bounded Live pilot reaches a reconciled terminal outcome:
+
+- do not add unrelated features;
+- do not broaden ticker/quantity/market/broker scope;
+- do not create new management/process layers unless they directly remove a verified blocker;
+- prefer finishing the existing completion-roadmap path over improving tooling for its own sake.
 
 ## Operating rules
 
