@@ -179,7 +179,11 @@ class _LivePilotClient(EWrapper, EClient):
             perm = 0
         if perm > 0 and status in _ACCEPTED_STATUSES:
             self.ack_perm_id = perm
-            self.broker_status = self.broker_status or status
+            # Always overwrite here (never "or"): a decisive accepted status
+            # must replace any earlier nonterminal PendingSubmit value, or
+            # the returned result would carry contradictory broker-state
+            # evidence (ORDER_ACKNOWLEDGED with a still-pending status).
+            self.broker_status = status
             self.ack_ready.set()
         elif status and status not in _ACCEPTED_STATUSES:
             # A definitive non-accepted status (e.g. Inactive) must never be
@@ -587,28 +591,46 @@ def send_exactly_one_live_pilot(
         authorization_expires_at = consumed.get("expires_at")
         record_send_attempt(intent, directory=journal_dir, now=final_clock)
 
-        # Re-validate freshness once more now that the irreversible attempt
-        # marker is durable (the exclusive-create + fsync writes above can
-        # themselves stall). The attempt is already permanently spent by this
-        # point regardless of outcome, but transport must still not proceed
-        # on evidence that has aged past its window -- or an operator
-        # authorization that has since expired -- while those writes ran.
+        # Stop check. The irreversible attempt is deliberately spent first,
+        # so a stop arriving here can never be bypassed by retry.
+        if live_pilot_stop_is_active(stop_path=stop_path):
+            return LivePilotSendResult(
+                "BLOCKED_STOP_AFTER_ATTEMPT",
+                False,
+                False,
+                int(order_id),
+                None,
+                endpoint_port,
+                observed_fingerprint,
+                None,
+                True,
+                "emergency stop became active; attempt remains permanently spent",
+            )
+
+        # Final freshness/expiry re-validation, immediately before transport
+        # and therefore *after* the stop check above (a filesystem read that
+        # can itself stall). Re-reading the clock here -- rather than only
+        # once earlier, right after the exclusive-create + fsync writes that
+        # made the attempt durable -- means nothing between this check and
+        # placeOrder can silently age evidence past its window or let an
+        # operator authorization expire unnoticed. The attempt is already
+        # permanently spent by this point regardless of outcome.
         try:
-            post_attempt_clock = _utc(clock())
+            final_pretransport_clock = _utc(clock())
             _require_fresh_timestamp(
                 readiness_report.get("checked_at"),
                 label="operational readiness",
-                now=post_attempt_clock,
+                now=final_pretransport_clock,
             )
             _require_fresh_timestamp(
                 same_run_preflight.checked_at,
                 label="same-run preflight",
-                now=post_attempt_clock,
+                now=final_pretransport_clock,
             )
             _require_not_expired(
                 authorization_expires_at,
                 label="one-shot operator authorization",
-                now=post_attempt_clock,
+                now=final_pretransport_clock,
             )
         except PermissionError as exc:
             return LivePilotSendResult(
@@ -622,22 +644,6 @@ def send_exactly_one_live_pilot(
                 None,
                 True,
                 f"evidence aged past freshness window after durable attempt recording; attempt remains permanently spent: {exc}",
-            )
-
-        # Last possible stop check. The irreversible attempt is deliberately
-        # spent first, so a stop arriving here can never be bypassed by retry.
-        if live_pilot_stop_is_active(stop_path=stop_path):
-            return LivePilotSendResult(
-                "BLOCKED_STOP_AFTER_ATTEMPT",
-                False,
-                False,
-                int(order_id),
-                None,
-                endpoint_port,
-                observed_fingerprint,
-                None,
-                True,
-                "emergency stop became active; attempt remains permanently spent",
             )
 
         client.watched_order_id = int(order_id)

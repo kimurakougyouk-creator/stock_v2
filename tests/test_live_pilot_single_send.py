@@ -480,6 +480,43 @@ def test_stale_evidence_after_durable_attempt_recording_blocks_transport(monkeyp
     assert events == ["journal", "attempt"]
 
 
+def test_freshness_and_expiry_rechecked_after_the_final_stop_check(monkeypatch):
+    """Codex P1 (round 6): the last freshness/expiry re-check must run after
+
+    the final stop check (itself a filesystem read that can stall), not
+    before it -- otherwise a stall inside the stop check could still let
+    evidence go stale before placeOrder without being caught.
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    order = []
+
+    original_stop_check = subject.live_pilot_stop_is_active
+
+    def tracking_stop_check(**kwargs):
+        order.append("stop_check")
+        return original_stop_check(**kwargs)
+
+    monkeypatch.setattr(subject, "live_pilot_stop_is_active", tracking_stop_check)
+
+    calls = {"count": 0}
+
+    def advancing_clock() -> datetime:
+        calls["count"] += 1
+        order.append(f"clock_{calls['count']}")
+        if calls["count"] <= 2:
+            return NOW
+        return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
+
+    result = _send(monkeypatch, client, now=advancing_clock)
+
+    assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
+    assert client.place_calls == []
+    assert events == ["journal", "attempt"]
+    assert "stop_check" in order
+    assert order.index("stop_check") < order.index("clock_3")
+
+
 def test_expired_authorization_after_durable_attempt_recording_blocks_transport(monkeypatch):
     """Codex P1 (round 5): the post-attempt re-check must also catch an
 
@@ -590,6 +627,9 @@ def test_pending_submit_then_pre_submitted_acknowledges():
     assert client.ack_ready.is_set() is True
     assert client.ack_perm_id == 880077
     assert client.order_error is None
+    # Codex P2: the decisive accepted status must replace the earlier
+    # nonterminal PendingSubmit value, not leave it stuck.
+    assert client.broker_status == "PreSubmitted"
 
 
 def test_pending_submit_then_submitted_acknowledges():
@@ -606,6 +646,7 @@ def test_pending_submit_then_submitted_acknowledges():
     assert client.ack_ready.is_set() is True
     assert client.ack_perm_id == 880077
     assert client.order_error is None
+    assert client.broker_status == "Submitted"
 
 
 def test_pending_submit_then_inactive_fails_closed_as_definitive_rejection():
