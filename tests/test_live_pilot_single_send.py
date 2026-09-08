@@ -56,6 +56,7 @@ def _preflight(*, ready: bool = True, checked_at: str = CHECKED_AT) -> LivePilot
         checked_at=checked_at,
         blockers=() if ready else ("blocked",),
         ticker="9432.T",
+        account_fingerprint=PINNED_FINGERPRINT if ready else "",
         account_fingerprint_match=ready,
         endpoint_port=4001 if ready else None,
         endpoint_binding_ready=ready,
@@ -182,7 +183,7 @@ def _send(monkeypatch, client: FakeClient, **overrides):
         final_confirmation=subject.FINAL_SEND_CONFIRMATION_VALUE,
         repository_root=Path("."),
         timeout_seconds=0.01,
-        now=NOW,
+        clock=lambda: NOW,
         client_factory=lambda: client,
     )
     args.update(overrides)
