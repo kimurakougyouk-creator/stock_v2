@@ -134,7 +134,17 @@ class FakeClient:
         self.connected = False
 
 
-def _patch_prereqs(monkeypatch, *, stop_values=(False, False)):
+def _patch_prereqs(
+    monkeypatch,
+    *,
+    stop_values=(False, False),
+    authorization_expires_at=None,
+):
+    expires_at = (
+        authorization_expires_at
+        if authorization_expires_at is not None
+        else (NOW + timedelta(minutes=10)).isoformat(timespec="seconds")
+    )
     monkeypatch.setattr(
         subject,
         "audit_live_pilot_source_cutover",
@@ -154,6 +164,7 @@ def _patch_prereqs(monkeypatch, *, stop_values=(False, False)):
             "status": "CONSUMED",
             "intent_id": kwargs["intent_id"],
             "nonce": kwargs["nonce"],
+            "expires_at": expires_at,
             "order_sent": False,
             "live_order_sent": False,
         },
@@ -466,6 +477,35 @@ def test_stale_evidence_after_durable_attempt_recording_blocks_transport(monkeyp
     # The irreversible attempt marker must already have been recorded before
     # this check runs -- it is not skipped/rolled back just because transport
     # is subsequently blocked.
+    assert events == ["journal", "attempt"]
+
+
+def test_expired_authorization_after_durable_attempt_recording_blocks_transport(monkeypatch):
+    """Codex P1 (round 5): the post-attempt re-check must also catch an
+
+    operator authorization whose own (independent, possibly shorter) TTL
+    elapsed while the durable writes ran, even when the readiness/preflight
+    30-second freshness window has not yet been exceeded.
+    """
+    short_lived_expiry = (NOW + timedelta(seconds=5)).isoformat(timespec="seconds")
+    events = _patch_prereqs(monkeypatch, authorization_expires_at=short_lived_expiry)
+    client = FakeClient()
+    calls = {"count": 0}
+
+    def advancing_clock() -> datetime:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return NOW
+        # Past the 5-second authorization expiry, but still well inside the
+        # 30-second readiness/preflight freshness window.
+        return NOW + timedelta(seconds=10)
+
+    result = _send(monkeypatch, client, now=advancing_clock)
+
+    assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
+    assert result.sent is False
+    assert result.recovery_required is True
+    assert client.place_calls == []
     assert events == ["journal", "attempt"]
 
 

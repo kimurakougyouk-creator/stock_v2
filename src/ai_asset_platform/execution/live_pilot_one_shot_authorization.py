@@ -271,6 +271,11 @@ def consume_live_pilot_authorization(
         "nonce": str(nonce),
         "intent_id": expected["intent_id"],
         "consumed_at": current.isoformat(timespec="seconds"),
+        # Preserved so a caller can re-validate expiry after this call, e.g.
+        # if durable writes between consumption and transport stall long
+        # enough for the original TTL to elapse even though this check
+        # already passed.
+        "expires_at": payload.get("expires_at"),
         "order_sent": False,
         "live_order_sent": False,
     }

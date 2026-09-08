@@ -251,6 +251,17 @@ def _require_fresh_timestamp(value: object, *, label: str, now: datetime) -> Non
         raise PermissionError(f"{label} evidence is outside the final send freshness window")
 
 
+def _require_not_expired(value: object, *, label: str, now: datetime) -> None:
+    try:
+        expires = datetime.fromisoformat(str(value or "").strip())
+    except ValueError as exc:
+        raise PermissionError(f"{label} expiry is missing or invalid") from exc
+    if expires.tzinfo is None or expires.utcoffset() is None:
+        raise PermissionError(f"{label} expiry is not timezone-aware")
+    if now > expires.astimezone(timezone.utc):
+        raise PermissionError(f"{label} has expired")
+
+
 def _validate_request(
     request: LivePilotSendRequest,
     readiness_report: dict,
@@ -547,13 +558,15 @@ def send_exactly_one_live_pilot(
             directory=journal_dir,
             now=final_clock,
         )
+        authorization_expires_at = consumed.get("expires_at")
         record_send_attempt(intent, directory=journal_dir, now=final_clock)
 
         # Re-validate freshness once more now that the irreversible attempt
         # marker is durable (the exclusive-create + fsync writes above can
         # themselves stall). The attempt is already permanently spent by this
         # point regardless of outcome, but transport must still not proceed
-        # on evidence that has aged past its window while those writes ran.
+        # on evidence that has aged past its window -- or an operator
+        # authorization that has since expired -- while those writes ran.
         try:
             post_attempt_clock = _utc(clock())
             _require_fresh_timestamp(
@@ -564,6 +577,11 @@ def send_exactly_one_live_pilot(
             _require_fresh_timestamp(
                 same_run_preflight.checked_at,
                 label="same-run preflight",
+                now=post_attempt_clock,
+            )
+            _require_not_expired(
+                authorization_expires_at,
+                label="one-shot operator authorization",
                 now=post_attempt_clock,
             )
         except PermissionError as exc:
