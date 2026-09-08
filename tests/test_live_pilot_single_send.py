@@ -571,6 +571,9 @@ def test_inactive_open_order_status_does_not_falsely_acknowledge():
     assert client.ack_perm_id is None
     assert client.order_error is not None
     assert "Inactive" in client.order_error
+    # Codex P2: the decisive rejection status must be recorded, not left
+    # stuck at None.
+    assert client.broker_status == "Inactive"
 
 
 def test_accepted_open_order_status_still_acknowledges():
@@ -666,6 +669,9 @@ def test_pending_submit_then_inactive_fails_closed_as_definitive_rejection():
     assert client.ack_perm_id is None
     assert client.order_error is not None
     assert "Inactive" in client.order_error
+    # Codex P2: the decisive rejection status must replace the earlier
+    # nonterminal PendingSubmit value.
+    assert client.broker_status == "Inactive"
 
 
 def test_duplicate_and_interleaved_pending_submit_callbacks_stay_harmless():
@@ -711,16 +717,57 @@ def test_order_status_pending_submit_then_submitted_acknowledges():
 def test_order_status_terminal_rejection_wakes_the_waiter():
     """PM audit: orderStatus previously silently ignored Cancelled/
 
-    ApiCancelled/Inactive/PendingCancel, relying solely on openOrder/error to
-    ever wake the waiter. A definitive rejection must not be able to hang
-    until the full timeout when orderStatus alone reports it.
+    ApiCancelled/Inactive, relying solely on openOrder/error to ever wake the
+    waiter. A definitive rejection must not be able to hang until the full
+    timeout when orderStatus alone reports it.
     """
-    for bad_status in ("Cancelled", "ApiCancelled", "Inactive", "PendingCancel"):
+    for bad_status in ("Cancelled", "ApiCancelled", "Inactive"):
         client = _client()
         client.orderStatus(77, bad_status, 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
         assert client.ack_ready.is_set() is True, bad_status
         assert client.ack_perm_id is None, bad_status
         assert client.order_error is not None and bad_status in client.order_error, bad_status
+
+
+def test_order_status_pending_cancel_is_nonterminal_not_a_rejection():
+    """Codex P2: PendingCancel means a cancel is in flight but not yet
+
+    confirmed -- the order could still resolve to Cancelled/ApiCancelled or
+    even Filled. It must not be treated as a definitive rejection, matching
+    PendingSubmit's nonterminal handling.
+    """
+    client = _client()
+    client.orderStatus(77, "PendingCancel", 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+    assert client.ack_perm_id is None
+    assert client.broker_status == "PendingCancel"
+
+    # It can still resolve either way afterward.
+    client.orderStatus(77, "Cancelled", 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+    assert client.ack_ready.is_set() is True
+    assert client.order_error is not None and "Cancelled" in client.order_error
+
+
+def test_open_order_pending_cancel_is_nonterminal_not_a_rejection():
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingCancel")
+    )
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+    assert client.ack_perm_id is None
+    assert client.broker_status == "PendingCancel"
+
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Filled"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.broker_status == "Filled"
 
 
 def test_order_status_partial_and_full_fill_both_acknowledge():

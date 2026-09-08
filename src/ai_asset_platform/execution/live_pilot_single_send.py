@@ -62,13 +62,17 @@ FINAL_SEND_CONFIRMATION_VALUE = "SEND_EXACTLY_ONE_LIVE_PILOT_NOW"
 FINAL_EVIDENCE_MAX_AGE_SECONDS = 30.0
 _VALID_LIVE_PORTS = {4001, 7496}
 _ACCEPTED_STATUSES = {"PreSubmitted", "Submitted", "Filled"}
-# IbkrOrderState.PENDING_SUBMIT ("PendingSubmit"): IBKR has accepted the API
-# request but has not yet routed/accepted or rejected the order itself. This
-# is a genuine nonterminal interim state, not a rejection -- it must never
-# set order_error or wake the ack waiter. The next callback (an accepted
-# status, a definitive rejection such as Inactive/Cancelled/ApiCancelled, or
-# the overall timeout) determines the outcome.
-_NONTERMINAL_STATUSES = {"PendingSubmit"}
+# IbkrOrderState.PENDING_SUBMIT ("PendingSubmit") and IbkrOrderState.
+# PENDING_CANCEL ("PendingCancel") in ibkr_order_events.py: both are
+# nonterminal interim states, not decisions. PendingSubmit means IBKR has
+# accepted the API request but has not yet routed/accepted or rejected the
+# order; PendingCancel means a cancel is in flight but not yet confirmed --
+# the order could still resolve to Cancelled/ApiCancelled or even Filled.
+# Neither must ever set order_error or wake the ack waiter. The next
+# callback (an accepted status, a definitive rejection such as
+# Inactive/Cancelled/ApiCancelled, or the overall timeout) decides the
+# outcome.
+_NONTERMINAL_STATUSES = {"PendingSubmit", "PendingCancel"}
 
 
 @dataclass(frozen=True)
@@ -189,7 +193,11 @@ class _LivePilotClient(EWrapper, EClient):
             # A definitive non-accepted status (e.g. Inactive) must never be
             # treated as acknowledgement even when permId is already
             # positive, otherwise this callback could race ahead of a
-            # rejection reported through orderStatus/error.
+            # rejection reported through orderStatus/error. Record the
+            # decisive status itself (not left stuck at an earlier
+            # PendingSubmit/PendingCancel or None) so the returned
+            # broker-state evidence matches the actual rejection.
+            self.broker_status = status
             self.order_error = f"broker openOrder callback reported non-accepted status: {status}"
             self.ack_ready.set()
 
