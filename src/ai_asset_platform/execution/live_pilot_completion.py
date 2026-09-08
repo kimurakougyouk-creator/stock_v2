@@ -30,6 +30,7 @@ from ai_asset_platform.brokers.ibkr_live_readonly_account import (
 )
 from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
+    REPORT_SCHEMA_VERSION as _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION,
     load_send_attempt_marker,
     load_send_journal,
 )
@@ -271,13 +272,24 @@ def evaluate_live_pilot_completion(
     if not journal_ready:
         blockers.append("durable send journal is not in exact POSTFILL_PROVEN state")
 
+    marker_nonce = (
+        str(send_attempt_marker.get("nonce") or "").strip()
+        if isinstance(send_attempt_marker, dict)
+        else ""
+    )
+    journal_nonce = (
+        str(send_journal.get("nonce") or "").strip()
+        if isinstance(send_journal, dict)
+        else ""
+    )
     marker_ready = bool(
         isinstance(send_attempt_marker, dict)
+        and send_attempt_marker.get("schema_version") == _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
         and send_attempt_marker.get("state") == "SEND_ATTEMPT_RECORDED"
         and str(send_attempt_marker.get("intent_id") or "").strip() == intent
         and isinstance(send_journal, dict)
-        and str(send_attempt_marker.get("nonce") or "")
-        == str(send_journal.get("nonce") or "")
+        and marker_nonce
+        and marker_nonce == journal_nonce
         and send_attempt_marker.get("automatic_resend_allowed") is False
         and send_attempt_marker.get("automatic_cancel_allowed") is False
         and send_attempt_marker.get("automatic_modify_allowed") is False
@@ -503,8 +515,6 @@ def evaluate_live_pilot_completion(
         raw_count = final_open_orders_report.get("open_order_count")
         if isinstance(raw_count, int) and not isinstance(raw_count, bool):
             final_open_order_count = raw_count
-        elif isinstance(raw_count, float) and raw_count.is_integer():
-            final_open_order_count = int(raw_count)
         final_orders_rows = final_open_orders_report.get("orders")
     if final_open_order_count != 0:
         blockers.append("final Live open-order count is not zero")

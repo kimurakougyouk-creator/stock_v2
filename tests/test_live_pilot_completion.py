@@ -539,6 +539,17 @@ def test_malformed_open_order_count_fails_closed():
     assert non_integral.complete is False
     assert non_integral.final_open_order_count is None
 
+    # Codex re-review: a float that happens to be integral (e.g. 0.0) must
+    # also fail closed, since the evidence contract requires a genuine
+    # non-boolean int, not merely a numerically-zero value of any type.
+    integral_float = _evaluate(final_open_orders_report=_open_orders(0.0))
+    assert integral_float.complete is False
+    assert integral_float.final_open_order_count is None
+
+    boolean_count = _evaluate(final_open_orders_report=_open_orders(False))
+    assert boolean_count.complete is False
+    assert boolean_count.final_open_order_count is None
+
     inconsistent_rows = _evaluate(
         final_open_orders_report=_open_orders(0, orders=[{"order_id": 1}])
     )
@@ -565,6 +576,26 @@ def test_missing_or_mismatched_send_attempt_marker_blocks():
     )
     assert resend_allowed.complete is False
     assert any("send-attempt marker" in item for item in resend_allowed.blockers)
+
+    # Codex re-review: an obsolete/unsupported marker schema must fail closed
+    # even if every other field looks consistent.
+    wrong_schema = _evaluate(send_attempt_marker=_attempt_marker(schema_version=1))
+    assert wrong_schema.complete is False
+    assert any("send-attempt marker" in item for item in wrong_schema.blockers)
+
+    missing_schema = _evaluate(send_attempt_marker=_attempt_marker(schema_version=None))
+    assert missing_schema.complete is False
+    assert any("send-attempt marker" in item for item in missing_schema.blockers)
+
+    # Codex re-review: an empty marker nonce must not pass merely because it
+    # equals an equally-empty journal nonce; both being blank is itself a
+    # missing-evidence condition, not a match.
+    both_nonces_empty = _evaluate(
+        send_journal=_journal(nonce=""),
+        send_attempt_marker=_attempt_marker(nonce=""),
+    )
+    assert both_nonces_empty.complete is False
+    assert any("send-attempt marker" in item for item in both_nonces_empty.blockers)
 
 
 def test_conflicting_exec_id_outside_matched_set_blocks():
