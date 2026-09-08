@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import ai_asset_platform.execution.live_pilot_one_shot_authorization as subject
 from ai_asset_platform.execution.live_pilot_one_shot_authorization import (
     OPERATOR_CONFIRMATION_VALUE,
     authorization_consumed,
@@ -118,6 +119,27 @@ def test_ttl_is_short_and_bounded(tmp_path: Path):
 def test_invalid_live_endpoint_is_rejected_at_issue_time(tmp_path: Path):
     with pytest.raises(ValueError, match="audited Live endpoint"):
         _issue(tmp_path, endpoint_port=4002)
+
+
+def test_consumption_fsyncs_directory_entries(tmp_path: Path, monkeypatch):
+    """Codex P1: the consumed marker's directory entry (and the removal of the
+
+    authorization file's entry) must be fsynced so a power loss right after
+    consumption cannot silently permit consuming it again.
+    """
+    calls = []
+    original = subject._fsync_parent_dir
+
+    def spy(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(subject, "_fsync_parent_dir", spy)
+    authorization = _issue(tmp_path)
+    calls.clear()
+    _consume(tmp_path, authorization.nonce)
+    assert len(calls) >= 2
+    assert all(call.parent == tmp_path for call in calls)
 
 
 def test_module_contains_no_broker_order_transport():

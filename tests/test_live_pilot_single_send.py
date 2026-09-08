@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,13 +50,23 @@ def _readiness() -> dict:
     }
 
 
-def _preflight(*, ready: bool = True, checked_at: str = CHECKED_AT) -> LivePilotSameRunPreflight:
+def _preflight(
+    *,
+    ready: bool = True,
+    checked_at: str = CHECKED_AT,
+    expected_account_fingerprint: str | None = None,
+) -> LivePilotSameRunPreflight:
     return LivePilotSameRunPreflight(
         status="READY_FOR_OPERATOR_AUTHORIZATION" if ready else "BLOCKED",
         checked_at=checked_at,
         blockers=() if ready else ("blocked",),
         ticker="9432.T",
         account_fingerprint_match=ready,
+        expected_account_fingerprint=(
+            expected_account_fingerprint
+            if expected_account_fingerprint is not None
+            else (PINNED_FINGERPRINT if ready else None)
+        ),
         endpoint_port=4001 if ready else None,
         endpoint_binding_ready=ready,
         evidence_fresh=ready,
@@ -385,3 +395,84 @@ def test_module_contains_one_place_order_call_and_no_cancel_transport():
     assert source.count("client.placeOrder(") == 1
     assert "client.cancelOrder(" not in source
     assert "reqGlobalCancel" not in source
+
+
+def test_preflight_for_different_account_cannot_be_reused_for_this_send(monkeypatch):
+    """Codex P1: a genuine preflight for account A must not authorize a send
+
+    pinned to account B merely because account_fingerprint_match is True on
+    that (unrelated) preflight record.
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    other_fingerprint = hashlib.sha256(b"U_OTHER_ACCOUNT").hexdigest()
+    preflight = _preflight(expected_account_fingerprint=other_fingerprint)
+    with pytest.raises(PermissionError, match="pinned account fingerprint"):
+        _send(monkeypatch, client, same_run_preflight=preflight)
+    assert client.connected is False
+    assert events == []
+
+
+def test_final_freshness_check_rereads_the_clock_not_a_fixed_now(monkeypatch):
+    """Codex P1: the post-connection freshness re-check must observe real
+
+    elapsed time. A caller-supplied clock callable that advances past the
+    freshness window between the two checks must still block the send, even
+    though the first (pre-connection) check passed.
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    calls = {"count": 0}
+
+    def advancing_clock() -> datetime:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return NOW
+        return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
+
+    with pytest.raises(PermissionError, match="freshness window"):
+        _send(monkeypatch, client, now=advancing_clock)
+    assert calls["count"] >= 2
+    assert client.place_calls == []
+    assert events == []
+
+
+def test_fixed_now_still_works_for_simple_deterministic_tests(monkeypatch):
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    result = _send(monkeypatch, client, now=NOW)
+    assert result.status == "ORDER_ACKNOWLEDGED"
+    assert events == ["journal", "attempt", "ack"]
+
+
+def test_inactive_open_order_status_does_not_falsely_acknowledge():
+    """Codex P1: openOrder must not treat a non-accepted status (e.g.
+
+    Inactive) as acknowledgement merely because permId is already positive.
+    """
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+
+    inactive_order = SimpleNamespace(account=PINNED_ACCOUNT, permId=880077)
+    inactive_state = SimpleNamespace(status="Inactive")
+    client.openOrder(77, object(), inactive_order, inactive_state)
+
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id is None
+    assert client.order_error is not None
+    assert "Inactive" in client.order_error
+
+
+def test_accepted_open_order_status_still_acknowledges():
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+
+    order = SimpleNamespace(account=PINNED_ACCOUNT, permId=880077)
+    state = SimpleNamespace(status="Submitted")
+    client.openOrder(77, object(), order, state)
+
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None

@@ -17,10 +17,14 @@ def _stamp(offset: int = 0) -> str:
     return (NOW + timedelta(seconds=offset)).isoformat(timespec="seconds")
 
 
+NONCE = "nonce_ABC-123"
+
+
 def _journal(**overrides) -> dict:
     data = {
         "schema_version": 2,
         "intent_id": INTENT,
+        "nonce": NONCE,
         "state": "POSTFILL_PROVEN",
         "send_attempt_count": 1,
         "order_id": 77,
@@ -35,8 +39,26 @@ def _journal(**overrides) -> dict:
     return data
 
 
+def _attempt_marker(**overrides) -> dict:
+    data = {
+        "schema_version": 2,
+        "intent_id": INTENT,
+        "nonce": NONCE,
+        "state": "SEND_ATTEMPT_RECORDED",
+        "recorded_at": _stamp(),
+        "automatic_resend_allowed": False,
+        "automatic_cancel_allowed": False,
+        "automatic_modify_allowed": False,
+        "automatic_flatten_allowed": False,
+        "automatic_close_allowed": False,
+    }
+    data.update(overrides)
+    return data
+
+
 def _postfill(**overrides) -> dict:
     data = {
+        "schema_version": 2,
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
@@ -91,13 +113,15 @@ def _account(*, position: float = 100.0, **overrides) -> dict:
     return data
 
 
-def _open_orders(count: int = 0, **overrides) -> dict:
+def _open_orders(count: int = 0, *, orders: list | None = None, **overrides) -> dict:
     data = {
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
         "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
         "open_order_count": count,
+        "orders": orders if orders is not None else [],
         "order_sent": False,
         "cancel_sent": False,
         "live_order_sent": False,
@@ -114,7 +138,15 @@ def _paper(**overrides) -> dict:
         "risk_safe": True,
         "monitor_order_sent": False,
         "live_order_sent": False,
-        "broker": {"reconciliation_blocker_count": 0, "open_order_count": 0},
+        "broker": {
+            "account_ready": True,
+            "execution_snapshot_ready": True,
+            "endpoint_port": 4002,
+            "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+            "reconciliation_blocker_count": 0,
+            "all_open_orders_ready": True,
+            "open_order_count": 0,
+        },
     }
     data.update(overrides)
     return data
@@ -128,6 +160,7 @@ def _evaluate(**overrides):
         "quantity": 100,
         "expected_account_fingerprint": FINGERPRINT,
         "send_journal": _journal(),
+        "send_attempt_marker": _attempt_marker(),
         "postfill_report": _postfill(),
         "final_account_report": _account(),
         "final_open_orders_report": _open_orders(),
@@ -413,6 +446,187 @@ def test_persist_blocked_alert_explicitly_forbids_retry(tmp_path: Path):
     alert_payload = json.loads(alert.read_text(encoding="utf-8"))
     assert alert_payload["severity"] == "CRITICAL"
     assert "DO NOT RETRY AUTOMATICALLY" in alert_payload["message"]
+
+
+def test_open_orders_account_fingerprint_mismatch_blocks():
+    """Codex P1: a zero-order snapshot from a different Live account on the
+
+    same port must not be accepted merely because the endpoint matches.
+    """
+    result = _evaluate(
+        final_open_orders_report=_open_orders(account_fingerprint="b" * 64)
+    )
+    assert result.complete is False
+    assert any("open-orders" in item and "fingerprint mismatch" in item for item in result.blockers)
+
+
+def test_paper_monitor_missing_broker_readiness_fields_blocks_even_when_warning():
+    """Codex P1: WARNING with zero-defaulted broker counters must not pass;
+
+    the broker readiness/clean-reconciliation/audited-endpoint fields are
+    required explicitly.
+    """
+    missing_readiness = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": False,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+            }
+        )
+    )
+    assert missing_readiness.complete is False
+    assert missing_readiness.paper_monitor_safe is False
+
+    not_clean_action = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "BLOCKED_BROKER_NOT_READY",
+                "reconciliation_blocker_count": 0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+            }
+        )
+    )
+    assert not_clean_action.complete is False
+    assert not_clean_action.paper_monitor_safe is False
+
+    wrong_endpoint = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 9999,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+            }
+        )
+    )
+    assert wrong_endpoint.complete is False
+    assert wrong_endpoint.paper_monitor_safe is False
+
+
+def test_execution_currency_mismatch_with_instrument_blocks():
+    """Codex P1: a USD-labeled execution for a JPY instrument (9432.T) must
+
+    not complete even if it matches the commission currency.
+    """
+    postfill = _postfill()
+    postfill["executions"][0]["currency"] = "USD"
+    postfill["commissions"][0]["currency"] = "USD"
+    result = _evaluate(postfill_report=postfill)
+    assert result.complete is False
+    assert any("expected instrument currency" in item for item in result.blockers)
+
+
+def test_malformed_open_order_count_fails_closed():
+    """Codex P1: a non-integral open_order_count (e.g. 0.5) must not silently
+
+    truncate to zero, and non-empty/missing order rows must fail closed.
+    """
+    non_integral = _evaluate(
+        final_open_orders_report=_open_orders(0.5)
+    )
+    assert non_integral.complete is False
+    assert non_integral.final_open_order_count is None
+
+    inconsistent_rows = _evaluate(
+        final_open_orders_report=_open_orders(0, orders=[{"order_id": 1}])
+    )
+    assert inconsistent_rows.complete is False
+    assert any("open-order rows" in item for item in inconsistent_rows.blockers)
+
+
+def test_missing_or_mismatched_send_attempt_marker_blocks():
+    """Codex P1: the mutable summary journal alone (state=POSTFILL_PROVEN) is
+
+    not sufficient; the separate irreversible .attempted.json marker must
+    also be present and consistent.
+    """
+    missing_marker = _evaluate(send_attempt_marker=None)
+    assert missing_marker.complete is False
+    assert any("send-attempt marker" in item for item in missing_marker.blockers)
+
+    mismatched_nonce = _evaluate(send_attempt_marker=_attempt_marker(nonce="different"))
+    assert mismatched_nonce.complete is False
+    assert any("send-attempt marker" in item for item in mismatched_nonce.blockers)
+
+    resend_allowed = _evaluate(
+        send_attempt_marker=_attempt_marker(automatic_resend_allowed=True)
+    )
+    assert resend_allowed.complete is False
+    assert any("send-attempt marker" in item for item in resend_allowed.blockers)
+
+
+def test_conflicting_exec_id_outside_matched_set_blocks():
+    """Codex P1: a conflicting row sharing an exec_id with a matched execution
+
+    but disagreeing on order/account/symbol identity must fail closed even
+    though the order/perm/account/symbol/side filter alone would drop it.
+    """
+    postfill = _postfill()
+    conflicting_row = dict(postfill["executions"][0])
+    conflicting_row["order_id"] = 999
+    conflicting_row["perm_id"] = 111111
+    postfill["executions"].append(conflicting_row)
+    result = _evaluate(postfill_report=postfill)
+    assert result.complete is False
+    assert any("conflicting execution identity" in item for item in result.blockers)
+
+
+def test_postfill_wrong_schema_version_blocks():
+    """Codex P1: a fresh v1, missing-version, or arbitrary-version post-fill
+
+    report must not reconcile against the multi-execution evidence contract.
+    """
+    missing_version = _evaluate(postfill_report=_postfill(schema_version=None))
+    assert missing_version.complete is False
+    assert any("schema_version" in item for item in missing_version.blockers)
+
+    old_version = _evaluate(postfill_report=_postfill(schema_version=1))
+    assert old_version.complete is False
+    assert any("schema_version" in item for item in old_version.blockers)
+
+
+def test_persist_invalidates_stale_success_alert_before_writing_report(tmp_path: Path):
+    """Codex P1: if report persistence fails, the alert must already reflect
+
+    the new (non-SUCCESS) severity rather than leaving a stale SUCCESS alert
+    from a prior run next to the failure.
+    """
+    report = tmp_path / "completion.json"
+    alert = tmp_path / "alert.json"
+    success = _evaluate()
+    subject.persist_live_pilot_completion(success, report_path=report, alert_path=alert)
+    assert json.loads(alert.read_text(encoding="utf-8"))["severity"] == "SUCCESS"
+
+    blocked = _evaluate(final_open_orders_report=_open_orders(1))
+
+    original_write_text = Path.write_text
+
+    def failing_write_text(self, *args, **kwargs):
+        if self == report.with_suffix(report.suffix + ".tmp"):
+            raise OSError("simulated disk failure while writing report")
+        return original_write_text(self, *args, **kwargs)
+
+    import pytest
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "write_text", failing_write_text)
+        with pytest.raises(OSError, match="simulated disk failure"):
+            subject.persist_live_pilot_completion(blocked, report_path=report, alert_path=alert)
+
+    # The alert must already say CRITICAL even though the report write failed.
+    assert json.loads(alert.read_text(encoding="utf-8"))["severity"] == "CRITICAL"
 
 
 def test_module_contains_no_broker_transport():

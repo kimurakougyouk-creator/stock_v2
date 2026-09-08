@@ -150,9 +150,17 @@ class _LivePilotClient(EWrapper, EClient):
             perm = int(getattr(order, "permId", 0) or 0)
         except (TypeError, ValueError):
             perm = 0
-        if perm > 0:
+        status = str(getattr(orderState, "status", "") or "").strip()
+        if perm > 0 and status in _ACCEPTED_STATUSES:
             self.ack_perm_id = perm
-            self.broker_status = self.broker_status or "OpenOrder"
+            self.broker_status = self.broker_status or status
+            self.ack_ready.set()
+        elif status and status not in _ACCEPTED_STATUSES:
+            # A non-accepted terminal/interim status (e.g. Inactive) must never
+            # be treated as acknowledgement even when permId is already
+            # positive, otherwise this callback could race ahead of a
+            # rejection reported through orderStatus/error.
+            self.order_error = f"broker openOrder callback reported non-accepted status: {status}"
             self.ack_ready.set()
 
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson="") -> None:  # noqa: N802
@@ -207,11 +215,28 @@ def _positive(value: object, *, name: str) -> float:
     return parsed
 
 
-def _utc(value: datetime | None) -> datetime:
-    current = value if value is not None else datetime.now(timezone.utc)
-    if current.tzinfo is None or current.utcoffset() is None:
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("final sender clock must be timezone-aware")
-    return current.astimezone(timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _resolve_clock(now: datetime | Callable[[], datetime] | None) -> Callable[[], datetime]:
+    """Return a zero-argument clock, re-invoked at each safety boundary.
+
+    ``now=None`` (the production default) always reads the real wall clock,
+    so every freshness/expiry check reflects the instant it actually runs at
+    instead of a value captured earlier. A caller may still inject a fixed
+    ``datetime`` for simple tests, but any test that must prove a later
+    safety boundary observes elapsed time should inject a callable instead,
+    since a fixed instant would be silently reused at every boundary.
+    """
+    if now is None:
+        return lambda: datetime.now(timezone.utc)
+    if callable(now):
+        return now
+    fixed = now
+    return lambda: fixed
 
 
 def _require_fresh_timestamp(value: object, *, label: str, now: datetime) -> None:
@@ -328,7 +353,7 @@ def send_exactly_one_live_pilot(
     stop_path: Path = DEFAULT_STOP_PATH,
     repository_root: Path = Path("."),
     timeout_seconds: float = 10.0,
-    now: datetime | None = None,
+    now: datetime | Callable[[], datetime] | None = None,
     client_factory: Callable[[], _LivePilotClient] = _LivePilotClient,
 ) -> LivePilotSendResult:
     """Make at most one broker transport call for one fully-bound Live pilot.
@@ -346,7 +371,8 @@ def send_exactly_one_live_pilot(
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout_seconds must be positive and finite")
 
-    current = _utc(now)
+    clock = _resolve_clock(now)
+    current = _utc(clock())
     intent, ticker, quantity, limit_price, notional = _validate_request(
         request,
         readiness_report,
@@ -378,6 +404,10 @@ def send_exactly_one_live_pilot(
         and same_run_preflight.live_global_lock_intact
     ):
         raise PermissionError("same-run preflight safety evidence is incomplete")
+    if str(same_run_preflight.expected_account_fingerprint or "").strip().lower() != fingerprint:
+        raise PermissionError(
+            "same-run preflight was not evaluated against the pinned account fingerprint"
+        )
     endpoint_port = same_run_preflight.endpoint_port
     if endpoint_port not in _VALID_LIVE_PORTS:
         raise PermissionError("same-run preflight endpoint is not an audited Live endpoint")
@@ -473,8 +503,10 @@ def send_exactly_one_live_pilot(
             )
 
         # Re-check evidence after the final Live connection/account handshake so
-        # a slow connection cannot silently age a preflight past its window.
-        final_clock = _utc(now)
+        # a slow connection cannot silently age a preflight past its window. This
+        # always re-invokes the clock (real wall-clock time in production) so a
+        # caller-supplied fixed instant from the earlier check cannot be reused.
+        final_clock = _utc(clock())
         _require_fresh_timestamp(
             readiness_report.get("checked_at"),
             label="operational readiness",
@@ -506,16 +538,16 @@ def send_exactly_one_live_pilot(
             account_fingerprint=fingerprint,
             endpoint_port=int(endpoint_port),
             authorization_dir=authorization_dir,
-            now=now,
+            now=final_clock,
         )
         create_consumed_authorization_journal(
             intent_id=intent,
             nonce=nonce,
             consumed_authorization=consumed,
             directory=journal_dir,
-            now=now,
+            now=final_clock,
         )
-        record_send_attempt(intent, directory=journal_dir, now=now)
+        record_send_attempt(intent, directory=journal_dir, now=final_clock)
 
         # Last possible stop check. The irreversible attempt is deliberately
         # spent first, so a stop arriving here can never be bypassed by retry.
@@ -542,7 +574,7 @@ def send_exactly_one_live_pilot(
                 intent,
                 reason=f"placeOrder transport raised: {type(exc).__name__}",
                 directory=journal_dir,
-                now=now,
+                now=clock(),
             )
             return LivePilotSendResult(
                 "UNKNOWN",
@@ -562,7 +594,7 @@ def send_exactly_one_live_pilot(
                 intent,
                 reason="broker acknowledgement timed out",
                 directory=journal_dir,
-                now=now,
+                now=clock(),
             )
             return LivePilotSendResult(
                 "UNKNOWN",
@@ -581,7 +613,7 @@ def send_exactly_one_live_pilot(
                 intent,
                 reason=client.order_error or "broker acknowledgement lacked positive permId",
                 directory=journal_dir,
-                now=now,
+                now=clock(),
             )
             return LivePilotSendResult(
                 "UNKNOWN",
@@ -602,7 +634,7 @@ def send_exactly_one_live_pilot(
             order_id=int(order_id),
             perm_id=perm_id,
             directory=journal_dir,
-            now=now,
+            now=clock(),
         )
         return LivePilotSendResult(
             "ORDER_ACKNOWLEDGED",

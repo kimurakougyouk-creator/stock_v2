@@ -41,6 +41,7 @@ class LivePilotSameRunPreflight:
     blockers: tuple[str, ...]
     ticker: str
     account_fingerprint_match: bool
+    expected_account_fingerprint: str | None
     endpoint_port: int | None
     endpoint_binding_ready: bool
     evidence_fresh: bool
@@ -371,6 +372,7 @@ def evaluate_live_pilot_same_run_preflight(
         blockers=tuple(blockers),
         ticker=normalized_ticker,
         account_fingerprint_match=fingerprint_match,
+        expected_account_fingerprint=expected_fingerprint or None,
         endpoint_port=endpoint_port,
         endpoint_binding_ready=endpoint_binding_ready,
         evidence_fresh=evidence_fresh,

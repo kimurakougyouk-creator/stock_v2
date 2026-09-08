@@ -82,6 +82,22 @@ def _consumed_path(directory: Path, nonce: str) -> Path:
     return _authorization_path(directory, nonce).with_suffix(".consumed.json")
 
 
+def _fsync_parent_dir(path: Path) -> None:
+    """Fsync the containing directory so a new/removed entry survives a crash.
+
+    A file's own fsync only guarantees its content is durable; the directory
+    entry that makes the file (dis)appear needs a separate fsync on most
+    POSIX filesystems, otherwise a power loss right after this call can boot
+    back up without the entry and silently permit consuming the same
+    authorization (or reusing an authorization file) a second time.
+    """
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _exclusive_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -92,6 +108,7 @@ def _exclusive_write_json(path: Path, payload: dict) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_parent_dir(path)
 
 
 def issue_live_pilot_authorization(
@@ -252,6 +269,7 @@ def consume_live_pilot_authorization(
         # Another actor changing the authorization after the exclusive marker is
         # an unknown state; preserve the consumed marker and fail closed.
         raise PermissionError("authorization state changed during consumption")
+    _fsync_parent_dir(auth_path)
     return consumed_record
 
 

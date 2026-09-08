@@ -70,7 +70,7 @@ def test_crash_after_irreversible_marker_still_blocks_all_resend(tmp_path: Path,
         record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
     assert send_attempt_recorded(INTENT, directory=tmp_path) is True
     assert send_attempt_permitted(INTENT, directory=tmp_path) is False
-    with pytest.raises(PermissionError, match="already been spent"):
+    with pytest.raises(PermissionError, match="already been (spent|recorded)"):
         record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=2))
 
 
@@ -125,6 +125,45 @@ def test_corrupt_journal_fails_closed_for_send_permission(tmp_path: Path):
     path = next(tmp_path.glob("*.json"))
     path.write_text("not-json\n", encoding="utf-8")
     assert send_attempt_permitted(INTENT, directory=tmp_path) is False
+
+
+def test_second_intent_id_cannot_create_a_second_send_attempt(tmp_path: Path):
+    """Codex P1: switching intent_id (e.g. after a restart) must not allow a
+
+    second reachable transport attempt once one has already been recorded for
+    this pilot campaign directory.
+    """
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    assert journal.global_send_attempt_recorded(directory=tmp_path) is True
+
+    other_intent = "live-pilot:9432.T:BUY:100:restarted-attempt"
+    created = create_consumed_authorization_journal(
+        intent_id=other_intent,
+        nonce="nonce-restart",
+        consumed_authorization=_consumed(intent_id=other_intent, nonce="nonce-restart"),
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert created["state"] == "AUTHORIZATION_CONSUMED"
+    assert send_attempt_permitted(other_intent, directory=tmp_path) is False
+    with pytest.raises(PermissionError, match="pilot campaign"):
+        record_send_attempt(other_intent, directory=tmp_path, now=NOW + timedelta(seconds=3))
+
+
+def test_global_marker_directory_entry_is_fsynced(tmp_path: Path, monkeypatch):
+    calls = []
+    original = journal._fsync_parent_dir
+
+    def spy(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(journal, "_fsync_parent_dir", spy)
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    assert len(calls) >= 2
+    assert all(call.parent == tmp_path for call in calls)
 
 
 def test_module_contains_no_broker_transport_or_automatic_recovery_action():

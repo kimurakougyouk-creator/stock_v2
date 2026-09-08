@@ -22,6 +22,7 @@ import re
 DEFAULT_JOURNAL_DIR = Path("results/live_pilot_send_journal")
 REPORT_SCHEMA_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+_GLOBAL_ATTEMPT_FILENAME = "GLOBAL_SEND_ATTEMPT.lock"
 
 
 def _now(value: datetime | None) -> str:
@@ -50,6 +51,25 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.attempted.json"
 
 
+def _global_attempt_path(directory: Path) -> Path:
+    return directory / _GLOBAL_ATTEMPT_FILENAME
+
+
+def _fsync_parent_dir(path: Path) -> None:
+    """Fsync the containing directory so a new/removed entry survives a crash.
+
+    A file's own fsync only guarantees its content is durable; the directory
+    entry that makes the file (dis)appear needs a separate fsync on most
+    POSIX filesystems, otherwise a power loss right after creation can boot
+    back up without the entry and silently permit a second send attempt.
+    """
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _atomic_new(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -61,6 +81,7 @@ def _atomic_new(path: Path, payload: dict) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_parent_dir(path)
 
 
 def _atomic_replace(path: Path, payload: dict) -> None:
@@ -103,6 +124,34 @@ def send_attempt_recorded(
 ) -> bool:
     """Return True when the irreversible single-send marker already exists."""
     return _attempt_path(intent_id, directory).exists()
+
+
+def load_send_attempt_marker(
+    intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    """Load the irreversible per-intent SEND_ATTEMPT marker, if it exists.
+
+    This is the exclusive-create marker written by ``record_send_attempt``
+    before any broker transport call, not the mutable summary journal. A
+    completion judge must load and validate this marker directly rather than
+    trusting the summary journal's ``state`` field alone.
+    """
+    path = _attempt_path(intent_id, directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="send attempt marker")
+
+
+def global_send_attempt_recorded(*, directory: Path = DEFAULT_JOURNAL_DIR) -> bool:
+    """Return True when any Live pilot send attempt has ever been recorded.
+
+    This marker has one fixed filename shared by every intent_id in the
+    directory. It is what actually enforces "at most one transmission ever"
+    for the whole pilot campaign: an intent-scoped marker alone would let a
+    new or restarted caller choose a fresh intent_id and create a second,
+    otherwise-unblocked attempt marker.
+    """
+    return _global_attempt_path(directory).exists()
 
 
 def create_consumed_authorization_journal(
@@ -162,8 +211,12 @@ def record_send_attempt(
 ) -> dict:
     """Irreversibly spend the sole allowed send attempt before broker transport.
 
-    The exclusive attempt marker is created first.  If the process crashes or
-    the summary update fails afterwards, that marker survives and every later
+    The exclusive global campaign marker is created first, before any
+    per-intent marker. Its filename is fixed (not derived from intent_id), so
+    switching to a new intent_id or restarting the process after a crash can
+    never create a second reachable attempt. The per-intent attempt marker is
+    then created for this intent's own bookkeeping. If the process crashes or
+    the summary update fails afterwards, both markers survive and every later
     call still fails closed.
     """
     intent = _safe(intent_id, "intent_id")
@@ -175,6 +228,19 @@ def record_send_attempt(
         or int(payload.get("send_attempt_count", 0)) != 0
     ):
         raise PermissionError("a Live send attempt is no longer permitted for this intent")
+
+    global_marker = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "intent_id": intent,
+        "recorded_at": _now(now),
+        "automatic_resend_allowed": False,
+    }
+    try:
+        _atomic_new(_global_attempt_path(directory), global_marker)
+    except FileExistsError as exc:
+        raise PermissionError(
+            "a Live send attempt has already been recorded for this pilot campaign"
+        ) from exc
 
     marker = {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -314,8 +380,10 @@ def mark_postfill_proven(
 def send_attempt_permitted(
     intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
 ) -> bool:
-    """Fail closed if either the summary or irreversible marker says spent."""
+    """Fail closed if the summary, per-intent marker, or global marker says spent."""
     try:
+        if global_send_attempt_recorded(directory=directory):
+            return False
         if send_attempt_recorded(intent_id, directory=directory):
             return False
         payload = load_send_journal(intent_id, directory=directory)
