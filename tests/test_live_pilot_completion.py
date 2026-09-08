@@ -100,6 +100,7 @@ def _account(*, position: float = 100.0, **overrides) -> dict:
             }
         )
     data = {
+        "schema_version": 3,
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
@@ -115,6 +116,7 @@ def _account(*, position: float = 100.0, **overrides) -> dict:
 
 def _open_orders(count: int = 0, *, orders: list | None = None, **overrides) -> dict:
     data = {
+        "schema_version": 2,
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
@@ -132,7 +134,8 @@ def _open_orders(count: int = 0, *, orders: list | None = None, **overrides) -> 
 
 def _paper(**overrides) -> dict:
     data = {
-        "status": "WARNING",
+        "schema_version": 1,
+        "status": "HEALTHY",
         "checked_at": _stamp(),
         "accounting_safe": True,
         "risk_safe": True,
@@ -460,11 +463,11 @@ def test_open_orders_account_fingerprint_mismatch_blocks():
     assert any("open-orders" in item and "fingerprint mismatch" in item for item in result.blockers)
 
 
-def test_paper_monitor_missing_broker_readiness_fields_blocks_even_when_warning():
-    """Codex P1: WARNING with zero-defaulted broker counters must not pass;
+def test_paper_monitor_missing_broker_readiness_fields_blocks():
+    """Codex P1: zero-defaulted broker counters must not pass; the broker
 
-    the broker readiness/clean-reconciliation/audited-endpoint fields are
-    required explicitly.
+    readiness/clean-reconciliation/audited-endpoint fields are required
+    explicitly.
     """
     missing_readiness = _evaluate(
         paper_monitor_report=_paper(
@@ -513,6 +516,36 @@ def test_paper_monitor_missing_broker_readiness_fields_blocks_even_when_warning(
     )
     assert wrong_endpoint.complete is False
     assert wrong_endpoint.paper_monitor_safe is False
+
+
+def test_paper_monitor_requires_exact_healthy_status_and_schema_and_explicit_false_flags():
+    """Codex P1 (round 2): even with every broker field clean, a non-HEALTHY
+
+    status, wrong/missing schema_version, or a merely-falsy (not exact
+    ``False``) transport flag must still fail closed -- these do not rely on
+    the field checks above to be caught.
+    """
+    warning_status = _evaluate(paper_monitor_report=_paper(status="WARNING"))
+    assert warning_status.complete is False
+    assert warning_status.paper_monitor_safe is False
+
+    wrong_schema = _evaluate(paper_monitor_report=_paper(schema_version=2))
+    assert wrong_schema.complete is False
+    assert wrong_schema.paper_monitor_safe is False
+
+    missing_schema = _evaluate(paper_monitor_report=_paper(schema_version=None))
+    assert missing_schema.complete is False
+    assert missing_schema.paper_monitor_safe is False
+
+    falsy_not_false_flag = _evaluate(
+        paper_monitor_report=_paper(monitor_order_sent=None)
+    )
+    assert falsy_not_false_flag.complete is False
+    assert falsy_not_false_flag.paper_monitor_safe is False
+
+    falsy_zero_flag = _evaluate(paper_monitor_report=_paper(live_order_sent=0))
+    assert falsy_zero_flag.complete is False
+    assert falsy_zero_flag.paper_monitor_safe is False
 
 
 def test_execution_currency_mismatch_with_instrument_blocks():
@@ -621,11 +654,52 @@ def test_postfill_wrong_schema_version_blocks():
     """
     missing_version = _evaluate(postfill_report=_postfill(schema_version=None))
     assert missing_version.complete is False
-    assert any("schema_version" in item for item in missing_version.blockers)
+    assert any("not clean read-only evidence" in item for item in missing_version.blockers)
 
     old_version = _evaluate(postfill_report=_postfill(schema_version=1))
     assert old_version.complete is False
-    assert any("schema_version" in item for item in old_version.blockers)
+    assert any("not clean read-only evidence" in item for item in old_version.blockers)
+
+
+def test_final_account_and_open_orders_schema_version_are_also_validated():
+    """Codex P1 (round 2): the schema guard must not cover only the post-fill
+
+    report; the final account and open-order reports must be validated
+    against their own producers' current schema too.
+    """
+    wrong_account_schema = _evaluate(final_account_report=_account(schema_version=999))
+    assert wrong_account_schema.complete is False
+    assert any(
+        "account" in item and "not clean read-only evidence" in item
+        for item in wrong_account_schema.blockers
+    )
+
+    wrong_open_orders_schema = _evaluate(
+        final_open_orders_report=_open_orders(schema_version=999)
+    )
+    assert wrong_open_orders_schema.complete is False
+    assert any(
+        "open-order" in item and "not clean read-only evidence" in item
+        for item in wrong_open_orders_schema.blockers
+    )
+
+
+def test_clean_live_report_requires_exact_false_transport_flags():
+    """Codex P1 (round 2): a merely falsy transport flag (None, 0, missing)
+
+    must not be mistaken for the exact ``False`` that proves no transport
+    occurred.
+    """
+    falsy_order_sent = _evaluate(postfill_report=_postfill(order_sent=None))
+    assert falsy_order_sent.complete is False
+
+    falsy_cancel_sent = _evaluate(final_open_orders_report=_open_orders(cancel_sent=0))
+    assert falsy_cancel_sent.complete is False
+
+    missing_live_order_sent = _postfill()
+    del missing_live_order_sent["live_order_sent"]
+    result = _evaluate(postfill_report=missing_live_order_sent)
+    assert result.complete is False
 
 
 def test_persist_invalidates_stale_success_alert_before_writing_report(tmp_path: Path):
@@ -658,6 +732,41 @@ def test_persist_invalidates_stale_success_alert_before_writing_report(tmp_path:
 
     # The alert must already say CRITICAL even though the report write failed.
     assert json.loads(alert.read_text(encoding="utf-8"))["severity"] == "CRITICAL"
+
+
+def test_persist_never_publishes_success_before_the_report_is_durable(tmp_path: Path):
+    """Codex P1 (round 2): the mirror-image failure. If a COMPLETE result's
+
+    own report write fails, the alert must never have been promoted to
+    SUCCESS -- an operator or downstream consumer must not be able to see a
+    durable SUCCESS alert with no (or a stale) completion report behind it.
+    """
+    report = tmp_path / "completion.json"
+    alert = tmp_path / "alert.json"
+    success = _evaluate()
+
+    original_write_text = Path.write_text
+
+    def failing_write_text(self, *args, **kwargs):
+        if self == report.with_suffix(report.suffix + ".tmp"):
+            raise OSError("simulated disk failure while writing report")
+        return original_write_text(self, *args, **kwargs)
+
+    import pytest
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "write_text", failing_write_text)
+        with pytest.raises(OSError, match="simulated disk failure"):
+            subject.persist_live_pilot_completion(success, report_path=report, alert_path=alert)
+
+    assert not report.exists()
+    assert json.loads(alert.read_text(encoding="utf-8"))["severity"] != "SUCCESS"
+
+    # Once the failure is resolved, a clean retry still reaches SUCCESS with
+    # a durable report backing it.
+    subject.persist_live_pilot_completion(success, report_path=report, alert_path=alert)
+    assert json.loads(alert.read_text(encoding="utf-8"))["severity"] == "SUCCESS"
+    assert json.loads(report.read_text(encoding="utf-8"))["complete"] is True
 
 
 def test_module_contains_no_broker_transport():

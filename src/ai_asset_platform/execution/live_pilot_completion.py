@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
     DEFAULT_REPORT_PATH as DEFAULT_LIVE_OPEN_ORDERS_REPORT,
+    REPORT_SCHEMA_VERSION as _REQUIRED_OPEN_ORDERS_SCHEMA_VERSION,
 )
 from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
     DEFAULT_REPORT_PATH as DEFAULT_POSTFILL_REPORT,
@@ -27,6 +28,7 @@ from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
 )
 from ai_asset_platform.brokers.ibkr_live_readonly_account import (
     DEFAULT_REPORT_PATH as DEFAULT_LIVE_ACCOUNT_REPORT,
+    REPORT_SCHEMA_VERSION as _REQUIRED_ACCOUNT_SCHEMA_VERSION,
 )
 from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
@@ -44,6 +46,9 @@ DEFAULT_MAX_EVIDENCE_AGE_SECONDS = 120.0
 _VALID_LIVE_PORTS = {4001, 7496}
 _VALID_PAPER_PORTS = {4002, 7497}
 _CLEAN_RECONCILIATION_ACTION = "RECONCILIATION_EVIDENCE_IS_CLEAN"
+# ibkr_paper_operations_monitor.py hardcodes "schema_version": 1 inline in
+# PaperOperationsMonitorResult.as_record() rather than exporting a constant.
+_REQUIRED_PAPER_MONITOR_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -111,16 +116,23 @@ def _positive(value: object) -> float | None:
 
 
 def _paper_safe(report: dict | None) -> bool:
-    """Require complete, clean Paper broker evidence, not just a non-CRITICAL status.
+    """Require an exact HEALTHY, schema-current, fully-explicit Paper evidence contract.
 
     ``ibkr_paper_operations_monitor.py`` reports an unavailable reconciliation
     or open-order snapshot as ``WARNING`` and defaults the corresponding
-    counters to zero, which could otherwise pass every check below even
-    though the broker evidence was never actually observed. Require the
-    broker readiness fields, the clean reconciliation action, and an audited
-    Paper endpoint explicitly instead of trusting a zero default.
+    counters to zero. Every current ``WARNING``-causing condition happens to
+    be covered by the explicit broker-readiness checks below, but requiring
+    the aggregate status to be exactly ``HEALTHY`` (not merely not
+    ``CRITICAL``) is required so a future warning condition not yet mirrored
+    by a specific field check still fails closed instead of silently
+    passing. The report's own schema version is checked so schema drift
+    cannot be reconciled by field-name coincidence, and every transport flag
+    must be the exact boolean ``False`` rather than merely falsy (``None``,
+    ``0``, missing) evidence.
     """
     if not isinstance(report, dict):
+        return False
+    if report.get("schema_version") != _REQUIRED_PAPER_MONITOR_SCHEMA_VERSION:
         return False
     broker = report.get("broker")
     broker = broker if isinstance(broker, dict) else {}
@@ -131,7 +143,7 @@ def _paper_safe(report: dict | None) -> bool:
     except (TypeError, ValueError):
         return False
     return bool(
-        str(report.get("status") or "").strip().upper() != "CRITICAL"
+        report.get("status") == "HEALTHY"
         and report.get("accounting_safe") is True
         and report.get("risk_safe") is True
         and broker.get("account_ready") is True
@@ -142,8 +154,8 @@ def _paper_safe(report: dict | None) -> bool:
         and endpoint_port in _VALID_PAPER_PORTS
         and reconciliation_blockers == 0
         and paper_open_orders == 0
-        and not report.get("monitor_order_sent")
-        and not report.get("live_order_sent")
+        and report.get("monitor_order_sent") is False
+        and report.get("live_order_sent") is False
     )
 
 
@@ -190,14 +202,26 @@ def _execution_identity(row: dict) -> tuple:
     )
 
 
-def _clean_live_report(report: dict | None) -> bool:
+def _clean_live_report(
+    report: dict | None,
+    *,
+    required_schema_version: int,
+    required_false_flags: tuple[str, ...],
+) -> bool:
+    """Require exact schema/readiness and exact-``False`` transport flags.
+
+    Only the flags a given report type actually defines are checked (e.g.
+    postfill/account reports never define ``cancel_sent``); each one must be
+    the exact boolean ``False`` rather than merely falsy (``None``, ``0``,
+    missing), so a malformed or schema-drifted report cannot be mistaken for
+    proof that no transport occurred.
+    """
     return bool(
         isinstance(report, dict)
+        and report.get("schema_version") == required_schema_version
         and report.get("ready") is True
         and report.get("connection_mode") == "LIVE_READ_ONLY"
-        and not report.get("order_sent")
-        and not report.get("cancel_sent")
-        and not report.get("live_order_sent")
+        and all(report.get(flag) is False for flag in required_false_flags)
     )
 
 
@@ -315,19 +339,21 @@ def evaluate_live_pilot_completion(
     if not paper_fresh:
         blockers.append("Paper monitor evidence is missing or stale")
 
-    postfill_schema_ok = (
-        isinstance(postfill_report, dict)
-        and postfill_report.get("schema_version") == _REQUIRED_POSTFILL_SCHEMA_VERSION
+    postfill_clean = _clean_live_report(
+        postfill_report,
+        required_schema_version=_REQUIRED_POSTFILL_SCHEMA_VERSION,
+        required_false_flags=("order_sent", "live_order_sent"),
     )
-    if not postfill_schema_ok:
-        blockers.append(
-            "Live post-fill report schema_version does not match the required "
-            f"multi-execution evidence contract (schema_version={_REQUIRED_POSTFILL_SCHEMA_VERSION})"
-        )
-
-    postfill_clean = _clean_live_report(postfill_report)
-    account_clean = _clean_live_report(final_account_report)
-    open_orders_clean = _clean_live_report(final_open_orders_report)
+    account_clean = _clean_live_report(
+        final_account_report,
+        required_schema_version=_REQUIRED_ACCOUNT_SCHEMA_VERSION,
+        required_false_flags=("order_sent", "live_order_sent"),
+    )
+    open_orders_clean = _clean_live_report(
+        final_open_orders_report,
+        required_schema_version=_REQUIRED_OPEN_ORDERS_SCHEMA_VERSION,
+        required_false_flags=("order_sent", "cancel_sent", "live_order_sent"),
+    )
     if not postfill_clean:
         blockers.append("Live post-fill report is not clean read-only evidence")
     if not account_clean:
@@ -632,35 +658,49 @@ def persist_live_pilot_completion(
 ) -> None:
     """Persist the completion report and its durable operator alert.
 
-    The alert is written *before* the report. A prior run may have left a
-    SUCCESS alert on disk; if persistence fails partway through this call,
-    writing the alert first guarantees the operator-facing alert reflects
-    this evaluation's actual severity before anything else is attempted, so a
-    failure here can never leave a stale SUCCESS alert next to a report that
-    says blocked.
+    A durable ``SUCCESS`` alert must never exist without a matching, durably
+    persisted ``COMPLETE`` report next to it -- an operator or downstream
+    consumer may act on the alert alone. This is enforced in three phases:
+
+    1. Write a non-SUCCESS alert first, unconditionally. This invalidates any
+       stale ``SUCCESS`` alert left by a prior run before anything else is
+       attempted, so a failure in a later phase never leaves a stale success
+       claim on disk.
+    2. Persist the completion report.
+    3. Only if the report was persisted *and* this result is complete,
+       promote the alert to ``SUCCESS``. If step 2 raises, this phase never
+       runs and the alert remains the non-SUCCESS one from step 1.
     """
-    alert = {
+
+    def _write_alert(payload: dict) -> None:
+        alert_path.parent.mkdir(parents=True, exist_ok=True)
+        alert_tmp = alert_path.with_suffix(alert_path.suffix + ".tmp")
+        alert_tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        alert_tmp.replace(alert_path)
+
+    base_alert = {
         "schema_version": 1,
         "checked_at": result.checked_at,
-        "severity": "SUCCESS" if result.complete else "CRITICAL",
         "status": result.status,
         "intent_id": result.intent_id,
-        "message": (
-            "FIRST LIVE PILOT COMPLETION PROVEN"
-            if result.complete
-            else "FIRST LIVE PILOT NOT COMPLETE - DO NOT RETRY AUTOMATICALLY"
-        ),
         "blockers": list(result.blockers),
         "delivery": "LOCAL_DURABLE_OPERATOR_ALERT",
         "external_notification_claimed": False,
     }
-    alert_path.parent.mkdir(parents=True, exist_ok=True)
-    alert_tmp = alert_path.with_suffix(alert_path.suffix + ".tmp")
-    alert_tmp.write_text(
-        json.dumps(alert, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    _write_alert(
+        {
+            **base_alert,
+            "severity": "CRITICAL",
+            "message": (
+                "FIRST LIVE PILOT COMPLETION PENDING REPORT PERSISTENCE"
+                if result.complete
+                else "FIRST LIVE PILOT NOT COMPLETE - DO NOT RETRY AUTOMATICALLY"
+            ),
+        }
     )
-    alert_tmp.replace(alert_path)
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -678,3 +718,12 @@ def persist_live_pilot_completion(
         encoding="utf-8",
     )
     temporary.replace(report_path)
+
+    if result.complete:
+        _write_alert(
+            {
+                **base_alert,
+                "severity": "SUCCESS",
+                "message": "FIRST LIVE PILOT COMPLETION PROVEN",
+            }
+        )

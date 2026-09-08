@@ -437,6 +437,38 @@ def test_final_freshness_check_rereads_the_clock_not_a_fixed_now(monkeypatch):
     assert events == []
 
 
+def test_stale_evidence_after_durable_attempt_recording_blocks_transport(monkeypatch):
+    """Codex P1 (round 2): even after the post-connection freshness re-check
+
+    passes, the fsync-backed authorization/journal/attempt writes that follow
+    it can themselves stall. If evidence has aged past its window by the time
+    those durable writes finish, transport must still be blocked -- with the
+    attempt already (and irreversibly) spent -- rather than transmitting on
+    stale evidence merely because no clock was read again before placeOrder.
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    calls = {"count": 0}
+
+    def advancing_clock() -> datetime:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return NOW
+        return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
+
+    result = _send(monkeypatch, client, now=advancing_clock)
+
+    assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
+    assert result.sent is False
+    assert result.recovery_required is True
+    assert calls["count"] >= 3
+    assert client.place_calls == []
+    # The irreversible attempt marker must already have been recorded before
+    # this check runs -- it is not skipped/rolled back just because transport
+    # is subsequently blocked.
+    assert events == ["journal", "attempt"]
+
+
 def test_fixed_now_still_works_for_simple_deterministic_tests(monkeypatch):
     events = _patch_prereqs(monkeypatch)
     client = FakeClient()

@@ -549,6 +549,37 @@ def send_exactly_one_live_pilot(
         )
         record_send_attempt(intent, directory=journal_dir, now=final_clock)
 
+        # Re-validate freshness once more now that the irreversible attempt
+        # marker is durable (the exclusive-create + fsync writes above can
+        # themselves stall). The attempt is already permanently spent by this
+        # point regardless of outcome, but transport must still not proceed
+        # on evidence that has aged past its window while those writes ran.
+        try:
+            post_attempt_clock = _utc(clock())
+            _require_fresh_timestamp(
+                readiness_report.get("checked_at"),
+                label="operational readiness",
+                now=post_attempt_clock,
+            )
+            _require_fresh_timestamp(
+                same_run_preflight.checked_at,
+                label="same-run preflight",
+                now=post_attempt_clock,
+            )
+        except PermissionError as exc:
+            return LivePilotSendResult(
+                "BLOCKED_STALE_AFTER_ATTEMPT",
+                False,
+                False,
+                int(order_id),
+                None,
+                endpoint_port,
+                observed_fingerprint,
+                None,
+                True,
+                f"evidence aged past freshness window after durable attempt recording; attempt remains permanently spent: {exc}",
+            )
+
         # Last possible stop check. The irreversible attempt is deliberately
         # spent first, so a stop arriving here can never be bypassed by retry.
         if live_pilot_stop_is_active(stop_path=stop_path):
