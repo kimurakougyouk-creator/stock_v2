@@ -793,6 +793,45 @@ def test_durable_write_json_fsyncs_file_and_directory(tmp_path: Path, monkeypatc
     assert len(calls) >= 2
 
 
+def test_write_full_loops_over_short_writes_and_rejects_no_progress(tmp_path: Path, monkeypatch):
+    """Codex P1 (round 4): a short ``os.write`` must not silently persist
+
+    truncated JSON; the helper must loop until every byte is written and
+    fail rather than fsync/rename on a write that made no progress.
+    """
+    import pytest
+
+    data = b"x" * 100
+    target = tmp_path / "short_write_target.bin"
+    original_write = os.write
+
+    counts = {"calls": 0}
+
+    def short_write(fd, chunk):
+        counts["calls"] += 1
+        # Only ever accept at most 7 bytes per call, forcing many short writes.
+        return original_write(fd, chunk[:7])
+
+    monkeypatch.setattr(os, "write", short_write)
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        subject._write_full(descriptor, data)
+    finally:
+        os.close(descriptor)
+
+    assert target.read_bytes() == data
+    assert counts["calls"] > 1
+
+    zero_progress_target = tmp_path / "zero_progress.bin"
+    monkeypatch.setattr(os, "write", lambda fd, chunk: 0)
+    descriptor = os.open(zero_progress_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with pytest.raises(OSError, match="no progress"):
+            subject._write_full(descriptor, data)
+    finally:
+        os.close(descriptor)
+
+
 def test_paper_safe_rejects_non_exact_int_counters():
     """Codex P1 (round 3): 0.0, "0", and False must not satisfy the
 

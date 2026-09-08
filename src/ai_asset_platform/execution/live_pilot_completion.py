@@ -604,6 +604,21 @@ def _load(path: Path) -> dict | None:
     return payload
 
 
+def _write_full(descriptor: int, data: bytes) -> None:
+    """Write every byte of ``data``, since ``os.write`` may write fewer.
+
+    POSIX permits a short write (e.g. an interrupted syscall); persisting
+    without looping could fsync and rename a truncated payload as if it were
+    complete and valid.
+    """
+    written = 0
+    while written < len(data):
+        count = os.write(descriptor, data[written:])
+        if count <= 0:
+            raise OSError("write() made no progress while persisting durable evidence")
+        written += count
+
+
 def _durable_write_json(path: Path, payload: dict) -> None:
     """Write JSON via fsync'd temp-file-then-rename, then fsync the directory.
 
@@ -621,7 +636,7 @@ def _durable_write_json(path: Path, payload: dict) -> None:
     ).encode("utf-8")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(descriptor, encoded)
+        _write_full(descriptor, encoded)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)

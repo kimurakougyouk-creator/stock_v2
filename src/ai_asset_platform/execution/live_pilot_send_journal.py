@@ -70,6 +70,21 @@ def _fsync_parent_dir(path: Path) -> None:
         os.close(directory_fd)
 
 
+def _write_full(descriptor: int, data: bytes) -> None:
+    """Write every byte of ``data``, since ``os.write`` may write fewer.
+
+    POSIX permits a short write (e.g. an interrupted syscall); persisting
+    without looping could fsync and publish a truncated marker/journal as if
+    it were the complete, valid evidence it claims to be.
+    """
+    written = 0
+    while written < len(data):
+        count = os.write(descriptor, data[written:])
+        if count <= 0:
+            raise OSError("write() made no progress while persisting durable evidence")
+        written += count
+
+
 def _atomic_new(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -77,7 +92,7 @@ def _atomic_new(path: Path, payload: dict) -> None:
         encoded = (
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        os.write(descriptor, encoded)
+        _write_full(descriptor, encoded)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -96,7 +111,7 @@ def _atomic_replace(path: Path, payload: dict) -> None:
         encoded = (
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        os.write(descriptor, encoded)
+        _write_full(descriptor, encoded)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)

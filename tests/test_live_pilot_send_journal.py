@@ -166,6 +166,39 @@ def test_global_marker_directory_entry_is_fsynced(tmp_path: Path, monkeypatch):
     assert all(call.parent == tmp_path for call in calls)
 
 
+def test_write_full_loops_over_short_writes_and_rejects_no_progress(tmp_path: Path, monkeypatch):
+    """Codex P1 (round 4): a short ``os.write`` must not silently persist a
+
+    truncated durable marker; the helper must loop until every byte is
+    written and fail rather than fsync/rename on no-progress writes.
+    """
+    import os
+
+    data = b"y" * 100
+    target = tmp_path / "short_write_target.bin"
+    original_write = os.write
+
+    def short_write(fd, chunk):
+        return original_write(fd, chunk[:7])
+
+    monkeypatch.setattr(os, "write", short_write)
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        journal._write_full(descriptor, data)
+    finally:
+        os.close(descriptor)
+    assert target.read_bytes() == data
+
+    zero_progress_target = tmp_path / "zero_progress.bin"
+    monkeypatch.setattr(os, "write", lambda fd, chunk: 0)
+    descriptor = os.open(zero_progress_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with pytest.raises(OSError, match="no progress"):
+            journal._write_full(descriptor, data)
+    finally:
+        os.close(descriptor)
+
+
 def test_module_contains_no_broker_transport_or_automatic_recovery_action():
     source = Path("src/ai_asset_platform/execution/live_pilot_send_journal.py").read_text(encoding="utf-8")
     forbidden = (".placeOrder(", ".cancelOrder(", "reqOpenOrders(", "reqAllOpenOrders(", "reqExecutions(", "enable_live_trading = True", "automatic_resend_allowed=True", "automatic_cancel_allowed=True", "automatic_modify_allowed=True", "automatic_flatten_allowed=True", "automatic_close_allowed=True")
