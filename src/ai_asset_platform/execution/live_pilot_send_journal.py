@@ -169,6 +169,23 @@ def global_send_attempt_recorded(*, directory: Path = DEFAULT_JOURNAL_DIR) -> bo
     return _global_attempt_path(directory).exists()
 
 
+def load_global_send_attempt_marker(
+    *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    """Load the campaign-wide GLOBAL_SEND_ATTEMPT marker, if it exists.
+
+    A completion judge must validate this in addition to the per-intent
+    marker: an intent's own ``.attempted.json`` can exist and look valid
+    even if the global marker was lost or now belongs to a different
+    intent, which would otherwise let completion be reported for one intent
+    without proving the campaign-wide one-send guarantee actually held.
+    """
+    path = _global_attempt_path(directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="global send attempt marker")
+
+
 def create_consumed_authorization_journal(
     *,
     intent_id: str,

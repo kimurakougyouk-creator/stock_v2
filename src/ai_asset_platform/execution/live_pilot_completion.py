@@ -34,6 +34,7 @@ from ai_asset_platform.brokers.ibkr_live_readonly_account import (
 from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
     REPORT_SCHEMA_VERSION as _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION,
+    load_global_send_attempt_marker,
     load_send_attempt_marker,
     load_send_journal,
 )
@@ -246,6 +247,7 @@ def evaluate_live_pilot_completion(
     expected_account_fingerprint: str,
     send_journal: dict | None,
     send_attempt_marker: dict | None,
+    global_send_attempt_marker: dict | None,
     postfill_report: dict | None,
     final_account_report: dict | None,
     final_open_orders_report: dict | None,
@@ -338,6 +340,19 @@ def evaluate_live_pilot_completion(
     if not marker_ready:
         blockers.append(
             "irreversible send-attempt marker is missing, mismatched, or inconsistent"
+        )
+
+    global_marker_ready = bool(
+        isinstance(global_send_attempt_marker, dict)
+        and global_send_attempt_marker.get("schema_version")
+        == _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
+        and str(global_send_attempt_marker.get("intent_id") or "").strip() == intent
+        and global_send_attempt_marker.get("automatic_resend_allowed") is False
+    )
+    if not global_marker_ready:
+        blockers.append(
+            "campaign-wide global send-attempt marker is missing, bound to a "
+            "different intent, or inconsistent"
         )
 
     postfill_fresh = _fresh(postfill_report, now=current, max_age_seconds=max_age)
@@ -665,6 +680,7 @@ def audit_live_pilot_completion(
     try:
         journal = load_send_journal(intent_id, directory=journal_dir)
         attempt_marker = load_send_attempt_marker(intent_id, directory=journal_dir)
+        global_attempt_marker = load_global_send_attempt_marker(directory=journal_dir)
         postfill = _load(postfill_report_path)
         account = _load(live_account_report_path)
         open_orders = _load(live_open_orders_report_path)
@@ -701,6 +717,7 @@ def audit_live_pilot_completion(
         expected_account_fingerprint=expected_account_fingerprint,
         send_journal=journal,
         send_attempt_marker=attempt_marker,
+        global_send_attempt_marker=global_attempt_marker,
         postfill_report=postfill,
         final_account_report=account,
         final_open_orders_report=open_orders,

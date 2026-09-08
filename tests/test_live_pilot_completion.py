@@ -59,6 +59,17 @@ def _attempt_marker(**overrides) -> dict:
     return data
 
 
+def _global_attempt_marker(**overrides) -> dict:
+    data = {
+        "schema_version": 2,
+        "intent_id": INTENT,
+        "recorded_at": _stamp(),
+        "automatic_resend_allowed": False,
+    }
+    data.update(overrides)
+    return data
+
+
 def _postfill(**overrides) -> dict:
     data = {
         "schema_version": 2,
@@ -167,6 +178,7 @@ def _evaluate(**overrides):
         "expected_account_fingerprint": FINGERPRINT,
         "send_journal": _journal(),
         "send_attempt_marker": _attempt_marker(),
+        "global_send_attempt_marker": _global_attempt_marker(),
         "postfill_report": _postfill(),
         "final_account_report": _account(),
         "final_open_orders_report": _open_orders(),
@@ -632,6 +644,36 @@ def test_missing_or_mismatched_send_attempt_marker_blocks():
     )
     assert both_nonces_empty.complete is False
     assert any("send-attempt marker" in item for item in both_nonces_empty.blockers)
+
+
+def test_missing_or_mismatched_global_send_attempt_marker_blocks():
+    """Codex P1 (round 8): the per-intent .attempted.json marker alone is not
+
+    sufficient. If GLOBAL_SEND_ATTEMPT.lock is missing or bound to a
+    different intent -- which is exactly the condition that would let a
+    second, otherwise-unblocked send attempt for another intent be created
+    -- this intent must not be reported COMPLETE either, since the
+    campaign-wide one-send guarantee is no longer provably intact.
+    """
+    missing_global_marker = _evaluate(global_send_attempt_marker=None)
+    assert missing_global_marker.complete is False
+    assert any("global send-attempt marker" in item for item in missing_global_marker.blockers)
+
+    wrong_intent = _evaluate(
+        global_send_attempt_marker=_global_attempt_marker(intent_id="a-different-intent")
+    )
+    assert wrong_intent.complete is False
+    assert any("global send-attempt marker" in item for item in wrong_intent.blockers)
+
+    wrong_schema = _evaluate(global_send_attempt_marker=_global_attempt_marker(schema_version=1))
+    assert wrong_schema.complete is False
+    assert any("global send-attempt marker" in item for item in wrong_schema.blockers)
+
+    resend_allowed = _evaluate(
+        global_send_attempt_marker=_global_attempt_marker(automatic_resend_allowed=True)
+    )
+    assert resend_allowed.complete is False
+    assert any("global send-attempt marker" in item for item in resend_allowed.blockers)
 
 
 def test_conflicting_exec_id_outside_matched_set_blocks():
