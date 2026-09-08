@@ -111,6 +111,11 @@ def preview_ibkr_live_all_open_orders(
             if not probe.connected_ready.wait(timeout) or probe.fatal:
                 collected.extend(probe.errors)
                 continue
+            # Do not rely on an unsolicited managedAccounts callback. Request the
+            # managed account explicitly from this exact socket before any open-
+            # order evidence is accepted, so the fingerprint and order snapshot
+            # are provably session-bound.
+            probe.reqManagedAccts()
             if not probe.accounts_ready.wait(timeout) or probe.fatal:
                 collected.extend(probe.errors)
                 collected.append(f"{port}: managed account identity was not received")
