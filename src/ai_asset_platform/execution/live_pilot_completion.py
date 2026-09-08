@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
 
 from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
@@ -115,6 +116,16 @@ def _positive(value: object) -> float | None:
     return parsed if parsed is not None and parsed > 0 else None
 
 
+def _is_exact_zero_int(value: object) -> bool:
+    """True only for the exact ``int`` zero, not ``0.0``, ``"0"``, or ``False``.
+
+    ``int(value)`` silently coerces all of those (and ``bool`` is itself an
+    ``int`` subclass), which would let type-invalid but numerically-zero
+    counter evidence pass as clean.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value == 0
+
+
 def _paper_safe(report: dict | None) -> bool:
     """Require an exact HEALTHY, schema-current, fully-explicit Paper evidence contract.
 
@@ -136,9 +147,12 @@ def _paper_safe(report: dict | None) -> bool:
         return False
     broker = report.get("broker")
     broker = broker if isinstance(broker, dict) else {}
+    if not (
+        _is_exact_zero_int(broker.get("reconciliation_blocker_count"))
+        and _is_exact_zero_int(broker.get("open_order_count"))
+    ):
+        return False
     try:
-        reconciliation_blockers = int(broker.get("reconciliation_blocker_count", 0) or 0)
-        paper_open_orders = int(broker.get("open_order_count", 0) or 0)
         endpoint_port = int(broker.get("endpoint_port"))
     except (TypeError, ValueError):
         return False
@@ -152,8 +166,6 @@ def _paper_safe(report: dict | None) -> bool:
         and str(broker.get("reconciliation_next_action") or "").strip()
         == _CLEAN_RECONCILIATION_ACTION
         and endpoint_port in _VALID_PAPER_PORTS
-        and reconciliation_blockers == 0
-        and paper_open_orders == 0
         and report.get("monitor_order_sent") is False
         and report.get("live_order_sent") is False
     )
@@ -280,7 +292,8 @@ def evaluate_live_pilot_completion(
             order_id = perm_id = None
         exec_id = str(send_journal.get("exec_id") or "").strip() or None
         journal_ready = bool(
-            send_journal.get("state") == "POSTFILL_PROVEN"
+            send_journal.get("schema_version") == _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
+            and send_journal.get("state") == "POSTFILL_PROVEN"
             and str(send_journal.get("intent_id") or "").strip() == intent
             and int(send_journal.get("send_attempt_count", 0) or 0) == 1
             and order_id is not None
@@ -292,6 +305,8 @@ def evaluate_live_pilot_completion(
             and send_journal.get("automatic_resend_allowed") is False
             and send_journal.get("automatic_cancel_allowed") is False
             and send_journal.get("automatic_modify_allowed") is False
+            and send_journal.get("automatic_flatten_allowed") is False
+            and send_journal.get("automatic_close_allowed") is False
         )
     if not journal_ready:
         blockers.append("durable send journal is not in exact POSTFILL_PROVEN state")
@@ -589,6 +604,35 @@ def _load(path: Path) -> dict | None:
     return payload
 
 
+def _durable_write_json(path: Path, payload: dict) -> None:
+    """Write JSON via fsync'd temp-file-then-rename, then fsync the directory.
+
+    A rename alone is atomic but not necessarily durable: without fsyncing
+    the temp file's contents before the rename and the containing directory
+    afterward, a crash can lose the file's content or the rename itself even
+    though the call already returned, letting two durable artifacts written
+    in this order (e.g. an invalidated alert, then a report) end up
+    inconsistently ordered after a crash.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(descriptor, encoded)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def audit_live_pilot_completion(
     *,
     intent_id: str,
@@ -673,13 +717,7 @@ def persist_live_pilot_completion(
     """
 
     def _write_alert(payload: dict) -> None:
-        alert_path.parent.mkdir(parents=True, exist_ok=True)
-        alert_tmp = alert_path.with_suffix(alert_path.suffix + ".tmp")
-        alert_tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        alert_tmp.replace(alert_path)
+        _durable_write_json(alert_path, payload)
 
     base_alert = {
         "schema_version": 1,
@@ -702,7 +740,6 @@ def persist_live_pilot_completion(
         }
     )
 
-    report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
         **asdict(result),
@@ -712,12 +749,7 @@ def persist_live_pilot_completion(
             "and clean Paper safety evidence."
         ),
     }
-    temporary = report_path.with_suffix(report_path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(report_path)
+    _durable_write_json(report_path, payload)
 
     if result.complete:
         _write_alert(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 
 import ai_asset_platform.execution.live_pilot_completion as subject
@@ -34,6 +35,8 @@ def _journal(**overrides) -> dict:
         "automatic_resend_allowed": False,
         "automatic_cancel_allowed": False,
         "automatic_modify_allowed": False,
+        "automatic_flatten_allowed": False,
+        "automatic_close_allowed": False,
     }
     data.update(overrides)
     return data
@@ -716,17 +719,17 @@ def test_persist_invalidates_stale_success_alert_before_writing_report(tmp_path:
 
     blocked = _evaluate(final_open_orders_report=_open_orders(1))
 
-    original_write_text = Path.write_text
+    original_durable_write = subject._durable_write_json
 
-    def failing_write_text(self, *args, **kwargs):
-        if self == report.with_suffix(report.suffix + ".tmp"):
+    def failing_durable_write(path, payload):
+        if path == report:
             raise OSError("simulated disk failure while writing report")
-        return original_write_text(self, *args, **kwargs)
+        return original_durable_write(path, payload)
 
     import pytest
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(Path, "write_text", failing_write_text)
+        mp.setattr(subject, "_durable_write_json", failing_durable_write)
         with pytest.raises(OSError, match="simulated disk failure"):
             subject.persist_live_pilot_completion(blocked, report_path=report, alert_path=alert)
 
@@ -745,17 +748,17 @@ def test_persist_never_publishes_success_before_the_report_is_durable(tmp_path: 
     alert = tmp_path / "alert.json"
     success = _evaluate()
 
-    original_write_text = Path.write_text
+    original_durable_write = subject._durable_write_json
 
-    def failing_write_text(self, *args, **kwargs):
-        if self == report.with_suffix(report.suffix + ".tmp"):
+    def failing_durable_write(path, payload):
+        if path == report:
             raise OSError("simulated disk failure while writing report")
-        return original_write_text(self, *args, **kwargs)
+        return original_durable_write(path, payload)
 
     import pytest
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(Path, "write_text", failing_write_text)
+        mp.setattr(subject, "_durable_write_json", failing_durable_write)
         with pytest.raises(OSError, match="simulated disk failure"):
             subject.persist_live_pilot_completion(success, report_path=report, alert_path=alert)
 
@@ -767,6 +770,105 @@ def test_persist_never_publishes_success_before_the_report_is_durable(tmp_path: 
     subject.persist_live_pilot_completion(success, report_path=report, alert_path=alert)
     assert json.loads(alert.read_text(encoding="utf-8"))["severity"] == "SUCCESS"
     assert json.loads(report.read_text(encoding="utf-8"))["complete"] is True
+
+
+def test_durable_write_json_fsyncs_file_and_directory(tmp_path: Path, monkeypatch):
+    """Codex P1 (round 3): both the temp file and the containing directory
+
+    must be fsynced, or a crash right after this call can lose the rename or
+    reorder it relative to another durable write.
+    """
+    calls = []
+    original_fsync = os.fsync
+
+    def spy_fsync(fd):
+        calls.append(fd)
+        return original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    target = tmp_path / "durable.json"
+    subject._durable_write_json(target, {"a": 1})
+
+    assert target.exists()
+    assert len(calls) >= 2
+
+
+def test_paper_safe_rejects_non_exact_int_counters():
+    """Codex P1 (round 3): 0.0, "0", and False must not satisfy the
+
+    reconciliation-blocker/open-order counters, matching the exact-int
+    contract already required for the final Live open-order count.
+    """
+    float_blockers = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0.0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+            }
+        )
+    )
+    assert float_blockers.complete is False
+    assert float_blockers.paper_monitor_safe is False
+
+    string_open_orders = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0,
+                "all_open_orders_ready": True,
+                "open_order_count": "0",
+            }
+        )
+    )
+    assert string_open_orders.complete is False
+    assert string_open_orders.paper_monitor_safe is False
+
+    boolean_blockers = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": False,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+            }
+        )
+    )
+    assert boolean_blockers.complete is False
+    assert boolean_blockers.paper_monitor_safe is False
+
+
+def test_summary_journal_requires_current_schema_and_all_five_automatic_flags():
+    """Codex P1 (round 3): the mutable summary journal itself must be checked
+
+    against the current schema and all five no-automatic-action fields, not
+    only the irreversible attempt marker.
+    """
+    wrong_schema = _evaluate(send_journal=_journal(schema_version=1))
+    assert wrong_schema.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_schema.blockers)
+
+    missing_schema = _evaluate(send_journal=_journal(schema_version=None))
+    assert missing_schema.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in missing_schema.blockers)
+
+    flatten_allowed = _evaluate(send_journal=_journal(automatic_flatten_allowed=True))
+    assert flatten_allowed.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in flatten_allowed.blockers)
+
+    close_allowed = _evaluate(send_journal=_journal(automatic_close_allowed=True))
+    assert close_allowed.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in close_allowed.blockers)
 
 
 def test_module_contains_no_broker_transport():
