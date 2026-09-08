@@ -548,3 +548,218 @@ def test_accepted_open_order_status_still_acknowledges():
     assert client.ack_ready.is_set() is True
     assert client.ack_perm_id == 880077
     assert client.order_error is None
+
+
+def _client() -> "subject._LivePilotClient":
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+    return client
+
+
+def test_pending_submit_alone_is_nonterminal_and_never_wakes_the_waiter():
+    """PM P1: PendingSubmit is a genuine interim state, not a rejection --
+
+    it must never set order_error or ack_ready by itself (this is what the
+    caller's overall timeout, not this callback, must eventually resolve).
+    """
+    client = _client()
+    order = SimpleNamespace(account=PINNED_ACCOUNT, permId=0)
+    state = SimpleNamespace(status="PendingSubmit")
+    client.openOrder(77, object(), order, state)
+
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+    assert client.ack_perm_id is None
+    assert client.broker_status == "PendingSubmit"
+
+
+def test_pending_submit_then_pre_submitted_acknowledges():
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    assert client.ack_ready.is_set() is False
+
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="PreSubmitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+
+
+def test_pending_submit_then_submitted_acknowledges():
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+
+
+def test_pending_submit_then_inactive_fails_closed_as_definitive_rejection():
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    assert client.ack_ready.is_set() is False
+
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=0),
+        SimpleNamespace(status="Inactive"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id is None
+    assert client.order_error is not None
+    assert "Inactive" in client.order_error
+
+
+def test_duplicate_and_interleaved_pending_submit_callbacks_stay_harmless():
+    """Duplicate/interleaved PendingSubmit callbacks (openOrder and
+
+    orderStatus both firing repeatedly) must remain nonterminal and never
+    accumulate into a false ack or a false error.
+    """
+    client = _client()
+    for _ in range(3):
+        client.openOrder(
+            77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+        )
+        client.orderStatus(77, "PendingSubmit", 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+    assert client.ack_perm_id is None
+
+    # A later genuine acknowledgement still works normally afterward.
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+
+
+def test_order_status_pending_submit_then_submitted_acknowledges():
+    client = _client()
+    client.orderStatus(77, "PendingSubmit", 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+
+    client.orderStatus(77, "Submitted", 0.0, 100.0, 0.0, 880077, 0, 0.0, 0, "", 0.0)
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+
+
+def test_order_status_terminal_rejection_wakes_the_waiter():
+    """PM audit: orderStatus previously silently ignored Cancelled/
+
+    ApiCancelled/Inactive/PendingCancel, relying solely on openOrder/error to
+    ever wake the waiter. A definitive rejection must not be able to hang
+    until the full timeout when orderStatus alone reports it.
+    """
+    for bad_status in ("Cancelled", "ApiCancelled", "Inactive", "PendingCancel"):
+        client = _client()
+        client.orderStatus(77, bad_status, 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+        assert client.ack_ready.is_set() is True, bad_status
+        assert client.ack_perm_id is None, bad_status
+        assert client.order_error is not None and bad_status in client.order_error, bad_status
+
+
+def test_order_status_partial_and_full_fill_both_acknowledge():
+    """A partial fill (filled < remaining) reported via a Submitted status,
+
+    and a completed fill reported via Filled, must both acknowledge -- fill
+    quantity is proven later by post-fill reconciliation, not this ack wait.
+    """
+    partial = _client()
+    partial.orderStatus(77, "Submitted", 40.0, 60.0, 400.0, 880077, 0, 0.0, 0, "", 0.0)
+    assert partial.ack_ready.is_set() is True
+    assert partial.ack_perm_id == 880077
+
+    full = _client()
+    full.orderStatus(77, "Filled", 100.0, 0.0, 400.0, 880077, 0, 0.0, 0, "", 0.0)
+    assert full.ack_ready.is_set() is True
+    assert full.ack_perm_id == 880077
+
+
+def test_error_callback_after_pending_submit_wakes_the_waiter():
+    """A definitive broker error for the watched order must wake the waiter
+
+    even while the order is still sitting in PendingSubmit.
+    """
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    assert client.ack_ready.is_set() is False
+
+    client.error(77, 201, "Order rejected - reason")
+    assert client.ack_ready.is_set() is True
+    assert client.order_error is not None
+    assert "201" in client.order_error
+
+
+def test_duplicate_accepted_callbacks_after_ack_do_not_change_the_outcome():
+    """A duplicate/late accepted callback arriving after the waiter has
+
+    already been woken must not flip a successful ack to an error or vice
+    versa -- ack_ready being an Event, re-setting it is a no-op, and the
+    caller only reads state once after its single wait().
+    """
+    client = _client()
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+
+    # A duplicate/late orderStatus for the same order must not disturb the
+    # already-recorded successful acknowledgement.
+    client.orderStatus(77, "Submitted", 100.0, 0.0, 400.0, 880077, 0, 0.0, 0, "", 0.0)
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+
+
+def test_stale_reordered_pending_submit_after_ack_does_not_disturb_the_outcome():
+    """A stale/out-of-order PendingSubmit callback arriving after a genuine
+
+    acknowledgement (e.g. delivered out of order over the socket) must not
+    downgrade broker_status or otherwise disturb the already-proven ack.
+    """
+    client = _client()
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.broker_status == "Submitted"
+
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+    assert client.broker_status == "Submitted"

@@ -62,6 +62,13 @@ FINAL_SEND_CONFIRMATION_VALUE = "SEND_EXACTLY_ONE_LIVE_PILOT_NOW"
 FINAL_EVIDENCE_MAX_AGE_SECONDS = 30.0
 _VALID_LIVE_PORTS = {4001, 7496}
 _ACCEPTED_STATUSES = {"PreSubmitted", "Submitted", "Filled"}
+# IbkrOrderState.PENDING_SUBMIT ("PendingSubmit"): IBKR has accepted the API
+# request but has not yet routed/accepted or rejected the order itself. This
+# is a genuine nonterminal interim state, not a rejection -- it must never
+# set order_error or wake the ack waiter. The next callback (an accepted
+# status, a definitive rejection such as Inactive/Cancelled/ApiCancelled, or
+# the overall timeout) determines the outcome.
+_NONTERMINAL_STATUSES = {"PendingSubmit"}
 
 
 @dataclass(frozen=True)
@@ -130,13 +137,25 @@ class _LivePilotClient(EWrapper, EClient):
     ) -> None:
         if self.watched_order_id is None or int(orderId) != self.watched_order_id:
             return
-        self.broker_status = str(status)
+        normalized_status = str(status)
+        if normalized_status in _NONTERMINAL_STATUSES:
+            # Genuine interim state; do not wake the waiter either way.
+            self.broker_status = self.broker_status or normalized_status
+            return
+        self.broker_status = normalized_status
         try:
             perm = int(permId)
         except (TypeError, ValueError):
             perm = 0
-        if self.broker_status in _ACCEPTED_STATUSES and perm > 0:
+        if normalized_status in _ACCEPTED_STATUSES and perm > 0:
             self.ack_perm_id = perm
+            self.ack_ready.set()
+        elif normalized_status and normalized_status not in _ACCEPTED_STATUSES:
+            # A definitive non-accepted status (e.g. Inactive, Cancelled,
+            # ApiCancelled, PendingCancel) must wake the waiter as a failure
+            # instead of silently waiting out the full timeout for a callback
+            # that will never arrive.
+            self.order_error = f"broker orderStatus callback reported non-accepted status: {normalized_status}"
             self.ack_ready.set()
 
     def openOrder(self, orderId, contract, order, orderState) -> None:  # noqa: N802
@@ -146,18 +165,25 @@ class _LivePilotClient(EWrapper, EClient):
             self.order_error = "broker acknowledgement account does not match the same-session account"
             self.ack_ready.set()
             return
+        status = str(getattr(orderState, "status", "") or "").strip()
+        if status in _NONTERMINAL_STATUSES:
+            # Genuine interim state (e.g. PendingSubmit); keep waiting for a
+            # later accepted/rejected callback or the overall timeout. Must
+            # never be treated as either an acknowledgement or a rejection,
+            # regardless of permId.
+            self.broker_status = self.broker_status or status
+            return
         try:
             perm = int(getattr(order, "permId", 0) or 0)
         except (TypeError, ValueError):
             perm = 0
-        status = str(getattr(orderState, "status", "") or "").strip()
         if perm > 0 and status in _ACCEPTED_STATUSES:
             self.ack_perm_id = perm
             self.broker_status = self.broker_status or status
             self.ack_ready.set()
         elif status and status not in _ACCEPTED_STATUSES:
-            # A non-accepted terminal/interim status (e.g. Inactive) must never
-            # be treated as acknowledgement even when permId is already
+            # A definitive non-accepted status (e.g. Inactive) must never be
+            # treated as acknowledgement even when permId is already
             # positive, otherwise this callback could race ahead of a
             # rejection reported through orderStatus/error.
             self.order_error = f"broker openOrder callback reported non-accepted status: {status}"
