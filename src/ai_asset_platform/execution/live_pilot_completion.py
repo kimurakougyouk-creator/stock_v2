@@ -514,11 +514,6 @@ def evaluate_live_pilot_completion(
             if exec_id not in ids:
                 blockers.append("durable journal exec_id is not present in final Live execution evidence")
 
-            # A conflicting row can share an exec_id with a matched row while
-            # disagreeing on order/perm/account/symbol/side identity; such a
-            # row is deliberately retained (not deduplicated) by the postfill
-            # collector so it fails closed here instead of being silently
-            # dropped by the order/perm/account/symbol/side filter above.
             for target_exec_id in set(ids):
                 if not target_exec_id:
                     continue
@@ -690,12 +685,6 @@ def _load(path: Path) -> dict | None:
 
 
 def _write_full(descriptor: int, data: bytes) -> None:
-    """Write every byte of ``data``, since ``os.write`` may write fewer.
-
-    POSIX permits a short write (e.g. an interrupted syscall); persisting
-    without looping could fsync and rename a truncated payload as if it were
-    complete and valid.
-    """
     written = 0
     while written < len(data):
         count = os.write(descriptor, data[written:])
@@ -713,12 +702,6 @@ def _fsync_parent_dir(path: Path) -> None:
 
 
 def _mkdir_durable(directory: Path) -> None:
-    """Create ``directory`` and any missing parents, durably.
-
-    ``Path.mkdir(parents=True)`` alone does not guarantee the new directory
-    entries survive a crash immediately after this call returns; each newly
-    created directory's own parent must be fsynced too.
-    """
     to_create: list[Path] = []
     probe = directory
     while not probe.exists():
@@ -733,15 +716,6 @@ def _mkdir_durable(directory: Path) -> None:
 
 
 def _durable_write_json(path: Path, payload: dict) -> None:
-    """Write JSON via fsync'd temp-file-then-rename, then fsync the directory.
-
-    A rename alone is atomic but not necessarily durable: without fsyncing
-    the temp file's contents before the rename and the containing directory
-    afterward, a crash can lose the file's content or the rename itself even
-    though the call already returned, letting two durable artifacts written
-    in this order (e.g. an invalidated alert, then a report) end up
-    inconsistently ordered after a crash.
-    """
     _mkdir_durable(path.parent)
     temporary = path.with_suffix(path.suffix + ".tmp")
     encoded = (
@@ -820,10 +794,6 @@ def audit_live_pilot_completion(
             now=now,
         )
     except (DecimalException, ArithmeticError, TypeError, ValueError) as exc:
-        # A malformed numeric value (e.g. an extreme exponent that overflows
-        # during arithmetic) must still produce and persist a fail-closed
-        # BLOCKED result, not abort the audit and risk leaving an older
-        # SUCCESS artifact as the last thing anyone persisted.
         current = _utc(now)
         return LivePilotCompletion(
             status="BLOCKED",
@@ -886,6 +856,9 @@ def persist_live_pilot_completion(
     _write_alert(
         {
             **base_alert,
+            "status": (
+                "PENDING_REPORT_PERSISTENCE" if result.complete else result.status
+            ),
             "severity": "CRITICAL",
             "message": (
                 "FIRST LIVE PILOT COMPLETION PENDING REPORT PERSISTENCE"
