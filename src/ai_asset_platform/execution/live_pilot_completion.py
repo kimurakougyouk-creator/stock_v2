@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, DecimalException
 import json
 import math
 import os
@@ -117,14 +118,48 @@ def _positive(value: object) -> float | None:
     return parsed if parsed is not None and parsed > 0 else None
 
 
-def _is_exact_zero_int(value: object) -> bool:
-    """True only for the exact ``int`` zero, not ``0.0``, ``"0"``, or ``False``.
+def _decimal(value: object) -> Decimal | None:
+    """Parse to an exact, finite ``Decimal`` (never NaN/Infinity).
+
+    ``Decimal`` avoids the binary-float rounding that made
+    ``math.isclose(1.0000000005, 1.0)`` accept a real underfill/overfill,
+    and lets every intermediate sum/product be checked for finiteness
+    (``DecimalException`` such as ``Overflow``) before it can propagate.
+    """
+    try:
+        parsed = Decimal(str(value))
+    except (DecimalException, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _positive_decimal(value: object) -> Decimal | None:
+    parsed = _decimal(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _finite_float_from_decimal(value: Decimal | None) -> float | None:
+    if value is None or not value.is_finite():
+        return None
+    try:
+        parsed = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _is_exact_int(value: object, expected: int) -> bool:
+    """True only for the exact ``int`` value, not ``1.0``, ``"1"``, or ``True``.
 
     ``int(value)`` silently coerces all of those (and ``bool`` is itself an
-    ``int`` subclass), which would let type-invalid but numerically-zero
-    counter evidence pass as clean.
+    ``int`` subclass), which would let type-invalid marker/journal counts
+    (e.g. a send_attempt_count of ``1.5`` or ``"1"``) pass as exactly one.
     """
-    return isinstance(value, int) and not isinstance(value, bool) and value == 0
+    return isinstance(value, int) and not isinstance(value, bool) and value == expected
+
+
+def _is_exact_zero_int(value: object) -> bool:
+    return _is_exact_int(value, 0)
 
 
 def _paper_safe(report: dict | None) -> bool:
@@ -181,7 +216,7 @@ def _target_position_quantity(account_report: dict | None, ticker: str) -> float
     normalized = str(ticker or "").strip().upper()
     expected_symbol = "9432" if normalized == "9432.T" else normalized
     expected_currency = "JPY" if normalized == "9432.T" else "USD"
-    total = 0.0
+    total = Decimal("0")
     for row in positions:
         if not isinstance(row, dict):
             continue
@@ -191,11 +226,16 @@ def _target_position_quantity(account_report: dict | None, ticker: str) -> float
             continue
         if str(row.get("currency") or "").strip().upper() != expected_currency:
             continue
-        quantity = _finite(row.get("quantity"))
+        quantity = _decimal(row.get("quantity"))
         if quantity is None:
             return None
-        total += quantity
-    return total
+        try:
+            total += quantity
+        except DecimalException:
+            return None
+        if not total.is_finite():
+            return None
+    return _finite_float_from_decimal(total)
 
 
 def _execution_identity(row: dict) -> tuple:
@@ -223,19 +263,26 @@ def _clean_live_report(
 ) -> bool:
     """Require exact schema/readiness and exact-``False`` transport flags.
 
-    Only the flags a given report type actually defines are checked (e.g.
-    postfill/account reports never define ``cancel_sent``); each one must be
-    the exact boolean ``False`` rather than merely falsy (``None``, ``0``,
-    missing), so a malformed or schema-drifted report cannot be mistaken for
-    proof that no transport occurred.
+    Every flag a given report type's own producer schema defines is required
+    to be the exact boolean ``False`` rather than merely falsy (``None``,
+    ``0``, missing). ``cancel_sent`` is additionally rejected if *present at
+    all*, even on report types (postfill/account) that never define it in
+    their own schema: an otherwise valid, schema-versioned report that
+    nonetheless carries an explicit ``cancel_sent: true`` must not be
+    silently ignored just because that report type's contract doesn't
+    officially require the field.
     """
-    return bool(
-        isinstance(report, dict)
-        and report.get("schema_version") == required_schema_version
-        and report.get("ready") is True
-        and report.get("connection_mode") == "LIVE_READ_ONLY"
-        and all(report.get(flag) is False for flag in required_false_flags)
-    )
+    if not isinstance(report, dict):
+        return False
+    if report.get("schema_version") != required_schema_version:
+        return False
+    if report.get("ready") is not True or report.get("connection_mode") != "LIVE_READ_ONLY":
+        return False
+    if not all(report.get(flag) is False for flag in required_false_flags):
+        return False
+    if "cancel_sent" in report and report.get("cancel_sent") is not False:
+        return False
+    return True
 
 
 def evaluate_live_pilot_completion(
@@ -297,7 +344,7 @@ def evaluate_live_pilot_completion(
             send_journal.get("schema_version") == _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
             and send_journal.get("state") == "POSTFILL_PROVEN"
             and str(send_journal.get("intent_id") or "").strip() == intent
-            and int(send_journal.get("send_attempt_count", 0) or 0) == 1
+            and _is_exact_int(send_journal.get("send_attempt_count"), 1)
             and order_id is not None
             and order_id > 0
             and perm_id is not None
@@ -481,13 +528,13 @@ def evaluate_live_pilot_completion(
                     )
 
             expected_instrument_currency = "JPY" if normalized_ticker == "9432.T" else "USD"
-            total_quantity = 0.0
-            gross = 0.0
+            total_quantity = Decimal("0")
+            gross = Decimal("0")
             currencies: set[str] = set()
             rows_valid = True
             for row in matches:
-                row_qty = _positive(row.get("quantity"))
-                row_price = _positive(row.get("price"))
+                row_qty = _positive_decimal(row.get("quantity"))
+                row_price = _positive_decimal(row.get("price"))
                 currency = str(row.get("currency") or "").strip().upper()
                 if row_qty is None or row_price is None:
                     blockers.append("final Live execution contains invalid quantity or price")
@@ -503,16 +550,20 @@ def evaluate_live_pilot_completion(
                     )
                     rows_valid = False
                 currencies.add(currency)
-                total_quantity += row_qty
-                gross += row_qty * row_price
+                try:
+                    product = row_qty * row_price
+                    if not product.is_finite():
+                        raise DecimalException
+                    total_quantity += row_qty
+                    gross += product
+                    if not total_quantity.is_finite() or not gross.is_finite():
+                        raise DecimalException
+                except DecimalException:
+                    blockers.append("final Live execution aggregate is non-finite")
+                    rows_valid = False
 
-            filled_quantity = total_quantity
-            if not math.isclose(
-                total_quantity,
-                float(normalized_quantity),
-                rel_tol=1e-12,
-                abs_tol=1e-9,
-            ):
+            filled_quantity = _finite_float_from_decimal(total_quantity)
+            if total_quantity != Decimal(normalized_quantity):
                 blockers.append(
                     f"final Live execution total quantity does not equal pilot quantity: {total_quantity} != {normalized_quantity}"
                 )
@@ -520,11 +571,16 @@ def evaluate_live_pilot_completion(
                 blockers.append("final Live execution rows do not share one currency")
             execution_currency = next(iter(currencies)) if len(currencies) == 1 else None
             if rows_valid and total_quantity > 0:
-                execution_price = gross / total_quantity
+                try:
+                    execution_price = _finite_float_from_decimal(gross / total_quantity)
+                except DecimalException:
+                    execution_price = None
+                if execution_price is None:
+                    blockers.append("final Live execution VWAP is non-finite")
 
             commissions = postfill_report.get("commissions")
             commissions = commissions if isinstance(commissions, list) else []
-            commission_total = 0.0
+            commission_total = Decimal("0")
             valid_commission_count = 0
             for execution_row in matches:
                 execution_exec_id = str(execution_row.get("exec_id") or "").strip()
@@ -540,7 +596,7 @@ def evaluate_live_pilot_completion(
                     )
                     continue
                 commission_row = commission_matches[0]
-                parsed_commission = _finite(commission_row.get("commission"))
+                parsed_commission = _decimal(commission_row.get("commission"))
                 observed_currency = str(commission_row.get("currency") or "").strip().upper()
                 if parsed_commission is None:
                     blockers.append(f"final commission for exec_id {execution_exec_id} is non-finite")
@@ -550,13 +606,21 @@ def evaluate_live_pilot_completion(
                         f"final commission currency for exec_id {execution_exec_id} does not match execution currency"
                     )
                     continue
-                commission_total += parsed_commission
+                try:
+                    commission_total += parsed_commission
+                    if not commission_total.is_finite():
+                        raise DecimalException
+                except DecimalException:
+                    blockers.append(f"final commission aggregate is non-finite at exec_id {execution_exec_id}")
+                    continue
                 valid_commission_count += 1
 
             commission_count = valid_commission_count
             if matches and valid_commission_count == len(matches):
-                commission = commission_total
+                commission = _finite_float_from_decimal(commission_total)
                 commission_currency = execution_currency
+                if commission is None:
+                    blockers.append("final commission aggregate cannot be represented finitely")
 
     final_position = _target_position_quantity(final_account_report, normalized_ticker)
     expected_final_position = (
@@ -733,21 +797,50 @@ def audit_live_pilot_completion(
             paper_monitor_safe=False,
             complete=False,
         )
-    return evaluate_live_pilot_completion(
-        intent_id=intent_id,
-        ticker=ticker,
-        side=side,
-        quantity=quantity,
-        expected_account_fingerprint=expected_account_fingerprint,
-        send_journal=journal,
-        send_attempt_marker=attempt_marker,
-        global_send_attempt_marker=global_attempt_marker,
-        postfill_report=postfill,
-        final_account_report=account,
-        final_open_orders_report=open_orders,
-        paper_monitor_report=paper,
-        now=now,
-    )
+    try:
+        return evaluate_live_pilot_completion(
+            intent_id=intent_id,
+            ticker=ticker,
+            side=side,
+            quantity=quantity,
+            expected_account_fingerprint=expected_account_fingerprint,
+            send_journal=journal,
+            send_attempt_marker=attempt_marker,
+            global_send_attempt_marker=global_attempt_marker,
+            postfill_report=postfill,
+            final_account_report=account,
+            final_open_orders_report=open_orders,
+            paper_monitor_report=paper,
+            now=now,
+        )
+    except (DecimalException, ArithmeticError, TypeError, ValueError) as exc:
+        # A malformed numeric value (e.g. an extreme exponent that overflows
+        # during arithmetic) must still produce and persist a fail-closed
+        # BLOCKED result, not abort the audit and risk leaving an older
+        # SUCCESS artifact as the last thing anyone persisted.
+        current = _utc(now)
+        return LivePilotCompletion(
+            status="BLOCKED",
+            checked_at=current.isoformat(timespec="seconds"),
+            blockers=(f"completion evaluation raised on malformed evidence: {exc}",),
+            intent_id=str(intent_id or "").strip(),
+            ticker=str(ticker or "").strip().upper(),
+            side=str(side or "").strip().upper(),
+            quantity=int(quantity),
+            account_fingerprint=str(expected_account_fingerprint or "").strip().lower(),
+            order_id=None,
+            perm_id=None,
+            exec_id=None,
+            execution_price=None,
+            commission=None,
+            commission_currency=None,
+            final_position_quantity=None,
+            final_open_order_count=None,
+            endpoint_port=None,
+            evidence_fresh=False,
+            paper_monitor_safe=False,
+            complete=False,
+        )
 
 
 def persist_live_pilot_completion(

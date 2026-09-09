@@ -952,6 +952,86 @@ def test_summary_journal_requires_current_schema_and_all_five_automatic_flags():
     assert any("POSTFILL_PROVEN" in item for item in close_allowed.blockers)
 
 
+def test_execution_quantity_requires_exact_decimal_equality_not_isclose():
+    """Ported PR #280 finding: math.isclose(1.0000000005, 1.0) would accept a
+
+    real underfill/overfill. Decimal equality must reject even a tiny
+    discrepancy.
+    """
+    postfill = _postfill()
+    postfill["executions"][0]["quantity"] = 100.0000000005
+    result = _evaluate(postfill_report=postfill)
+    assert result.complete is False
+    assert any("total quantity" in item for item in result.blockers)
+
+
+def test_non_finite_aggregate_from_extreme_values_fails_closed_not_crashes():
+    """Ported PR #280 finding: an execution price with an extreme exponent
+
+    can overflow during Decimal multiplication; this must produce a
+    blocked result, not raise uncaught.
+    """
+    postfill = _postfill()
+    postfill["executions"][0]["price"] = "1e9999"
+    result = _evaluate(postfill_report=postfill)
+    assert result.complete is False
+    assert any("non-finite" in item for item in result.blockers)
+
+
+def test_audit_live_pilot_completion_catches_decimal_exceptions_and_blocks(monkeypatch):
+    """If evaluate_live_pilot_completion somehow still raises a
+
+    DecimalException/ArithmeticError on malformed evidence, the wrapper must
+    persist a BLOCKED result rather than let the audit abort uncaught.
+    """
+    from decimal import DivisionByZero
+
+    def _raise(**kwargs):
+        raise DivisionByZero("simulated overflow deep in aggregation")
+
+    monkeypatch.setattr(subject, "evaluate_live_pilot_completion", _raise)
+    result = subject.audit_live_pilot_completion(
+        intent_id=INTENT,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        expected_account_fingerprint=FINGERPRINT,
+        journal_dir=Path("results/live_pilot_send_journal"),
+        now=NOW,
+    )
+    assert result.complete is False
+    assert result.status == "BLOCKED"
+    assert any("malformed evidence" in item for item in result.blockers)
+
+
+def test_send_attempt_count_requires_exact_non_boolean_int():
+    """Ported PR #280 finding: a coerced send_attempt_count (float, string,
+
+    or boolean) must not satisfy the exact-one requirement.
+    """
+    for bad_count in (1.0, "1", True):
+        result = _evaluate(send_journal=_journal(send_attempt_count=bad_count))
+        assert result.complete is False, bad_count
+        assert any("POSTFILL_PROVEN" in item for item in result.blockers), bad_count
+
+
+def test_cancel_sent_true_is_rejected_even_on_reports_that_do_not_require_it():
+    """Ported PR #280 finding: postfill/account reports never define
+
+    cancel_sent in their own schema, but an explicit cancel_sent: true must
+    still be rejected rather than silently ignored.
+    """
+    postfill_with_cancel = _postfill(cancel_sent=True)
+    result = _evaluate(postfill_report=postfill_with_cancel)
+    assert result.complete is False
+    assert any("post-fill" in item and "not clean" in item for item in result.blockers)
+
+    account_with_cancel = _account(cancel_sent=True)
+    result = _evaluate(final_account_report=account_with_cancel)
+    assert result.complete is False
+    assert any("account" in item and "not clean" in item for item in result.blockers)
+
+
 def test_module_contains_no_broker_transport():
     source = Path(
         "src/ai_asset_platform/execution/live_pilot_completion.py"
