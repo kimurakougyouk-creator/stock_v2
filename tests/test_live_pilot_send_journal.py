@@ -206,6 +206,63 @@ def test_global_marker_is_canonical_and_ignores_a_different_journal_dir(tmp_path
         record_send_attempt(other_intent, directory=second_dir, now=NOW + timedelta(seconds=3))
 
 
+def test_two_source_checkouts_resolve_the_same_machine_state_marker(monkeypatch, tmp_path: Path):
+    state_home = tmp_path / "operator-state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
+    monkeypatch.setattr(journal, "__file__", str(tmp_path / "checkout-a" / "module.py"))
+    marker_from_a = journal._global_attempt_path(tmp_path / "journal-a")
+    monkeypatch.setattr(journal, "__file__", str(tmp_path / "checkout-b" / "module.py"))
+    marker_from_b = journal._global_attempt_path(tmp_path / "journal-b")
+
+    expected = state_home / "ai_asset_platform" / "live_pilot" / "GLOBAL_SEND_ATTEMPT.lock"
+    assert marker_from_a == expected
+    assert marker_from_b == expected
+
+
+def test_marker_from_checkout_a_blocks_checkout_b_and_restart(monkeypatch, tmp_path: Path):
+    state_home = tmp_path / "operator-state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
+    first_dir = tmp_path / "checkout-a" / "journals"
+    second_dir = tmp_path / "checkout-b" / "journals"
+    _create(first_dir)
+    record_send_attempt(INTENT, directory=first_dir, now=NOW + timedelta(seconds=1))
+
+    other_intent = "live-pilot:9432.T:BUY:100:checkout-b"
+    create_consumed_authorization_journal(
+        intent_id=other_intent,
+        nonce="nonce-checkout-b",
+        consumed_authorization=_consumed(intent_id=other_intent, nonce="nonce-checkout-b"),
+        directory=second_dir,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert send_attempt_permitted(other_intent, directory=second_dir) is False
+    assert send_attempt_permitted(INTENT, directory=first_dir) is False
+    with pytest.raises(PermissionError, match="pilot campaign"):
+        record_send_attempt(other_intent, directory=second_dir, now=NOW + timedelta(seconds=3))
+
+
+def test_unresolvable_or_unusable_machine_state_fails_closed(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+    missing_home_dir = tmp_path / "missing-home-journal"
+    _create(missing_home_dir)
+    assert send_attempt_permitted(INTENT, directory=missing_home_dir) is False
+    with pytest.raises(OSError, match="cannot be resolved"):
+        record_send_attempt(INTENT, directory=missing_home_dir, now=NOW)
+
+    unusable = tmp_path / "not-a-directory"
+    unusable.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("XDG_STATE_HOME", str(unusable))
+    other_dir = tmp_path / "unusable-state-journal"
+    _create(other_dir)
+    assert send_attempt_permitted(INTENT, directory=other_dir) is False
+    with pytest.raises(OSError):
+        record_send_attempt(INTENT, directory=other_dir, now=NOW)
+
+
 def test_mkdir_durable_fsyncs_every_newly_created_ancestor(tmp_path: Path, monkeypatch):
     """Codex P1 (PR #280 finding, ported): the very first pilot run creates
 

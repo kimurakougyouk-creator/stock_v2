@@ -12,9 +12,11 @@ or conflicting evidence fails closed.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, DecimalException
+import fcntl
 import json
 import math
 import os
@@ -485,6 +487,14 @@ def evaluate_live_pilot_completion(
         executions = postfill_report.get("executions")
         executions = executions if isinstance(executions, list) else []
         matches: list[dict] = []
+        expected_identity = (
+            order_id,
+            perm_id,
+            expected_symbol,
+            "STK",
+            normalized_side,
+            fingerprint,
+        )
         for row in executions:
             if not isinstance(row, dict):
                 continue
@@ -493,6 +503,15 @@ def evaluate_live_pilot_completion(
                 row_perm = int(row.get("perm_id"))
             except (TypeError, ValueError):
                 continue
+            if (
+                row_order == order_id
+                and row_perm == perm_id
+                and _execution_identity(row) != expected_identity
+            ):
+                blockers.append(
+                    "final Live execution carrying the reconciled order identity "
+                    "conflicts with the expected execution identity"
+                )
             if (
                 row_order == order_id
                 and row_perm == perm_id
@@ -756,6 +775,31 @@ def _durable_write_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
     _fsync_parent_dir(path)
 
+@contextmanager
+def _completion_publication_lock(*, report_path: Path, alert_path: Path):
+    """Serialize publication for every directory containing either artifact."""
+    descriptors: list[int] = []
+    directories = sorted(
+        {report_path.parent.resolve(), alert_path.parent.resolve()}, key=str
+    )
+    try:
+        for directory in directories:
+            _mkdir_durable(directory)
+            descriptor = os.open(
+                directory / ".live_pilot_completion.lock",
+                os.O_RDWR | os.O_CREAT,
+                0o600,
+            )
+            descriptors.append(descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
 
 def audit_live_pilot_completion(
     *,
@@ -874,46 +918,49 @@ def persist_live_pilot_completion(
     def _write_alert(payload: dict) -> None:
         _durable_write_json(alert_path, payload)
 
-    base_alert = {
-        "schema_version": 1,
-        "checked_at": result.checked_at,
-        "status": result.status,
-        "intent_id": result.intent_id,
-        "blockers": list(result.blockers),
-        "delivery": "LOCAL_DURABLE_OPERATOR_ALERT",
-        "external_notification_claimed": False,
-    }
-    _write_alert(
-        {
-            **base_alert,
-            "status": (
-                "PENDING_REPORT_PERSISTENCE" if result.complete else result.status
-            ),
-            "severity": "CRITICAL",
-            "message": (
-                "FIRST LIVE PILOT COMPLETION PENDING REPORT PERSISTENCE"
-                if result.complete
-                else "FIRST LIVE PILOT NOT COMPLETE - DO NOT RETRY AUTOMATICALLY"
-            ),
+    with _completion_publication_lock(
+        report_path=report_path, alert_path=alert_path
+    ):
+        base_alert = {
+            "schema_version": 1,
+            "checked_at": result.checked_at,
+            "status": result.status,
+            "intent_id": result.intent_id,
+            "blockers": list(result.blockers),
+            "delivery": "LOCAL_DURABLE_OPERATOR_ALERT",
+            "external_notification_claimed": False,
         }
-    )
-
-    payload = {
-        "schema_version": REPORT_SCHEMA_VERSION,
-        **asdict(result),
-        "interpretation": (
-            "COMPLETE means every matching execution and per-exec commission reconciles to the exact "
-            "pilot quantity, with final position, zero final Live open orders, matching account/endpoint, "
-            "and clean Paper safety evidence."
-        ),
-    }
-    _durable_write_json(report_path, payload)
-
-    if result.complete:
         _write_alert(
             {
                 **base_alert,
-                "severity": "SUCCESS",
-                "message": "FIRST LIVE PILOT COMPLETION PROVEN",
+                "status": (
+                    "PENDING_REPORT_PERSISTENCE" if result.complete else result.status
+                ),
+                "severity": "CRITICAL",
+                "message": (
+                    "FIRST LIVE PILOT COMPLETION PENDING REPORT PERSISTENCE"
+                    if result.complete
+                    else "FIRST LIVE PILOT NOT COMPLETE - DO NOT RETRY AUTOMATICALLY"
+                ),
             }
         )
+
+        payload = {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            **asdict(result),
+            "interpretation": (
+                "COMPLETE means every matching execution and per-exec commission reconciles to the exact "
+                "pilot quantity, with final position, zero final Live open orders, matching account/endpoint, "
+                "and clean Paper safety evidence."
+            ),
+        }
+        _durable_write_json(report_path, payload)
+
+        if result.complete:
+            _write_alert(
+                {
+                    **base_alert,
+                    "severity": "SUCCESS",
+                    "message": "FIRST LIVE PILOT COMPLETION PROVEN",
+                }
+            )

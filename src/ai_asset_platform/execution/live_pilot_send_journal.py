@@ -23,14 +23,7 @@ DEFAULT_JOURNAL_DIR = Path("results/live_pilot_send_journal")
 REPORT_SCHEMA_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 _GLOBAL_ATTEMPT_FILENAME = "GLOBAL_SEND_ATTEMPT.lock"
-# Anchored to this source file's own location (stable for an editable install
-# of this repository) rather than to any caller-supplied journal_dir or the
-# process's current working directory. A restart from a different cwd, or a
-# caller using a non-default journal_dir, must still see the same singleton
-# marker -- otherwise it would see no prior attempt and could create a second
-# reachable placeOrder call. This is intentionally independent of the
-# per-intent journal storage location, which remains configurable.
-_CANONICAL_JOURNAL_ROOT = Path(__file__).resolve().parents[3] / "results" / "live_pilot_send_journal"
+_MACHINE_STATE_SUBDIR = Path("ai_asset_platform") / "live_pilot"
 
 
 def _is_exact_int(value: object, expected: int) -> bool:
@@ -69,20 +62,32 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.attempted.json"
 
 
-def _canonical_journal_root() -> Path:
-    """Return the one true location for the pilot-wide attempt marker.
+def _resolve_machine_state_root() -> Path:
+    """Resolve checkout-independent durable operator state for the campaign marker."""
+    configured = os.environ.get("XDG_STATE_HOME")
+    if configured:
+        state_home = Path(configured)
+    else:
+        home = os.environ.get("HOME")
+        if not home:
+            raise OSError("durable operator state cannot be resolved: HOME is unset")
+        state_home = Path(home) / ".local" / "state"
+    if not state_home.is_absolute():
+        raise OSError("durable operator state must be an absolute path")
+    return state_home / _MACHINE_STATE_SUBDIR
 
-    Tests may monkeypatch this function to point at an isolated directory;
-    production code must never override it -- doing so would defeat the
-    entire purpose of a canonical, caller-independent marker location.
-    """
-    return _CANONICAL_JOURNAL_ROOT
+
+def _canonical_journal_root() -> Path:
+    """Return the one true machine/operator-state location for the campaign marker."""
+    return _resolve_machine_state_root()
 
 
 def _global_attempt_path(directory: Path) -> Path:
-    # Deliberately ignores `directory`: see _CANONICAL_JOURNAL_ROOT above.
+    # Deliberately ignores caller storage, cwd, checkout path, and intent_id.
     del directory
-    return _canonical_journal_root() / _GLOBAL_ATTEMPT_FILENAME
+    root = _canonical_journal_root()
+    _mkdir_durable(root)
+    return root / _GLOBAL_ATTEMPT_FILENAME
 
 
 def _fsync_parent_dir(path: Path) -> None:

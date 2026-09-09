@@ -751,6 +751,41 @@ def test_conflicting_exec_id_outside_matched_set_blocks():
     assert any("conflicting execution identity" in item for item in result.blockers)
 
 
+def _completion_with_conflicting_target_order_row(field: str, value: str):
+    postfill = _postfill()
+    conflicting_row = dict(postfill["executions"][0])
+    conflicting_row["exec_id"] = "0001.abc.conflict"
+    conflicting_row[field] = value
+    postfill["executions"].append(conflicting_row)
+    return _evaluate(postfill_report=postfill)
+
+
+def test_target_order_row_with_conflicting_symbol_blocks():
+    result = _completion_with_conflicting_target_order_row("symbol", "AAPL")
+    assert result.complete is False
+    assert any("reconciled order identity" in item for item in result.blockers)
+
+
+def test_target_order_row_with_conflicting_side_blocks():
+    result = _completion_with_conflicting_target_order_row("side", "SELL")
+    assert result.complete is False
+    assert any("reconciled order identity" in item for item in result.blockers)
+
+
+def test_target_order_row_with_conflicting_account_fingerprint_blocks():
+    result = _completion_with_conflicting_target_order_row(
+        "account_fingerprint", "b" * 64
+    )
+    assert result.complete is False
+    assert any("reconciled order identity" in item for item in result.blockers)
+
+
+def test_target_order_row_with_conflicting_sec_type_blocks():
+    result = _completion_with_conflicting_target_order_row("sec_type", "OPT")
+    assert result.complete is False
+    assert any("reconciled order identity" in item for item in result.blockers)
+
+
 def test_postfill_wrong_schema_version_blocks():
     """Codex P1: a fresh v1, missing-version, or arbitrary-version post-fill
 

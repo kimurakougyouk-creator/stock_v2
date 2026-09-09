@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -88,3 +89,52 @@ def test_blocked_result_remains_non_complete(tmp_path: Path) -> None:
     assert alert_payload["status"] == "BLOCKED"
     assert alert_payload["severity"] == "CRITICAL"
     assert "DO NOT RETRY AUTOMATICALLY" in alert_payload["message"]
+
+def test_overlapping_publications_leave_a_consistent_report_and_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = tmp_path / "completion.json"
+    alert = tmp_path / "alert.json"
+    complete_report_written = threading.Event()
+    release_complete = threading.Event()
+    blocked_entered_publication = threading.Event()
+    original_write = subject._durable_write_json
+
+    def interleaving_write(path: Path, payload: dict) -> None:
+        original_write(path, payload)
+        if path == report and payload.get("status") == "COMPLETE":
+            complete_report_written.set()
+            assert release_complete.wait(timeout=5)
+        if path == alert and payload.get("status") == "BLOCKED":
+            blocked_entered_publication.set()
+
+    monkeypatch.setattr(subject, "_durable_write_json", interleaving_write)
+
+    complete_thread = threading.Thread(
+        target=subject.persist_live_pilot_completion,
+        args=(_result(complete=True),),
+        kwargs={"report_path": report, "alert_path": alert},
+    )
+    blocked_thread = threading.Thread(
+        target=subject.persist_live_pilot_completion,
+        args=(_result(complete=False),),
+        kwargs={"report_path": report, "alert_path": alert},
+    )
+    complete_thread.start()
+    assert complete_report_written.wait(timeout=5)
+    blocked_thread.start()
+
+    assert not blocked_entered_publication.wait(timeout=0.2)
+    release_complete.set()
+    complete_thread.join(timeout=5)
+    blocked_thread.join(timeout=5)
+    assert not complete_thread.is_alive()
+    assert not blocked_thread.is_alive()
+
+    report_payload = json.loads(report.read_text(encoding="utf-8"))
+    alert_payload = json.loads(alert.read_text(encoding="utf-8"))
+    assert blocked_entered_publication.is_set()
+    assert report_payload["status"] == "BLOCKED"
+    assert report_payload["complete"] is False
+    assert alert_payload["status"] == "BLOCKED"
+    assert alert_payload["severity"] == "CRITICAL"
