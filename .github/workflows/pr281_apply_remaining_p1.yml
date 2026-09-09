@@ -1,0 +1,170 @@
+name: PR281 apply remaining P1 fixes
+
+on:
+  push:
+    branches:
+      - fix/codex-p1-live-pilot-safety-20260908
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Verify exact parent head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "5ed1c8704bce8ed0e3821f55d5a83cd068d161f4"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ibapi==9.81.1.post1
+
+      - name: Apply three exact-head fail-closed P1 corrections
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          completion = Path("src/ai_asset_platform/execution/live_pilot_completion.py")
+          completion_tests = Path("tests/test_live_pilot_completion.py")
+          pending_tests = Path("tests/test_live_pilot_completion_pending_alert.py")
+          journal = Path("src/ai_asset_platform/execution/live_pilot_send_journal.py")
+          journal_tests = Path("tests/test_live_pilot_send_journal.py")
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          # P1-A: completion publication must be serialized across processes/threads.
+          text = completion.read_text(encoding="utf-8")
+          text = replace_once(
+              text,
+              "from dataclasses import asdict, dataclass\nfrom datetime import datetime, timezone\nfrom decimal import Decimal, DecimalException\nimport json\n",
+              "from contextlib import contextmanager\nfrom dataclasses import asdict, dataclass\nfrom datetime import datetime, timezone\nfrom decimal import Decimal, DecimalException\nimport fcntl\nimport json\n",
+              "completion imports",
+          )
+
+          lock_code = '''\n\n@contextmanager\ndef _completion_publication_lock(*, report_path: Path, alert_path: Path):\n    \"\"\"Serialize publication for every directory containing either artifact.\"\"\"\n    descriptors: list[int] = []\n    directories = sorted(\n        {report_path.parent.resolve(), alert_path.parent.resolve()}, key=str\n    )\n    try:\n        for directory in directories:\n            _mkdir_durable(directory)\n            descriptor = os.open(\n                directory / \".live_pilot_completion.lock\",\n                os.O_RDWR | os.O_CREAT,\n                0o600,\n            )\n            descriptors.append(descriptor)\n            fcntl.flock(descriptor, fcntl.LOCK_EX)\n        yield\n    finally:\n        for descriptor in reversed(descriptors):\n            try:\n                fcntl.flock(descriptor, fcntl.LOCK_UN)\n            finally:\n                os.close(descriptor)\n'''
+          text = replace_once(
+              text,
+              "    os.replace(temporary, path)\n    _fsync_parent_dir(path)\n\n\ndef audit_live_pilot_completion(",
+              "    os.replace(temporary, path)\n    _fsync_parent_dir(path)" + lock_code + "\n\ndef audit_live_pilot_completion(",
+              "completion publication lock insertion",
+          )
+
+          # P1-B: every execution row carrying target order_id/perm_id must agree
+          # with the expected broker-order identity even when exec_id differs.
+          text = replace_once(
+              text,
+              "        matches: list[dict] = []\n        for row in executions:\n",
+              "        matches: list[dict] = []\n        expected_identity = (\n            order_id,\n            perm_id,\n            expected_symbol,\n            \"STK\",\n            normalized_side,\n            fingerprint,\n        )\n        for row in executions:\n",
+              "expected execution identity",
+          )
+          text = replace_once(
+              text,
+              "            except (TypeError, ValueError):\n                continue\n            if (\n                row_order == order_id\n",
+              "            except (TypeError, ValueError):\n                continue\n            if (\n                row_order == order_id\n                and row_perm == perm_id\n                and _execution_identity(row) != expected_identity\n            ):\n                blockers.append(\n                    \"final Live execution carrying the reconciled order identity \"\n                    \"conflicts with the expected execution identity\"\n                )\n            if (\n                row_order == order_id\n",
+              "target broker-order identity conflict gate",
+          )
+
+          # Hold the lock across phase-1 alert -> durable report -> phase-3 success alert.
+          marker = "    base_alert = {\n"
+          if text.count(marker) != 1:
+              raise RuntimeError(f"completion transaction marker count={text.count(marker)}")
+          prefix, suffix = text.split(marker, 1)
+          tail = marker + suffix
+          indented = "".join(("    " + line if line.strip() else line) for line in tail.splitlines(True))
+          text = prefix + "    with _completion_publication_lock(\n        report_path=report_path, alert_path=alert_path\n    ):\n" + indented
+          completion.write_text(text, encoding="utf-8")
+
+          # Regression: contradictory target-order rows with distinct exec_ids fail closed.
+          text = completion_tests.read_text(encoding="utf-8")
+          insertion = '''\n\ndef _completion_with_conflicting_target_order_row(field: str, value: str):\n    postfill = _postfill()\n    conflicting_row = dict(postfill[\"executions\"][0])\n    conflicting_row[\"exec_id\"] = \"0001.abc.conflict\"\n    conflicting_row[field] = value\n    postfill[\"executions\"].append(conflicting_row)\n    return _evaluate(postfill_report=postfill)\n\n\ndef test_target_order_row_with_conflicting_symbol_blocks():\n    result = _completion_with_conflicting_target_order_row(\"symbol\", \"AAPL\")\n    assert result.complete is False\n    assert any(\"reconciled order identity\" in item for item in result.blockers)\n\n\ndef test_target_order_row_with_conflicting_side_blocks():\n    result = _completion_with_conflicting_target_order_row(\"side\", \"SELL\")\n    assert result.complete is False\n    assert any(\"reconciled order identity\" in item for item in result.blockers)\n\n\ndef test_target_order_row_with_conflicting_account_fingerprint_blocks():\n    result = _completion_with_conflicting_target_order_row(\n        \"account_fingerprint\", \"b\" * 64\n    )\n    assert result.complete is False\n    assert any(\"reconciled order identity\" in item for item in result.blockers)\n\n\ndef test_target_order_row_with_conflicting_sec_type_blocks():\n    result = _completion_with_conflicting_target_order_row(\"sec_type\", \"OPT\")\n    assert result.complete is False\n    assert any(\"reconciled order identity\" in item for item in result.blockers)\n'''
+          anchor = "\n\ndef test_postfill_wrong_schema_version_blocks():\n"
+          text = replace_once(text, anchor, insertion + anchor, "target-order regression insertion")
+          completion_tests.write_text(text, encoding="utf-8")
+
+          # Regression: overlapping COMPLETE/BLOCKED publication cannot interleave.
+          text = pending_tests.read_text(encoding="utf-8")
+          text = replace_once(text, "import json\nfrom pathlib import Path\n", "import json\nfrom pathlib import Path\nimport threading\n", "threading import")
+          concurrency_test = '''\n\ndef test_overlapping_publications_leave_a_consistent_report_and_alert(\n    tmp_path: Path, monkeypatch: pytest.MonkeyPatch\n) -> None:\n    report = tmp_path / \"completion.json\"\n    alert = tmp_path / \"alert.json\"\n    complete_report_written = threading.Event()\n    release_complete = threading.Event()\n    blocked_entered_publication = threading.Event()\n    original_write = subject._durable_write_json\n\n    def interleaving_write(path: Path, payload: dict) -> None:\n        original_write(path, payload)\n        if path == report and payload.get(\"status\") == \"COMPLETE\":\n            complete_report_written.set()\n            assert release_complete.wait(timeout=5)\n        if path == alert and payload.get(\"status\") == \"BLOCKED\":\n            blocked_entered_publication.set()\n\n    monkeypatch.setattr(subject, \"_durable_write_json\", interleaving_write)\n\n    complete_thread = threading.Thread(\n        target=subject.persist_live_pilot_completion,\n        args=(_result(complete=True),),\n        kwargs={\"report_path\": report, \"alert_path\": alert},\n    )\n    blocked_thread = threading.Thread(\n        target=subject.persist_live_pilot_completion,\n        args=(_result(complete=False),),\n        kwargs={\"report_path\": report, \"alert_path\": alert},\n    )\n    complete_thread.start()\n    assert complete_report_written.wait(timeout=5)\n    blocked_thread.start()\n\n    assert not blocked_entered_publication.wait(timeout=0.2)\n    release_complete.set()\n    complete_thread.join(timeout=5)\n    blocked_thread.join(timeout=5)\n    assert not complete_thread.is_alive()\n    assert not blocked_thread.is_alive()\n\n    report_payload = json.loads(report.read_text(encoding=\"utf-8\"))\n    alert_payload = json.loads(alert.read_text(encoding=\"utf-8\"))\n    assert blocked_entered_publication.is_set()\n    assert report_payload[\"status\"] == \"BLOCKED\"\n    assert report_payload[\"complete\"] is False\n    assert alert_payload[\"status\"] == \"BLOCKED\"\n    assert alert_payload[\"severity\"] == \"CRITICAL\"\n'''
+          if concurrency_test.strip() in text:
+              raise RuntimeError("concurrency regression already present")
+          text = text.rstrip() + concurrency_test + "\n"
+          pending_tests.write_text(text, encoding="utf-8")
+
+          # P1-C: campaign-wide marker must survive checkout replacement.
+          text = journal.read_text(encoding="utf-8")
+          old_constant = '''_GLOBAL_ATTEMPT_FILENAME = \"GLOBAL_SEND_ATTEMPT.lock\"\n# Anchored to this source file's own location (stable for an editable install\n# of this repository) rather than to any caller-supplied journal_dir or the\n# process's current working directory. A restart from a different cwd, or a\n# caller using a non-default journal_dir, must still see the same singleton\n# marker -- otherwise it would see no prior attempt and could create a second\n# reachable placeOrder call. This is intentionally independent of the\n# per-intent journal storage location, which remains configurable.\n_CANONICAL_JOURNAL_ROOT = Path(__file__).resolve().parents[3] / \"results\" / \"live_pilot_send_journal\"\n'''
+          new_constant = '''_GLOBAL_ATTEMPT_FILENAME = \"GLOBAL_SEND_ATTEMPT.lock\"\n_MACHINE_STATE_SUBDIR = Path(\"ai_asset_platform\") / \"live_pilot\"\n'''
+          text = replace_once(text, old_constant, new_constant, "checkout-local global marker constant")
+
+          old_resolver = '''def _canonical_journal_root() -> Path:\n    \"\"\"Return the one true location for the pilot-wide attempt marker.\n\n    Tests may monkeypatch this function to point at an isolated directory;\n    production code must never override it -- doing so would defeat the\n    entire purpose of a canonical, caller-independent marker location.\n    \"\"\"\n    return _CANONICAL_JOURNAL_ROOT\n\n\ndef _global_attempt_path(directory: Path) -> Path:\n    # Deliberately ignores `directory`: see _CANONICAL_JOURNAL_ROOT above.\n    del directory\n    return _canonical_journal_root() / _GLOBAL_ATTEMPT_FILENAME\n'''
+          new_resolver = '''def _resolve_machine_state_root() -> Path:\n    \"\"\"Resolve checkout-independent durable operator state for the campaign marker.\"\"\"\n    configured = os.environ.get(\"XDG_STATE_HOME\")\n    if configured:\n        state_home = Path(configured)\n    else:\n        home = os.environ.get(\"HOME\")\n        if not home:\n            raise OSError(\"durable operator state cannot be resolved: HOME is unset\")\n        state_home = Path(home) / \".local\" / \"state\"\n    if not state_home.is_absolute():\n        raise OSError(\"durable operator state must be an absolute path\")\n    return state_home / _MACHINE_STATE_SUBDIR\n\n\ndef _canonical_journal_root() -> Path:\n    \"\"\"Return the one true machine/operator-state location for the campaign marker.\"\"\"\n    return _resolve_machine_state_root()\n\n\ndef _global_attempt_path(directory: Path) -> Path:\n    # Deliberately ignores caller storage, cwd, checkout path, and intent_id.\n    del directory\n    root = _canonical_journal_root()\n    _mkdir_durable(root)\n    return root / _GLOBAL_ATTEMPT_FILENAME\n'''
+          text = replace_once(text, old_resolver, new_resolver, "machine-state global marker resolver")
+          journal.write_text(text, encoding="utf-8")
+
+          # Regression: different checkouts/journal_dirs cannot bypass global marker;
+          # missing/unusable operator state fails closed.
+          text = journal_tests.read_text(encoding="utf-8")
+          journal_regressions = '''\n\ndef test_two_source_checkouts_resolve_the_same_machine_state_marker(monkeypatch, tmp_path: Path):\n    state_home = tmp_path / \"operator-state\"\n    monkeypatch.setenv(\"XDG_STATE_HOME\", str(state_home))\n    monkeypatch.setattr(journal, \"_canonical_journal_root\", journal._resolve_machine_state_root)\n    monkeypatch.setattr(journal, \"__file__\", str(tmp_path / \"checkout-a\" / \"module.py\"))\n    marker_from_a = journal._global_attempt_path(tmp_path / \"journal-a\")\n    monkeypatch.setattr(journal, \"__file__\", str(tmp_path / \"checkout-b\" / \"module.py\"))\n    marker_from_b = journal._global_attempt_path(tmp_path / \"journal-b\")\n\n    expected = state_home / \"ai_asset_platform\" / \"live_pilot\" / \"GLOBAL_SEND_ATTEMPT.lock\"\n    assert marker_from_a == expected\n    assert marker_from_b == expected\n\n\ndef test_marker_from_checkout_a_blocks_checkout_b_and_restart(monkeypatch, tmp_path: Path):\n    state_home = tmp_path / \"operator-state\"\n    monkeypatch.setenv(\"XDG_STATE_HOME\", str(state_home))\n    monkeypatch.setattr(journal, \"_canonical_journal_root\", journal._resolve_machine_state_root)\n    first_dir = tmp_path / \"checkout-a\" / \"journals\"\n    second_dir = tmp_path / \"checkout-b\" / \"journals\"\n    _create(first_dir)\n    record_send_attempt(INTENT, directory=first_dir, now=NOW + timedelta(seconds=1))\n\n    other_intent = \"live-pilot:9432.T:BUY:100:checkout-b\"\n    create_consumed_authorization_journal(\n        intent_id=other_intent,\n        nonce=\"nonce-checkout-b\",\n        consumed_authorization=_consumed(intent_id=other_intent, nonce=\"nonce-checkout-b\"),\n        directory=second_dir,\n        now=NOW + timedelta(seconds=2),\n    )\n    assert send_attempt_permitted(other_intent, directory=second_dir) is False\n    assert send_attempt_permitted(INTENT, directory=first_dir) is False\n    with pytest.raises(PermissionError, match=\"pilot campaign\"):\n        record_send_attempt(other_intent, directory=second_dir, now=NOW + timedelta(seconds=3))\n\n\ndef test_unresolvable_or_unusable_machine_state_fails_closed(monkeypatch, tmp_path: Path):\n    monkeypatch.setattr(journal, \"_canonical_journal_root\", journal._resolve_machine_state_root)\n    monkeypatch.delenv(\"XDG_STATE_HOME\", raising=False)\n    monkeypatch.delenv(\"HOME\", raising=False)\n    missing_home_dir = tmp_path / \"missing-home-journal\"\n    _create(missing_home_dir)\n    assert send_attempt_permitted(INTENT, directory=missing_home_dir) is False\n    with pytest.raises(OSError, match=\"cannot be resolved\"):\n        record_send_attempt(INTENT, directory=missing_home_dir, now=NOW)\n\n    unusable = tmp_path / \"not-a-directory\"\n    unusable.write_text(\"occupied\", encoding=\"utf-8\")\n    monkeypatch.setenv(\"XDG_STATE_HOME\", str(unusable))\n    other_dir = tmp_path / \"unusable-state-journal\"\n    _create(other_dir)\n    assert send_attempt_permitted(INTENT, directory=other_dir) is False\n    with pytest.raises(OSError):\n        record_send_attempt(INTENT, directory=other_dir, now=NOW)\n'''
+          anchor = "\n\ndef test_mkdir_durable_fsyncs_every_newly_created_ancestor(tmp_path: Path, monkeypatch):\n"
+          text = replace_once(text, anchor, journal_regressions + anchor, "machine-state regression insertion")
+          journal_tests.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Static checks
+        run: |
+          git diff --check
+          python -m py_compile \
+            src/ai_asset_platform/execution/live_pilot_completion.py \
+            src/ai_asset_platform/execution/live_pilot_send_journal.py \
+            tests/test_live_pilot_completion.py \
+            tests/test_live_pilot_completion_pending_alert.py \
+            tests/test_live_pilot_send_journal.py
+          python scripts/check_secrets.py
+
+      - name: Run targeted regression tests
+        run: |
+          pytest -q \
+            tests/test_live_pilot_completion.py \
+            tests/test_live_pilot_completion_pending_alert.py \
+            tests/test_live_pilot_send_journal.py
+
+      - name: Run full pytest
+        run: pytest -q
+
+      - name: Commit tested corrections to the same PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "chatgpt-codex-connector"
+          git config user.email "14957082+chatgpt-codex-connector@users.noreply.github.com"
+          git add \
+            src/ai_asset_platform/execution/live_pilot_completion.py \
+            src/ai_asset_platform/execution/live_pilot_send_journal.py \
+            tests/test_live_pilot_completion.py \
+            tests/test_live_pilot_completion_pending_alert.py \
+            tests/test_live_pilot_send_journal.py
+          git diff --cached --check
+          git commit -m "Close remaining exact-head Live pilot P1 findings"
+          git push origin HEAD:fix/codex-p1-live-pilot-safety-20260908
