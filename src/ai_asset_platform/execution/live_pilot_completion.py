@@ -634,6 +634,34 @@ def _write_full(descriptor: int, data: bytes) -> None:
         written += count
 
 
+def _fsync_parent_dir(path: Path) -> None:
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _mkdir_durable(directory: Path) -> None:
+    """Create ``directory`` and any missing parents, durably.
+
+    ``Path.mkdir(parents=True)`` alone does not guarantee the new directory
+    entries survive a crash immediately after this call returns; each newly
+    created directory's own parent must be fsynced too.
+    """
+    to_create: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        to_create.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(to_create):
+        _fsync_parent_dir(created)
+
+
 def _durable_write_json(path: Path, payload: dict) -> None:
     """Write JSON via fsync'd temp-file-then-rename, then fsync the directory.
 
@@ -644,7 +672,7 @@ def _durable_write_json(path: Path, payload: dict) -> None:
     in this order (e.g. an invalidated alert, then a report) end up
     inconsistently ordered after a crash.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     temporary = path.with_suffix(path.suffix + ".tmp")
     encoded = (
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -656,11 +684,7 @@ def _durable_write_json(path: Path, payload: dict) -> None:
     finally:
         os.close(descriptor)
     os.replace(temporary, path)
-    directory_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    _fsync_parent_dir(path)
 
 
 def audit_live_pilot_completion(

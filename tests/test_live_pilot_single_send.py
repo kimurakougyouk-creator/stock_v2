@@ -203,7 +203,7 @@ def _send(monkeypatch, client: FakeClient, **overrides):
         final_confirmation=subject.FINAL_SEND_CONFIRMATION_VALUE,
         repository_root=Path("."),
         timeout_seconds=0.01,
-        now=NOW,
+        clock=lambda: NOW,
         client_factory=lambda: client,
     )
     args.update(overrides)
@@ -442,7 +442,7 @@ def test_final_freshness_check_rereads_the_clock_not_a_fixed_now(monkeypatch):
         return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
 
     with pytest.raises(PermissionError, match="freshness window"):
-        _send(monkeypatch, client, now=advancing_clock)
+        _send(monkeypatch, client, clock=advancing_clock)
     assert calls["count"] >= 2
     assert client.place_calls == []
     assert events == []
@@ -467,7 +467,7 @@ def test_stale_evidence_after_durable_attempt_recording_blocks_transport(monkeyp
             return NOW
         return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
 
-    result = _send(monkeypatch, client, now=advancing_clock)
+    result = _send(monkeypatch, client, clock=advancing_clock)
 
     assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
     assert result.sent is False
@@ -508,7 +508,7 @@ def test_freshness_and_expiry_rechecked_after_the_final_stop_check(monkeypatch):
             return NOW
         return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
 
-    result = _send(monkeypatch, client, now=advancing_clock)
+    result = _send(monkeypatch, client, clock=advancing_clock)
 
     assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
     assert client.place_calls == []
@@ -537,7 +537,7 @@ def test_expired_authorization_after_durable_attempt_recording_blocks_transport(
         # 30-second readiness/preflight freshness window.
         return NOW + timedelta(seconds=10)
 
-    result = _send(monkeypatch, client, now=advancing_clock)
+    result = _send(monkeypatch, client, clock=advancing_clock)
 
     assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
     assert result.sent is False
@@ -546,12 +546,43 @@ def test_expired_authorization_after_durable_attempt_recording_blocks_transport(
     assert events == ["journal", "attempt"]
 
 
-def test_fixed_now_still_works_for_simple_deterministic_tests(monkeypatch):
+def test_fixed_clock_callable_still_works_for_simple_deterministic_tests(monkeypatch):
+    """A callable wrapping a fixed instant remains the supported way for a
+
+    simple test to get deterministic behavior; only a bare datetime is
+    rejected (see the next test).
+    """
     events = _patch_prereqs(monkeypatch)
     client = FakeClient()
-    result = _send(monkeypatch, client, now=NOW)
+    result = _send(monkeypatch, client, clock=lambda: NOW)
     assert result.status == "ORDER_ACKNOWLEDGED"
     assert events == ["journal", "attempt", "ack"]
+
+
+def test_bare_datetime_is_no_longer_accepted_as_clock(monkeypatch):
+    """PM P1 (PR #280 finding, ported): the public entry point must not
+
+    accept a plain pre-computed datetime at all, only a zero-argument
+    callable -- otherwise a future wrapper could pass one and silently
+    freeze every freshness/expiry check at that single instant.
+    """
+    _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    with pytest.raises(TypeError):
+        _send(monkeypatch, client, clock=NOW)
+
+
+def test_default_clock_is_the_real_system_clock():
+    import inspect
+
+    signature = inspect.signature(subject.send_exactly_one_live_pilot)
+    assert signature.parameters["clock"].default is subject._system_clock
+
+    before = datetime.now(timezone.utc)
+    sampled = subject._system_clock()
+    after = datetime.now(timezone.utc)
+    assert sampled.tzinfo is not None
+    assert before <= sampled <= after
 
 
 def test_inactive_open_order_status_does_not_falsely_acknowledge():

@@ -259,22 +259,17 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _resolve_clock(now: datetime | Callable[[], datetime] | None) -> Callable[[], datetime]:
-    """Return a zero-argument clock, re-invoked at each safety boundary.
+def _system_clock() -> datetime:
+    """The one real-time clock the public Live entry point can use.
 
-    ``now=None`` (the production default) always reads the real wall clock,
-    so every freshness/expiry check reflects the instant it actually runs at
-    instead of a value captured earlier. A caller may still inject a fixed
-    ``datetime`` for simple tests, but any test that must prove a later
-    safety boundary observes elapsed time should inject a callable instead,
-    since a fixed instant would be silently reused at every boundary.
+    The ``clock`` parameter on ``send_exactly_one_live_pilot`` intentionally
+    has no way to accept a plain, pre-computed ``datetime``: a caller-frozen
+    or regressing value could otherwise be reused across every safety
+    boundary, silently defeating freshness/expiry checks. A test that must
+    control time injects its own callable directly; production code always
+    gets this real, monotonically-advancing wall clock.
     """
-    if now is None:
-        return lambda: datetime.now(timezone.utc)
-    if callable(now):
-        return now
-    fixed = now
-    return lambda: fixed
+    return datetime.now(timezone.utc)
 
 
 def _require_fresh_timestamp(value: object, *, label: str, now: datetime) -> None:
@@ -402,10 +397,15 @@ def send_exactly_one_live_pilot(
     stop_path: Path = DEFAULT_STOP_PATH,
     repository_root: Path = Path("."),
     timeout_seconds: float = 10.0,
-    now: datetime | Callable[[], datetime] | None = None,
+    clock: Callable[[], datetime] = _system_clock,
     client_factory: Callable[[], _LivePilotClient] = _LivePilotClient,
 ) -> LivePilotSendResult:
     """Make at most one broker transport call for one fully-bound Live pilot.
+
+    The clock is sampled independently at every consequential safety
+    boundary via ``clock()``; production always uses the real wall clock
+    (``_system_clock``), and no plain pre-computed timestamp can be supplied
+    here that would let a slow step reuse a stale instant.
 
     No retry is attempted under any outcome. A timeout, transport exception,
     broker-side error, or ambiguous acknowledgement becomes UNKNOWN and must be
@@ -420,7 +420,6 @@ def send_exactly_one_live_pilot(
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout_seconds must be positive and finite")
 
-    clock = _resolve_clock(now)
     current = _utc(clock())
     intent, ticker, quantity, limit_price, notional = _validate_request(
         request,

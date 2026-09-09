@@ -23,6 +23,14 @@ DEFAULT_JOURNAL_DIR = Path("results/live_pilot_send_journal")
 REPORT_SCHEMA_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 _GLOBAL_ATTEMPT_FILENAME = "GLOBAL_SEND_ATTEMPT.lock"
+# Anchored to this source file's own location (stable for an editable install
+# of this repository) rather than to any caller-supplied journal_dir or the
+# process's current working directory. A restart from a different cwd, or a
+# caller using a non-default journal_dir, must still see the same singleton
+# marker -- otherwise it would see no prior attempt and could create a second
+# reachable placeOrder call. This is intentionally independent of the
+# per-intent journal storage location, which remains configurable.
+_CANONICAL_JOURNAL_ROOT = Path(__file__).resolve().parents[3] / "results" / "live_pilot_send_journal"
 
 
 def _now(value: datetime | None) -> str:
@@ -51,8 +59,20 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.attempted.json"
 
 
+def _canonical_journal_root() -> Path:
+    """Return the one true location for the pilot-wide attempt marker.
+
+    Tests may monkeypatch this function to point at an isolated directory;
+    production code must never override it -- doing so would defeat the
+    entire purpose of a canonical, caller-independent marker location.
+    """
+    return _CANONICAL_JOURNAL_ROOT
+
+
 def _global_attempt_path(directory: Path) -> Path:
-    return directory / _GLOBAL_ATTEMPT_FILENAME
+    # Deliberately ignores `directory`: see _CANONICAL_JOURNAL_ROOT above.
+    del directory
+    return _canonical_journal_root() / _GLOBAL_ATTEMPT_FILENAME
 
 
 def _fsync_parent_dir(path: Path) -> None:
@@ -68,6 +88,29 @@ def _fsync_parent_dir(path: Path) -> None:
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+
+
+def _mkdir_durable(directory: Path) -> None:
+    """Create ``directory`` and any missing parents, durably.
+
+    ``Path.mkdir(parents=True)`` alone does not guarantee the new directory
+    entries survive a crash immediately after this call returns; each newly
+    created directory's own parent must be fsynced too. Without this, a
+    power loss right after the very first pilot run creates
+    ``results/live_pilot_send_journal/`` could lose the entire new
+    directory, including a marker written into it moments later.
+    """
+    to_create: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        to_create.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(to_create):
+        _fsync_parent_dir(created)
 
 
 def _write_full(descriptor: int, data: bytes) -> None:
@@ -86,7 +129,7 @@ def _write_full(descriptor: int, data: bytes) -> None:
 
 
 def _atomic_new(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         encoded = (
@@ -100,7 +143,7 @@ def _atomic_new(path: Path, payload: dict) -> None:
 
 
 def _atomic_replace(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     temporary = path.with_suffix(path.suffix + ".tmp")
     descriptor = os.open(
         temporary,

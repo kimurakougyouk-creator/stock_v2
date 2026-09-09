@@ -37,6 +37,7 @@ def _readiness(**overrides) -> dict:
 
 def _account(**overrides) -> dict:
     data = {
+        "schema_version": 3,
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
@@ -51,13 +52,16 @@ def _account(**overrides) -> dict:
     return data
 
 
-def _open_orders(**overrides) -> dict:
+def _open_orders(*, orders: list | None = None, **overrides) -> dict:
     data = {
+        "schema_version": 2,
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
         "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
         "open_order_count": 0,
+        "orders": orders if orders is not None else [],
         "order_sent": False,
         "cancel_sent": False,
         "live_order_sent": False,
@@ -68,6 +72,7 @@ def _open_orders(**overrides) -> dict:
 
 def _fx(**overrides) -> dict:
     data = {
+        "schema_version": 1,
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
@@ -84,15 +89,22 @@ def _fx(**overrides) -> dict:
 
 def _paper(**overrides) -> dict:
     data = {
-        "status": "WARNING",
+        "schema_version": 1,
+        "status": "HEALTHY",
         "checked_at": _stamp(),
         "accounting_safe": True,
         "risk_safe": True,
         "monitor_order_sent": False,
         "live_order_sent": False,
         "broker": {
+            "account_ready": True,
+            "execution_snapshot_ready": True,
+            "endpoint_port": 4002,
+            "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
             "reconciliation_blocker_count": 0,
+            "all_open_orders_ready": True,
             "open_order_count": 0,
+            "open_orders": [],
         },
     }
     data.update(overrides)
@@ -215,7 +227,7 @@ def test_unexpected_open_live_order_fails_closed(tmp_path: Path):
     )
 
     assert result.ready is False
-    assert "same-run Live open-order evidence is not empty" in result.blockers
+    assert "same-run Live open-order evidence is not exactly empty" in result.blockers
 
 
 def test_emergency_stop_is_checked_in_final_read_only_gate(tmp_path: Path):
@@ -281,6 +293,100 @@ def test_jpy_pilot_requires_settled_jpy_cash_plus_reserve(tmp_path: Path):
     )
     assert blocked.ready is False
     assert blocked.settled_cash_ready is False
+
+
+def test_paper_status_must_be_exact_healthy_not_merely_non_critical(tmp_path: Path):
+    """Ported PR #280 finding: WARNING (or any non-HEALTHY) Paper status must
+
+    fail closed even if every other field otherwise looks clean.
+    """
+    result = _evaluate(tmp_path, paper_monitor_report=_paper(status="WARNING"))
+    assert result.ready is False
+    assert result.paper_monitor_safe is False
+
+
+def test_paper_schema_and_counters_are_exact(tmp_path: Path):
+    wrong_schema = _evaluate(tmp_path, paper_monitor_report=_paper(schema_version=2))
+    assert wrong_schema.ready is False
+    assert wrong_schema.paper_monitor_safe is False
+
+    float_blocker_count = _evaluate(
+        tmp_path,
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0.0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+                "open_orders": [],
+            }
+        ),
+    )
+    assert float_blocker_count.ready is False
+    assert float_blocker_count.paper_monitor_safe is False
+
+    nonempty_open_orders = _evaluate(
+        tmp_path,
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+                "open_orders": [{"order_id": 1}],
+            }
+        ),
+    )
+    assert nonempty_open_orders.ready is False
+    assert nonempty_open_orders.paper_monitor_safe is False
+
+
+def test_account_and_open_orders_reports_require_exact_current_schema(tmp_path: Path):
+    """Ported PR #280 finding: schema drift on the account or open-orders
+
+    report must fail closed even if every other field looks clean.
+    """
+    wrong_account_schema = _evaluate(tmp_path, live_account_report=_account(schema_version=1))
+    assert wrong_account_schema.ready is False
+    assert wrong_account_schema.account_fingerprint_match is True
+    assert any("account" in item for item in wrong_account_schema.blockers)
+
+    wrong_open_orders_schema = _evaluate(
+        tmp_path, live_open_orders_report=_open_orders(schema_version=1)
+    )
+    assert wrong_open_orders_schema.ready is False
+
+
+def test_open_orders_account_fingerprint_must_also_match(tmp_path: Path):
+    """Ported PR #280 finding: a zero-order snapshot from a different Live
+
+    account on the same port must not be accepted merely because the
+    account report's own fingerprint matches.
+    """
+    result = _evaluate(
+        tmp_path, live_open_orders_report=_open_orders(account_fingerprint="b" * 64)
+    )
+    assert result.ready is False
+    assert result.account_fingerprint_match is False
+
+
+def test_open_orders_rows_must_be_exactly_empty(tmp_path: Path):
+    """Ported PR #280 finding: a malformed report claiming zero open orders
+
+    while still carrying non-empty order rows must fail closed.
+    """
+    result = _evaluate(
+        tmp_path,
+        live_open_orders_report=_open_orders(open_order_count=0, orders=[{"order_id": 1}]),
+    )
+    assert result.ready is False
+    assert any("not exactly empty" in item for item in result.blockers)
 
 
 def test_module_contains_no_broker_order_transport():

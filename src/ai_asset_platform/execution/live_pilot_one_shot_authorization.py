@@ -98,6 +98,28 @@ def _fsync_parent_dir(path: Path) -> None:
         os.close(directory_fd)
 
 
+def _mkdir_durable(directory: Path) -> None:
+    """Create ``directory`` and any missing parents, durably.
+
+    ``Path.mkdir(parents=True)`` alone does not guarantee the new directory
+    entries survive a crash immediately after this call returns; each newly
+    created directory's own parent must be fsynced too, or a power loss
+    right after the first authorization is issued could lose the entire new
+    ``results/live_pilot_authorizations/`` directory.
+    """
+    to_create: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        to_create.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(to_create):
+        _fsync_parent_dir(created)
+
+
 def _write_full(descriptor: int, data: bytes) -> None:
     """Write every byte of ``data``, since ``os.write`` may write fewer.
 
@@ -115,7 +137,7 @@ def _write_full(descriptor: int, data: bytes) -> None:
 
 
 def _exclusive_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     descriptor = os.open(path, flags, 0o600)
     try:

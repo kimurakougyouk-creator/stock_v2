@@ -22,6 +22,21 @@ INTENT = "live-pilot:9432.T:BUY:100:20260907"
 NONCE = "nonce_ABC-123"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_canonical_journal_root(monkeypatch, tmp_path: Path):
+    """Codex P1: the pilot-wide global marker now lives at a canonical path
+
+    independent of any test's `directory=tmp_path` argument, by design (see
+    _canonical_journal_root). Without this override, every test below would
+    read/write the real repository's results/live_pilot_send_journal/
+    GLOBAL_SEND_ATTEMPT.lock, leaking state across test runs and polluting a
+    real checkout.
+    """
+    monkeypatch.setattr(
+        journal, "_canonical_journal_root", lambda: tmp_path / "_canonical_root"
+    )
+
+
 def _consumed(**overrides) -> dict:
     payload = {"status": "CONSUMED", "intent_id": INTENT, "nonce": NONCE, "order_sent": False, "live_order_sent": False}
     payload.update(overrides)
@@ -151,6 +166,84 @@ def test_second_intent_id_cannot_create_a_second_send_attempt(tmp_path: Path):
         record_send_attempt(other_intent, directory=tmp_path, now=NOW + timedelta(seconds=3))
 
 
+def test_global_marker_is_canonical_and_ignores_a_different_journal_dir(tmp_path: Path):
+    """Codex P1 (PR #280 finding, ported): the pilot-wide marker's location
+
+    must not depend on the caller-supplied journal_dir (or, by extension, a
+    restart from a different cwd). A second attempt using a *different*
+    journal_dir than the first must still be blocked by the same singleton
+    marker, not create a fresh one of its own.
+    """
+    first_dir = tmp_path / "run_one"
+    second_dir = tmp_path / "a_completely_different_journal_dir"
+    first_dir.mkdir()
+    second_dir.mkdir()
+
+    create_consumed_authorization_journal(
+        intent_id=INTENT,
+        nonce=NONCE,
+        consumed_authorization=_consumed(),
+        directory=first_dir,
+        now=NOW,
+    )
+    record_send_attempt(INTENT, directory=first_dir, now=NOW + timedelta(seconds=1))
+    assert journal.global_send_attempt_recorded(directory=first_dir) is True
+    # The same canonical marker must also be visible when queried through an
+    # entirely different (and never-before-used) journal_dir.
+    assert journal.global_send_attempt_recorded(directory=second_dir) is True
+
+    other_intent = "live-pilot:9432.T:BUY:100:different-journal-dir"
+    created = create_consumed_authorization_journal(
+        intent_id=other_intent,
+        nonce="nonce-elsewhere",
+        consumed_authorization=_consumed(intent_id=other_intent, nonce="nonce-elsewhere"),
+        directory=second_dir,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert created["state"] == "AUTHORIZATION_CONSUMED"
+    assert send_attempt_permitted(other_intent, directory=second_dir) is False
+    with pytest.raises(PermissionError, match="pilot campaign"):
+        record_send_attempt(other_intent, directory=second_dir, now=NOW + timedelta(seconds=3))
+
+
+def test_mkdir_durable_fsyncs_every_newly_created_ancestor(tmp_path: Path, monkeypatch):
+    """Codex P1 (PR #280 finding, ported): the very first pilot run creates
+
+    results/live_pilot_send_journal/ (and, here, its own missing parents)
+    from scratch. Each newly created directory's own parent must be
+    fsynced, not only the innermost one, or a power loss right after
+    creation could lose the entire new directory tree.
+    """
+    calls = []
+    original = journal._fsync_parent_dir
+
+    def spy(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(journal, "_fsync_parent_dir", spy)
+    target = tmp_path / "a" / "b" / "c"
+    journal._mkdir_durable(target)
+
+    assert target.is_dir()
+    fsynced_parents = {call.parent for call in calls}
+    fsynced_children = {call for call in calls}
+    # Every newly created directory (a, a/b, a/b/c) must have had its own
+    # parent fsynced.
+    assert (tmp_path / "a") in fsynced_children
+    assert (tmp_path / "a" / "b") in fsynced_children
+    assert (tmp_path / "a" / "b" / "c") in fsynced_children
+    assert tmp_path in fsynced_parents
+    assert (tmp_path / "a") in fsynced_parents
+    assert (tmp_path / "a" / "b") in fsynced_parents
+
+    # A second call against an already-fully-created directory must not
+    # attempt to fsync anything (nothing new was created).
+    calls.clear()
+    journal._mkdir_durable(target)
+    assert calls == []
+
+
 def test_global_marker_directory_entry_is_fsynced(tmp_path: Path, monkeypatch):
     calls = []
     original = journal._fsync_parent_dir
@@ -163,7 +256,11 @@ def test_global_marker_directory_entry_is_fsynced(tmp_path: Path, monkeypatch):
     _create(tmp_path)
     record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
     assert len(calls) >= 2
-    assert all(call.parent == tmp_path for call in calls)
+    # The per-intent marker's directory entry (under the caller's directory)
+    # and the canonical global marker's directory entry (under the isolated
+    # canonical root from the autouse fixture) must both be fsynced.
+    assert any(call.parent == tmp_path for call in calls)
+    assert any(call.parent == journal._canonical_journal_root() for call in calls)
 
 
 def test_write_full_loops_over_short_writes_and_rejects_no_progress(tmp_path: Path, monkeypatch):
