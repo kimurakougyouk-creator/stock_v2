@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, DecimalException
 import json
 import math
 import os
@@ -110,6 +111,30 @@ def _finite(value: object) -> float | None:
 def _positive(value: object) -> float | None:
     parsed = _finite(value)
     return parsed if parsed is not None and parsed > 0 else None
+
+
+def _decimal(value: object) -> Decimal | None:
+    """Parse to an exact, finite ``Decimal`` (never NaN/Infinity)."""
+    try:
+        parsed = Decimal(str(value))
+    except (DecimalException, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _positive_decimal(value: object) -> Decimal | None:
+    parsed = _decimal(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _finite_float_from_decimal(value: Decimal | None) -> float | None:
+    if value is None or not value.is_finite():
+        return None
+    try:
+        parsed = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 class _LivePostFillProbe(EWrapper, EClient):
@@ -276,7 +301,7 @@ def match_live_postfill(
 
     symbol = "9432" if str(ticker).strip().upper() == "9432.T" else str(ticker).strip().upper()
     normalized_side = str(side).strip().upper()
-    expected_quantity = _positive(quantity)
+    expected_quantity = _positive_decimal(quantity)
     if normalized_side not in {"BUY", "SELL"}:
         blockers.append("side must be BUY or SELL")
     if expected_quantity is None:
@@ -305,29 +330,32 @@ def match_live_postfill(
         blockers.append("matching Live executions do not share one valid currency")
     execution_currency = next(iter(currencies)) if len(currencies) == 1 else None
 
-    total_quantity = 0.0
-    gross = 0.0
+    total_quantity = Decimal("0")
+    gross = Decimal("0")
     for row in matches:
-        row_quantity = _positive(row.quantity)
-        row_price = _positive(row.price)
+        row_quantity = _positive_decimal(row.quantity)
+        row_price = _positive_decimal(row.price)
         if row_quantity is None or row_price is None:
             blockers.append("matching Live execution contains non-positive or non-finite quantity/price")
             continue
-        total_quantity += row_quantity
-        gross += row_quantity * row_price
+        try:
+            product = row_quantity * row_price
+            if not product.is_finite():
+                raise DecimalException
+            total_quantity += row_quantity
+            gross += product
+            if not total_quantity.is_finite() or not gross.is_finite():
+                raise DecimalException
+        except DecimalException:
+            blockers.append("matching Live execution aggregate is non-finite")
 
-    if expected_quantity is not None and not math.isclose(
-        total_quantity,
-        expected_quantity,
-        rel_tol=1e-12,
-        abs_tol=1e-9,
-    ):
+    if expected_quantity is not None and total_quantity != expected_quantity:
         blockers.append(
             f"matching Live execution quantity does not equal expected total: {total_quantity} != {expected_quantity}"
         )
 
     matched_commissions: list[LiveCommissionEvidence] = []
-    commission_total = 0.0
+    commission_total = Decimal("0")
     for execution in matches:
         rows = [row for row in snapshot.commissions if row.exec_id == execution.exec_id]
         if len(rows) != 1:
@@ -336,7 +364,7 @@ def match_live_postfill(
             )
             continue
         commission = rows[0]
-        parsed_commission = _finite(commission.commission)
+        parsed_commission = _decimal(commission.commission)
         if parsed_commission is None:
             blockers.append(f"commission for exec_id {execution.exec_id} is non-finite")
             continue
@@ -345,8 +373,22 @@ def match_live_postfill(
                 f"commission currency for exec_id {execution.exec_id} does not match execution currency"
             )
             continue
+        try:
+            commission_total += parsed_commission
+            if not commission_total.is_finite():
+                raise DecimalException
+        except DecimalException:
+            blockers.append(f"commission aggregate is non-finite at exec_id {execution.exec_id}")
+            continue
         matched_commissions.append(commission)
-        commission_total += parsed_commission
+
+    filled_quantity = _finite_float_from_decimal(total_quantity) if matches else None
+    try:
+        vwap_decimal = gross / total_quantity if total_quantity > 0 else None
+    except DecimalException:
+        vwap_decimal = None
+    vwap_price = _finite_float_from_decimal(vwap_decimal) if vwap_decimal is not None else None
+    commission_total_float = _finite_float_from_decimal(commission_total) if matched_commissions else None
 
     if blockers:
         return LivePostFillMatch(
@@ -357,13 +399,44 @@ def match_live_postfill(
             None,
             executions=tuple(matches),
             commissions=tuple(matched_commissions),
-            filled_quantity=total_quantity if matches else None,
-            vwap_price=(gross / total_quantity) if total_quantity > 0 else None,
-            commission_total=commission_total if matched_commissions else None,
+            filled_quantity=filled_quantity,
+            vwap_price=vwap_price,
+            commission_total=commission_total_float,
         )
 
-    vwap = gross / total_quantity
-    cash_effect = -(gross + commission_total) if normalized_side == "BUY" else gross - commission_total
+    try:
+        cash_effect_decimal = (
+            -(gross + commission_total) if normalized_side == "BUY" else gross - commission_total
+        )
+        if not cash_effect_decimal.is_finite():
+            raise DecimalException
+    except DecimalException:
+        return LivePostFillMatch(
+            False,
+            ("native cash effect is non-finite",),
+            matches[0],
+            matched_commissions[0],
+            None,
+            executions=tuple(matches),
+            commissions=tuple(matched_commissions),
+            filled_quantity=filled_quantity,
+            vwap_price=vwap_price,
+            commission_total=commission_total_float,
+        )
+    cash_effect = _finite_float_from_decimal(cash_effect_decimal)
+    if vwap_price is None or cash_effect is None or commission_total_float is None:
+        return LivePostFillMatch(
+            False,
+            ("aggregate result cannot be represented finitely",),
+            matches[0],
+            matched_commissions[0],
+            None,
+            executions=tuple(matches),
+            commissions=tuple(matched_commissions),
+            filled_quantity=filled_quantity,
+            vwap_price=vwap_price,
+            commission_total=commission_total_float,
+        )
     return LivePostFillMatch(
         True,
         (),
@@ -372,9 +445,9 @@ def match_live_postfill(
         cash_effect,
         executions=tuple(matches),
         commissions=tuple(matched_commissions),
-        filled_quantity=total_quantity,
-        vwap_price=vwap,
-        commission_total=commission_total,
+        filled_quantity=filled_quantity,
+        vwap_price=vwap_price,
+        commission_total=commission_total_float,
     )
 
 
