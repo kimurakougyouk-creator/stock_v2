@@ -192,7 +192,12 @@ def _patch_prereqs(
     return events
 
 
-def _send(monkeypatch, client: FakeClient, **overrides):
+def _send(monkeypatch, client: FakeClient, *, clock=None, **overrides):
+    # There is no public `clock` parameter on send_exactly_one_live_pilot by
+    # design (see _current_clock's docstring): a test controls time only by
+    # monkeypatching the private seam directly, exactly as production code
+    # would be unable to.
+    monkeypatch.setattr(subject, "_current_clock", clock if clock is not None else (lambda: NOW))
     args = dict(
         request=_request(),
         nonce="nonce-test",
@@ -203,7 +208,6 @@ def _send(monkeypatch, client: FakeClient, **overrides):
         final_confirmation=subject.FINAL_SEND_CONFIRMATION_VALUE,
         repository_root=Path("."),
         timeout_seconds=0.01,
-        clock=lambda: NOW,
         client_factory=lambda: client,
     )
     args.update(overrides)
@@ -386,6 +390,28 @@ def test_exact_scope_rejects_wrong_quantity(monkeypatch):
     assert client.connected is False
 
 
+def test_quantity_requires_an_exact_non_boolean_int_not_coercion(monkeypatch):
+    """PM P2 (round 9): int(100.0), int("100"), and int(True) would each
+
+    satisfy the exact bounded-quantity comparison; only a genuine int may be
+    supplied.
+    """
+    _patch_prereqs(monkeypatch)
+    for bad_quantity in (100.0, "100", True):
+        client = FakeClient()
+        request = subject.LivePilotSendRequest(
+            intent_id="live-pilot:9432:BUY:100:test",
+            ticker="9432.T",
+            side="BUY",
+            quantity=bad_quantity,
+            limit_price=400.0,
+            estimated_notional_jpy=40_000.0,
+        )
+        with pytest.raises(ValueError, match="exact bounded pilot quantity"):
+            _send(monkeypatch, client, request=request)
+        assert client.connected is False, bad_quantity
+
+
 def test_source_pin_failure_blocks_before_connection(monkeypatch):
     monkeypatch.setattr(
         subject,
@@ -480,12 +506,13 @@ def test_stale_evidence_after_durable_attempt_recording_blocks_transport(monkeyp
     assert events == ["journal", "attempt"]
 
 
-def test_freshness_and_expiry_rechecked_after_the_final_stop_check(monkeypatch):
-    """Codex P1 (round 6): the last freshness/expiry re-check must run after
+def test_freshness_is_rechecked_before_the_final_stop_check(monkeypatch):
+    """PM P1 (round 9): the bounded final sequence is watched-field
 
-    the final stop check (itself a filesystem read that can stall), not
-    before it -- otherwise a stall inside the stop check could still let
-    evidence go stale before placeOrder without being caught.
+    assignment -> freshness/expiry re-check (fresh clock) -> stop check
+    (fast, nonblocking) -> placeOrder, with nothing else interleaved. If
+    evidence is already stale at that point, the stop check must never even
+    run -- the send is blocked purely on staleness.
     """
     events = _patch_prereqs(monkeypatch)
     client = FakeClient()
@@ -513,7 +540,12 @@ def test_freshness_and_expiry_rechecked_after_the_final_stop_check(monkeypatch):
     assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
     assert client.place_calls == []
     assert events == ["journal", "attempt"]
-    assert "stop_check" in order
+    # There are two stop checks in the whole function: an early one before
+    # ever connecting, and the final one immediately before placeOrder. Only
+    # the early one should have run; the final one must never be reached
+    # once the final freshness re-check fails.
+    assert order.count("stop_check") == 1
+    assert "clock_3" in order
     assert order.index("stop_check") < order.index("clock_3")
 
 
@@ -572,14 +604,26 @@ def test_bare_datetime_is_no_longer_accepted_as_clock(monkeypatch):
         _send(monkeypatch, client, clock=NOW)
 
 
-def test_default_clock_is_the_real_system_clock():
+def test_no_public_clock_parameter_exists_on_the_production_entry_point():
+    """PM P1 (PR #280 finding, ported): production must have no parameter at
+
+    all through which a caller could override safety-boundary time -- not
+    even one that defaults safely. Time control is only possible by
+    monkeypatching the private ``_current_clock`` seam directly, which
+    production code never does.
+    """
     import inspect
 
     signature = inspect.signature(subject.send_exactly_one_live_pilot)
-    assert signature.parameters["clock"].default is subject._system_clock
+    assert "clock" not in signature.parameters
+    assert "now" not in signature.parameters
+
+
+def test_current_clock_defaults_to_the_real_system_clock():
+    assert subject._current_clock is not subject._system_clock
 
     before = datetime.now(timezone.utc)
-    sampled = subject._system_clock()
+    sampled = subject._current_clock()
     after = datetime.now(timezone.utc)
     assert sampled.tzinfo is not None
     assert before <= sampled <= after

@@ -296,6 +296,42 @@ def test_write_full_loops_over_short_writes_and_rejects_no_progress(tmp_path: Pa
         os.close(descriptor)
 
 
+def test_is_exact_int_rejects_coerced_types():
+    assert journal._is_exact_int(1, 1) is True
+    assert journal._is_exact_int(0, 0) is True
+    assert journal._is_exact_int(1.0, 1) is False
+    assert journal._is_exact_int("1", 1) is False
+    assert journal._is_exact_int(True, 1) is False
+    assert journal._is_exact_int(False, 0) is False
+
+
+def test_malformed_send_attempt_count_fails_closed_for_state_transitions(tmp_path: Path):
+    """PM P2 (round 9): record_send_attempt, mark_unknown, and
+
+    mark_postfill_proven must reject a coerced (float/string/boolean)
+    persisted send_attempt_count instead of letting int(...) accept it.
+    """
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+
+    path = journal._path(INTENT, tmp_path)
+    payload = load_send_journal(INTENT, directory=tmp_path)
+    payload["send_attempt_count"] = 1.0
+    journal._atomic_replace(path, payload)
+
+    with pytest.raises(PermissionError, match="single recorded send attempt"):
+        mark_postfill_proven(
+            INTENT,
+            exec_id="exec-1",
+            order_id=101,
+            perm_id=202,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=2),
+        )
+    with pytest.raises(PermissionError, match="single send attempt"):
+        mark_unknown(INTENT, reason="timeout", directory=tmp_path, now=NOW + timedelta(seconds=2))
+
+
 def test_module_contains_no_broker_transport_or_automatic_recovery_action():
     source = Path("src/ai_asset_platform/execution/live_pilot_send_journal.py").read_text(encoding="utf-8")
     forbidden = (".placeOrder(", ".cancelOrder(", "reqOpenOrders(", "reqAllOpenOrders(", "reqExecutions(", "enable_live_trading = True", "automatic_resend_allowed=True", "automatic_cancel_allowed=True", "automatic_modify_allowed=True", "automatic_flatten_allowed=True", "automatic_close_allowed=True")

@@ -188,6 +188,12 @@ def _paper_safe(report: dict | None) -> bool:
         and _is_exact_zero_int(broker.get("open_order_count"))
     ):
         return False
+    open_orders = broker.get("open_orders")
+    if not isinstance(open_orders, list) or len(open_orders) != 0:
+        # The Paper monitor's schema always emits this list; an exact-zero
+        # count alone must not be trusted if the accompanying rows are
+        # missing, malformed, or (contradictorily) nonempty.
+        return False
     try:
         endpoint_port = int(broker.get("endpoint_port"))
     except (TypeError, ValueError):

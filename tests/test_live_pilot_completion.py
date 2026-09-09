@@ -163,6 +163,7 @@ def _paper(**overrides) -> dict:
             "reconciliation_blocker_count": 0,
             "all_open_orders_ready": True,
             "open_order_count": 0,
+            "open_orders": [],
         },
     }
     data.update(overrides)
@@ -561,6 +562,64 @@ def test_paper_monitor_requires_exact_healthy_status_and_schema_and_explicit_fal
     falsy_zero_flag = _evaluate(paper_monitor_report=_paper(live_order_sent=0))
     assert falsy_zero_flag.complete is False
     assert falsy_zero_flag.paper_monitor_safe is False
+
+
+def test_paper_open_orders_rows_must_be_an_empty_list():
+    """Codex P1 (round 9): an exact-zero open_order_count alone must not be
+
+    trusted; broker.open_orders must be present as a list and exactly
+    empty, mirroring the same-run preflight's already-strict contract.
+    """
+    missing_rows = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+                # "open_orders" deliberately omitted
+            }
+        )
+    )
+    assert missing_rows.complete is False
+    assert missing_rows.paper_monitor_safe is False
+
+    non_list_rows = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+                "open_orders": "not-a-list",
+            }
+        )
+    )
+    assert non_list_rows.complete is False
+    assert non_list_rows.paper_monitor_safe is False
+
+    nonempty_rows = _evaluate(
+        paper_monitor_report=_paper(
+            broker={
+                "account_ready": True,
+                "execution_snapshot_ready": True,
+                "endpoint_port": 4002,
+                "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+                "reconciliation_blocker_count": 0,
+                "all_open_orders_ready": True,
+                "open_order_count": 0,
+                "open_orders": [{"order_id": 1}],
+            }
+        )
+    )
+    assert nonempty_rows.complete is False
+    assert nonempty_rows.paper_monitor_safe is False
 
 
 def test_execution_currency_mismatch_with_instrument_blocks():

@@ -33,6 +33,16 @@ _GLOBAL_ATTEMPT_FILENAME = "GLOBAL_SEND_ATTEMPT.lock"
 _CANONICAL_JOURNAL_ROOT = Path(__file__).resolve().parents[3] / "results" / "live_pilot_send_journal"
 
 
+def _is_exact_int(value: object, expected: int) -> bool:
+    """True only for the exact ``int`` value, not ``0.0``, ``"0"``, or ``False``.
+
+    ``int(value)`` silently coerces all of those (and ``bool`` is itself an
+    ``int`` subclass), which would let a malformed persisted
+    ``send_attempt_count`` pass a state-transition gate.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value == expected
+
+
 def _now(value: datetime | None) -> str:
     current = value if value is not None else datetime.now(timezone.utc)
     if current.tzinfo is None or current.utcoffset() is None:
@@ -300,7 +310,7 @@ def record_send_attempt(
         raise PermissionError("send journal is missing")
     if (
         payload.get("state") != "AUTHORIZATION_CONSUMED"
-        or int(payload.get("send_attempt_count", 0)) != 0
+        or not _is_exact_int(payload.get("send_attempt_count"), 0)
     ):
         raise PermissionError("a Live send attempt is no longer permitted for this intent")
 
@@ -388,7 +398,7 @@ def mark_unknown(
 ) -> dict:
     _require_attempt_marker(intent_id, directory)
     payload = load_send_journal(intent_id, directory=directory)
-    if payload is None or int(payload.get("send_attempt_count", 0)) != 1:
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("UNKNOWN is only valid after the single send attempt")
     if payload.get("state") in {"POSTFILL_PROVEN", "COMPLETE"}:
         raise PermissionError("completed evidence cannot be changed to UNKNOWN")
@@ -421,7 +431,7 @@ def mark_postfill_proven(
 ) -> dict:
     _require_attempt_marker(intent_id, directory)
     payload = load_send_journal(intent_id, directory=directory)
-    if payload is None or int(payload.get("send_attempt_count", 0)) != 1:
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("post-fill proof requires the single recorded send attempt")
     if payload.get("state") not in {"ORDER_ACKNOWLEDGED", "UNKNOWN"}:
         raise PermissionError("post-fill proof is not valid in the current state")
@@ -465,7 +475,7 @@ def send_attempt_permitted(
         return bool(
             payload
             and payload.get("state") == "AUTHORIZATION_CONSUMED"
-            and int(payload.get("send_attempt_count", 0)) == 0
+            and _is_exact_int(payload.get("send_attempt_count"), 0)
         )
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return False
