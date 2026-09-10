@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 
 
@@ -23,7 +24,9 @@ DEFAULT_JOURNAL_DIR = Path("results/live_pilot_send_journal")
 REPORT_SCHEMA_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 _GLOBAL_ATTEMPT_FILENAME = "GLOBAL_SEND_ATTEMPT.lock"
-_MACHINE_STATE_SUBDIR = Path("ai_asset_platform") / "live_pilot"
+_MACHINE_STATE_SUBDIR = (
+    Path(".local") / "state" / "ai_asset_platform" / "live_pilot"
+)
 
 
 def _is_exact_int(value: object, expected: int) -> bool:
@@ -64,17 +67,20 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
 
 def _resolve_machine_state_root() -> Path:
     """Resolve checkout-independent durable operator state for the campaign marker."""
-    configured = os.environ.get("XDG_STATE_HOME")
-    if configured:
-        state_home = Path(configured)
-    else:
-        home = os.environ.get("HOME")
-        if not home:
-            raise OSError("durable operator state cannot be resolved: HOME is unset")
-        state_home = Path(home) / ".local" / "state"
-    if not state_home.is_absolute():
-        raise OSError("durable operator state must be an absolute path")
-    return state_home / _MACHINE_STATE_SUBDIR
+    try:
+        effective_uid = os.geteuid()
+        passwd_home = pwd.getpwuid(effective_uid).pw_dir
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise OSError("durable operator identity cannot be resolved") from exc
+    if not isinstance(passwd_home, str) or not passwd_home.strip():
+        raise OSError("durable operator home must be non-empty")
+    try:
+        home = Path(passwd_home)
+    except (OSError, TypeError, ValueError) as exc:
+        raise OSError("durable operator home is invalid") from exc
+    if not home.is_absolute():
+        raise OSError("durable operator home must be an absolute path")
+    return home / _MACHINE_STATE_SUBDIR
 
 
 def _canonical_journal_root() -> Path:
