@@ -275,6 +275,56 @@ def test_persisted_report_has_no_raw_account_id(tmp_path: Path):
     assert '"live_order_sent": false' in text
 
 
+def test_conflicting_exec_id_outside_matched_order_fails_closed():
+    conflicting = _snapshot(
+        executions=(
+            _execution(exec_id="exec-1", order_id=77),
+            _execution(exec_id="exec-1", order_id=999),
+        ),
+    )
+    result = match_live_postfill(
+        conflicting,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any("conflicts with Live execution evidence" in item for item in result.blockers)
+
+
+def test_extreme_price_overflow_fails_closed():
+    overflow = _snapshot(executions=(_execution(price=1e308, quantity=2.0),))
+    result = match_live_postfill(
+        overflow,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any("overflowed" in item for item in result.blockers)
+
+
+def test_near_exact_but_not_exact_quantity_now_fails_closed():
+    near_exact = _snapshot(executions=(_execution(quantity=1.0000000005),))
+    result = match_live_postfill(
+        near_exact,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any("does not equal expected total" in item for item in result.blockers)
+
+
 def test_module_contains_no_order_transport():
     source = Path(
         "src/ai_asset_platform/brokers/ibkr_live_postfill_evidence.py"
