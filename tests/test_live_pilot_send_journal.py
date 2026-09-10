@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -206,28 +207,45 @@ def test_global_marker_is_canonical_and_ignores_a_different_journal_dir(tmp_path
         record_send_attempt(other_intent, directory=second_dir, now=NOW + timedelta(seconds=3))
 
 
-def test_two_source_checkouts_resolve_the_same_machine_state_marker(monkeypatch, tmp_path: Path):
-    state_home = tmp_path / "operator-state"
-    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+def test_launch_environment_and_checkout_cannot_relocate_machine_state_marker(
+    monkeypatch, tmp_path: Path
+):
+    passwd_home = tmp_path / "passwd-home"
+    monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
+    monkeypatch.setattr(
+        journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(passwd_home))
+    )
     monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-a"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home-a"))
     monkeypatch.setattr(journal, "__file__", str(tmp_path / "checkout-a" / "module.py"))
     marker_from_a = journal._global_attempt_path(tmp_path / "journal-a")
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.delenv("HOME")
     monkeypatch.setattr(journal, "__file__", str(tmp_path / "checkout-b" / "module.py"))
     marker_from_b = journal._global_attempt_path(tmp_path / "journal-b")
 
-    expected = state_home / "ai_asset_platform" / "live_pilot" / "GLOBAL_SEND_ATTEMPT.lock"
+    expected = passwd_home / ".local" / "state" / "ai_asset_platform" / "live_pilot" / "GLOBAL_SEND_ATTEMPT.lock"
     assert marker_from_a == expected
     assert marker_from_b == expected
 
 
-def test_marker_from_checkout_a_blocks_checkout_b_and_restart(monkeypatch, tmp_path: Path):
-    state_home = tmp_path / "operator-state"
-    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+def test_pre_change_marker_blocks_post_change_launch(monkeypatch, tmp_path: Path):
+    passwd_home = tmp_path / "passwd-home"
+    monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
+    monkeypatch.setattr(
+        journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(passwd_home))
+    )
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-a"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home-a"))
     monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
     first_dir = tmp_path / "checkout-a" / "journals"
     second_dir = tmp_path / "checkout-b" / "journals"
     _create(first_dir)
     record_send_attempt(INTENT, directory=first_dir, now=NOW + timedelta(seconds=1))
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-b"))
+    monkeypatch.delenv("HOME")
 
     other_intent = "live-pilot:9432.T:BUY:100:checkout-b"
     create_consumed_authorization_journal(
@@ -243,19 +261,50 @@ def test_marker_from_checkout_a_blocks_checkout_b_and_restart(monkeypatch, tmp_p
         record_send_attempt(other_intent, directory=second_dir, now=NOW + timedelta(seconds=3))
 
 
-def test_unresolvable_or_unusable_machine_state_fails_closed(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("failure", ["euid", "passwd"])
+def test_unresolvable_os_identity_fails_closed(monkeypatch, tmp_path: Path, failure: str):
     monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
-    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
-    monkeypatch.delenv("HOME", raising=False)
-    missing_home_dir = tmp_path / "missing-home-journal"
-    _create(missing_home_dir)
-    assert send_attempt_permitted(INTENT, directory=missing_home_dir) is False
-    with pytest.raises(OSError, match="cannot be resolved"):
-        record_send_attempt(INTENT, directory=missing_home_dir, now=NOW)
+    if failure == "euid":
+        monkeypatch.setattr(
+            journal.os, "geteuid", lambda: (_ for _ in ()).throw(OSError("no euid"))
+        )
+    else:
+        monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
+        monkeypatch.setattr(
+            journal.pwd,
+            "getpwuid",
+            lambda uid: (_ for _ in ()).throw(KeyError(uid)),
+        )
+    directory = tmp_path / "identity-failure-journal"
+    _create(directory)
+    assert send_attempt_permitted(INTENT, directory=directory) is False
+    with pytest.raises(OSError, match="identity cannot be resolved"):
+        record_send_attempt(INTENT, directory=directory, now=NOW)
+
+
+@pytest.mark.parametrize("passwd_home", ["", "relative/home"])
+def test_invalid_passwd_home_fails_closed(monkeypatch, tmp_path: Path, passwd_home: str):
+    monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
+    monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
+    monkeypatch.setattr(
+        journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=passwd_home)
+    )
+    directory = tmp_path / "invalid-home-journal"
+    _create(directory)
+    assert send_attempt_permitted(INTENT, directory=directory) is False
+    with pytest.raises(OSError, match="home must be"):
+        record_send_attempt(INTENT, directory=directory, now=NOW)
+
+
+def test_unusable_passwd_home_fails_closed(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
+    monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
 
     unusable = tmp_path / "not-a-directory"
     unusable.write_text("occupied", encoding="utf-8")
-    monkeypatch.setenv("XDG_STATE_HOME", str(unusable))
+    monkeypatch.setattr(
+        journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(unusable))
+    )
     other_dir = tmp_path / "unusable-state-journal"
     _create(other_dir)
     assert send_attempt_permitted(INTENT, directory=other_dir) is False
