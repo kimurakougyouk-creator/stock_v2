@@ -124,6 +124,7 @@ def test_clean_same_run_evidence_is_ready_only_for_operator_authorization(tmp_pa
     assert result.endpoint_port == 4001
     assert result.endpoint_binding_ready is True
     assert result.account_fingerprint_match is True
+    assert result.expected_account_fingerprint == FINGERPRINT
     assert result.evidence_fresh is True
     assert result.available_funds_ready is True
     assert result.settled_cash_currency == "USD"
@@ -206,6 +207,13 @@ def test_wrong_pinned_account_fails_closed(tmp_path: Path):
 
     assert result.ready is False
     assert result.account_fingerprint_match is False
+
+
+def test_expected_account_fingerprint_is_recorded_even_when_match_fails(tmp_path: Path):
+    result = _evaluate(tmp_path, expected_account_fingerprint="b" * 64)
+
+    assert result.account_fingerprint_match is False
+    assert result.expected_account_fingerprint == "b" * 64
 
 
 def test_unexpected_open_live_order_fails_closed(tmp_path: Path):
