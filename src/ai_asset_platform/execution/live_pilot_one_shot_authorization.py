@@ -82,6 +82,21 @@ def _consumed_path(directory: Path, nonce: str) -> Path:
     return _authorization_path(directory, nonce).with_suffix(".consumed.json")
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Fsync the directory itself so a new exclusive marker's dirent survives a crash.
+
+    Fsyncing only the marker file guarantees the file's contents are durable,
+    not that the directory entry pointing to it is. Without this, a power loss
+    right after marker creation can lose the dirent and let a replay recreate
+    the same exclusive marker.
+    """
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _exclusive_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -92,6 +107,7 @@ def _exclusive_write_json(path: Path, payload: dict) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_directory(path.parent)
 
 
 def issue_live_pilot_authorization(
