@@ -23,7 +23,7 @@ OPERATOR_CONFIRMATION_VALUE = "AUTHORIZE_ONE_LIVE_PILOT_ONLY"
 DEFAULT_AUTHORIZATION_DIR = Path("results/live_pilot_authorizations")
 DEFAULT_TTL_SECONDS = 120.0
 MAX_TTL_SECONDS = 300.0
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 _VALID_LIVE_ENDPOINT_PORTS = {4001, 7496}
 
 
@@ -82,16 +82,31 @@ def _consumed_path(directory: Path, nonce: str) -> Path:
     return _authorization_path(directory, nonce).with_suffix(".consumed.json")
 
 
+def _fsync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _exclusive_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     descriptor = os.open(path, flags, 0o600)
     try:
         encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        os.write(descriptor, encoded)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError("failed to persist Live authorization record")
+            offset += written
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_directory(path.parent)
 
 
 def issue_live_pilot_authorization(
@@ -187,8 +202,9 @@ def consume_live_pilot_authorization(
 ) -> dict:
     """Atomically consume exactly one matching authorization.
 
-    The exclusive consumed marker is created before the function reports
-    success. A crash after marker creation therefore fails closed on replay.
+    The exclusive consumed marker and the deletion of the reusable authorization
+    are both made directory-durable before the function reports success. A crash
+    after consumption therefore cannot make the authorization reappear.
     """
     current = _aware_utc(now)
     auth_path = _authorization_path(authorization_dir, nonce)
@@ -248,6 +264,7 @@ def consume_live_pilot_authorization(
 
     try:
         auth_path.unlink()
+        _fsync_directory(auth_path.parent)
     except FileNotFoundError:
         # Another actor changing the authorization after the exclusive marker is
         # an unknown state; preserve the consumed marker and fail closed.
