@@ -14,3 +14,16 @@
 
 ### 前回からの変化点
 初回実行のため比較対象なし。
+
+---
+
+## 2026-09-13 (JST)
+- 分析: 完成 — 変化なし。`indicators.py` の `add_indicators()`(MA5/MA25/MA75, RSI, MACD/Signal, ATR, VOL20)、`tests/test_signal_engine.py` 経由の間接検証は前回確認時点から変更なし(`main` は前回ログ以降コミットなし)。
+- シグナル: 完成 — 変化なし。`signal_engine.py` の `determine_signal()` および `src/ai_asset_platform/decision*` 系、`tests/test_signal_engine.py`/`test_signal_selector.py`/`test_final_decision.py`/`test_decision_engine.py` に変更なし。
+- バックテスト: 完成 — 変化なし。`backtest.py` および `src/ai_asset_platform/reports/backtest_*.py`(evaluator/report/report_export/selector/statistics/summary)、対応する `tests/test_backtest_*.py`(8ファイル)に変更なし。
+- 資産推移: 完成 — 変化なし。`src/ai_asset_platform/reports/equity_chart.py`/`equity_history.py`/`performance*.py`、`dashboard_core.py`、対応テスト群に変更なし。
+- リスク管理: 完成(Paper運用範囲) — 変化なし。`risk_manager.py`、`execution/shared_risk_gate.py`/`legacy_risk_gate.py`、`risk/market_sizing.py`、対応テスト群(`test_risk_manager_*`, `test_shared_risk_gate.py`, `test_jp_lot_risk_boundaries.py` 等)に変更なし。
+- 実運用: 一部実装 — `main`(SHA `b854243`)は前回ログ以降コミットなし。GitHub上でPR #280/#281/#282(Live送信・完了パスに対するCodexセーフティ指摘の修正)は依然オープンかつ未マージ。特にPR #281は本日(2026-09-12 UTC)もCodexとのレビューサイクルが継続中で、直近コメント(2026-09-12T20:42:37Z)ではCodex側が `live_operational_pilot_readiness.py`/`live_pilot_same_run_preflight.py`/`ibkr_live_postfill_evidence.py` に対する追加の fail-closed 修正(アカウントfingerprint照合、Paper HEALTHY契約の完全化、`open_order_count` の厳密int判定、`cancel_sent` 等の明示的False判定、通貨バインド)を実装したと報告しているが、**Codex側の実行環境にGitリモートが設定されておらずGitHub上のPRブランチへは実際にはプッシュされていない**(PRの実HEAD SHAは引き続き `1a930b83e83786d6ac5dc73ba38add7a265eaacd` のまま、CIも2026-09-10時点のgreenが最新でこの提案分は未検証)。CLAUDE.mdが警告する「stale or mixed evidence」に該当するため、この修正提案はUNVERIFIEDとして扱う。Issue #255のチェックリストは1項目も完了(チェック)されておらず、外部前提(JPY入金決済、日本株取引許可、JASDEC登録、Live読み取り専用API疎通)も引き続きUNVERIFIED。CLAUDE.md/HANDOFF_MASTER.mdの安全不変条件どおり、現時点でも **NO-GO(実弾`placeOrder`不可)**。
+
+### 前回からの変化点
+コード面(`main`)に変更なし。GitHub上ではPR #281のCodexレビュー往復が本日も継続し、追加の fail-closed 修正案が提示されたが、Codex実行環境のGit remote未設定によりPRブランチへの実プッシュは行われておらず、GitHub上のPR実HEADは前回確認時から変化していない(未反映のまま)。Issue #255はNO-GO状態を維持。
