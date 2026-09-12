@@ -275,6 +275,47 @@ def test_persisted_report_has_no_raw_account_id(tmp_path: Path):
     assert '"live_order_sent": false' in text
 
 
+def test_quantity_requires_exact_decimal_equality_not_isclose():
+    """Ported PR #280 finding: math.isclose(1.0000000005, 1.0) would accept a
+
+    real underfill/overfill. Decimal equality must reject even a tiny
+    discrepancy.
+    """
+    result = match_live_postfill(
+        _snapshot(executions=(_execution(quantity=1.0000000005),)),
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any("does not equal expected total" in item for item in result.blockers)
+
+
+def test_non_finite_aggregate_from_extreme_values_fails_closed_not_crashes():
+    """Ported PR #280 finding: an execution price with an extreme exponent
+
+    can overflow during Decimal multiplication; this must produce a failed
+    match, not raise uncaught.
+    """
+    result = match_live_postfill(
+        _snapshot(executions=(_execution(price="1e9999"),)),
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any(
+        "non-finite" in item or "cannot be represented finitely" in item
+        for item in result.blockers
+    )
+
+
 def test_module_contains_no_order_transport():
     source = Path(
         "src/ai_asset_platform/brokers/ibkr_live_postfill_evidence.py"

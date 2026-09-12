@@ -62,6 +62,17 @@ FINAL_SEND_CONFIRMATION_VALUE = "SEND_EXACTLY_ONE_LIVE_PILOT_NOW"
 FINAL_EVIDENCE_MAX_AGE_SECONDS = 30.0
 _VALID_LIVE_PORTS = {4001, 7496}
 _ACCEPTED_STATUSES = {"PreSubmitted", "Submitted", "Filled"}
+# IbkrOrderState.PENDING_SUBMIT ("PendingSubmit") and IbkrOrderState.
+# PENDING_CANCEL ("PendingCancel") in ibkr_order_events.py: both are
+# nonterminal interim states, not decisions. PendingSubmit means IBKR has
+# accepted the API request but has not yet routed/accepted or rejected the
+# order; PendingCancel means a cancel is in flight but not yet confirmed --
+# the order could still resolve to Cancelled/ApiCancelled or even Filled.
+# Neither must ever set order_error or wake the ack waiter. The next
+# callback (an accepted status, a definitive rejection such as
+# Inactive/Cancelled/ApiCancelled, or the overall timeout) decides the
+# outcome.
+_NONTERMINAL_STATUSES = {"PendingSubmit", "PendingCancel"}
 
 
 @dataclass(frozen=True)
@@ -130,13 +141,25 @@ class _LivePilotClient(EWrapper, EClient):
     ) -> None:
         if self.watched_order_id is None or int(orderId) != self.watched_order_id:
             return
-        self.broker_status = str(status)
+        normalized_status = str(status)
+        if normalized_status in _NONTERMINAL_STATUSES:
+            # Genuine interim state; do not wake the waiter either way.
+            self.broker_status = self.broker_status or normalized_status
+            return
+        self.broker_status = normalized_status
         try:
             perm = int(permId)
         except (TypeError, ValueError):
             perm = 0
-        if self.broker_status in _ACCEPTED_STATUSES and perm > 0:
+        if normalized_status in _ACCEPTED_STATUSES and perm > 0:
             self.ack_perm_id = perm
+            self.ack_ready.set()
+        elif normalized_status and normalized_status not in _ACCEPTED_STATUSES:
+            # A definitive non-accepted status (e.g. Inactive, Cancelled,
+            # ApiCancelled, PendingCancel) must wake the waiter as a failure
+            # instead of silently waiting out the full timeout for a callback
+            # that will never arrive.
+            self.order_error = f"broker orderStatus callback reported non-accepted status: {normalized_status}"
             self.ack_ready.set()
 
     def openOrder(self, orderId, contract, order, orderState) -> None:  # noqa: N802
@@ -146,13 +169,36 @@ class _LivePilotClient(EWrapper, EClient):
             self.order_error = "broker acknowledgement account does not match the same-session account"
             self.ack_ready.set()
             return
+        status = str(getattr(orderState, "status", "") or "").strip()
+        if status in _NONTERMINAL_STATUSES:
+            # Genuine interim state (e.g. PendingSubmit); keep waiting for a
+            # later accepted/rejected callback or the overall timeout. Must
+            # never be treated as either an acknowledgement or a rejection,
+            # regardless of permId.
+            self.broker_status = self.broker_status or status
+            return
         try:
             perm = int(getattr(order, "permId", 0) or 0)
         except (TypeError, ValueError):
             perm = 0
-        if perm > 0:
+        if perm > 0 and status in _ACCEPTED_STATUSES:
             self.ack_perm_id = perm
-            self.broker_status = self.broker_status or "OpenOrder"
+            # Always overwrite here (never "or"): a decisive accepted status
+            # must replace any earlier nonterminal PendingSubmit value, or
+            # the returned result would carry contradictory broker-state
+            # evidence (ORDER_ACKNOWLEDGED with a still-pending status).
+            self.broker_status = status
+            self.ack_ready.set()
+        elif status and status not in _ACCEPTED_STATUSES:
+            # A definitive non-accepted status (e.g. Inactive) must never be
+            # treated as acknowledgement even when permId is already
+            # positive, otherwise this callback could race ahead of a
+            # rejection reported through orderStatus/error. Record the
+            # decisive status itself (not left stuck at an earlier
+            # PendingSubmit/PendingCancel or None) so the returned
+            # broker-state evidence matches the actual rejection.
+            self.broker_status = status
+            self.order_error = f"broker openOrder callback reported non-accepted status: {status}"
             self.ack_ready.set()
 
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson="") -> None:  # noqa: N802
@@ -207,11 +253,29 @@ def _positive(value: object, *, name: str) -> float:
     return parsed
 
 
-def _utc(value: datetime | None) -> datetime:
-    current = value if value is not None else datetime.now(timezone.utc)
-    if current.tzinfo is None or current.utcoffset() is None:
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("final sender clock must be timezone-aware")
-    return current.astimezone(timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _system_clock() -> datetime:
+    """The one real-time clock the public Live entry point can use."""
+    return datetime.now(timezone.utc)
+
+
+def _current_clock() -> datetime:
+    """Internal time seam for ``send_exactly_one_live_pilot``.
+
+    There is deliberately no public parameter on the production entry point
+    that could let any caller -- production or a careless wrapper -- supply
+    a fixed or regressing clock; doing so would let every freshness/
+    authorization-expiry sample across the handshake/fsync/stop work reuse a
+    caller-controlled instant instead of observing real elapsed time. A test
+    that must control time monkeypatches this private function directly;
+    ``_system_clock`` above always remains the untouched real clock.
+    """
+    return _system_clock()
 
 
 def _require_fresh_timestamp(value: object, *, label: str, now: datetime) -> None:
@@ -224,6 +288,17 @@ def _require_fresh_timestamp(value: object, *, label: str, now: datetime) -> Non
     age = (now - observed.astimezone(timezone.utc)).total_seconds()
     if age < 0 or age > FINAL_EVIDENCE_MAX_AGE_SECONDS:
         raise PermissionError(f"{label} evidence is outside the final send freshness window")
+
+
+def _require_not_expired(value: object, *, label: str, now: datetime) -> None:
+    try:
+        expires = datetime.fromisoformat(str(value or "").strip())
+    except ValueError as exc:
+        raise PermissionError(f"{label} expiry is missing or invalid") from exc
+    if expires.tzinfo is None or expires.utcoffset() is None:
+        raise PermissionError(f"{label} expiry is not timezone-aware")
+    if now > expires.astimezone(timezone.utc):
+        raise PermissionError(f"{label} has expired")
 
 
 def _validate_request(
@@ -239,10 +314,13 @@ def _validate_request(
     side = str(request.side or "").strip().upper()
     if side not in {"BUY", "SELL"}:
         raise ValueError("side must be BUY or SELL")
-    try:
-        quantity = int(request.quantity)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("quantity must be the exact bounded pilot quantity") from exc
+    quantity = request.quantity
+    if isinstance(quantity, bool) or not isinstance(quantity, int):
+        # Reject float/str/bool outright rather than coercing: int(100.0),
+        # int("100"), and int(True) would otherwise satisfy the exact
+        # bounded-quantity check below for a request that never carried an
+        # actual integer.
+        raise ValueError("quantity must be the exact bounded pilot quantity")
     if LIVE_PILOT_SCOPE.get(ticker) != quantity:
         raise ValueError("quantity does not equal the exact bounded pilot quantity")
     limit_price = _positive(request.limit_price, name="limit_price")
@@ -328,10 +406,15 @@ def send_exactly_one_live_pilot(
     stop_path: Path = DEFAULT_STOP_PATH,
     repository_root: Path = Path("."),
     timeout_seconds: float = 10.0,
-    now: datetime | None = None,
     client_factory: Callable[[], _LivePilotClient] = _LivePilotClient,
 ) -> LivePilotSendResult:
     """Make at most one broker transport call for one fully-bound Live pilot.
+
+    The clock is sampled independently at every consequential safety
+    boundary via the private ``_current_clock()`` seam; there is no
+    parameter here a caller could use to override it. No plain
+    pre-computed timestamp can be supplied that would let a slow step
+    reuse a stale instant.
 
     No retry is attempted under any outcome. A timeout, transport exception,
     broker-side error, or ambiguous acknowledgement becomes UNKNOWN and must be
@@ -346,7 +429,7 @@ def send_exactly_one_live_pilot(
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout_seconds must be positive and finite")
 
-    current = _utc(now)
+    current = _utc(_current_clock())
     intent, ticker, quantity, limit_price, notional = _validate_request(
         request,
         readiness_report,
@@ -378,6 +461,10 @@ def send_exactly_one_live_pilot(
         and same_run_preflight.live_global_lock_intact
     ):
         raise PermissionError("same-run preflight safety evidence is incomplete")
+    if str(same_run_preflight.expected_account_fingerprint or "").strip().lower() != fingerprint:
+        raise PermissionError(
+            "same-run preflight was not evaluated against the pinned account fingerprint"
+        )
     endpoint_port = same_run_preflight.endpoint_port
     if endpoint_port not in _VALID_LIVE_PORTS:
         raise PermissionError("same-run preflight endpoint is not an audited Live endpoint")
@@ -473,8 +560,10 @@ def send_exactly_one_live_pilot(
             )
 
         # Re-check evidence after the final Live connection/account handshake so
-        # a slow connection cannot silently age a preflight past its window.
-        final_clock = _utc(now)
+        # a slow connection cannot silently age a preflight past its window. This
+        # always re-invokes the clock (real wall-clock time in production) so a
+        # caller-supplied fixed instant from the earlier check cannot be reused.
+        final_clock = _utc(_current_clock())
         _require_fresh_timestamp(
             readiness_report.get("checked_at"),
             label="operational readiness",
@@ -506,19 +595,62 @@ def send_exactly_one_live_pilot(
             account_fingerprint=fingerprint,
             endpoint_port=int(endpoint_port),
             authorization_dir=authorization_dir,
-            now=now,
+            now=final_clock,
         )
         create_consumed_authorization_journal(
             intent_id=intent,
             nonce=nonce,
             consumed_authorization=consumed,
             directory=journal_dir,
-            now=now,
+            now=final_clock,
         )
-        record_send_attempt(intent, directory=journal_dir, now=now)
+        authorization_expires_at = consumed.get("expires_at")
+        record_send_attempt(intent, directory=journal_dir, now=final_clock)
 
-        # Last possible stop check. The irreversible attempt is deliberately
-        # spent first, so a stop arriving here can never be bypassed by retry.
+        # Prepare the watched fields first: trivial in-memory assignments,
+        # not I/O, so they cannot themselves introduce a delay between the
+        # final safety sequence below and transport.
+        client.watched_order_id = int(order_id)
+        client.watched_account = raw_account_id
+
+        # Bounded final safety sequence, immediately before transport, with
+        # nothing else interleaved: freshness/expiry re-validation (a fresh
+        # clock read -- the exclusive-create + fsync writes above can
+        # themselves stall) runs first, then the stop check -- a fast,
+        # nonblocking local read -- as the literal last operation before
+        # placeOrder. The attempt is already permanently spent by this point
+        # regardless of outcome; only transport itself is still gated.
+        try:
+            final_pretransport_clock = _utc(_current_clock())
+            _require_fresh_timestamp(
+                readiness_report.get("checked_at"),
+                label="operational readiness",
+                now=final_pretransport_clock,
+            )
+            _require_fresh_timestamp(
+                same_run_preflight.checked_at,
+                label="same-run preflight",
+                now=final_pretransport_clock,
+            )
+            _require_not_expired(
+                authorization_expires_at,
+                label="one-shot operator authorization",
+                now=final_pretransport_clock,
+            )
+        except PermissionError as exc:
+            return LivePilotSendResult(
+                "BLOCKED_STALE_AFTER_ATTEMPT",
+                False,
+                False,
+                int(order_id),
+                None,
+                endpoint_port,
+                observed_fingerprint,
+                None,
+                True,
+                f"evidence aged past freshness window after durable attempt recording; attempt remains permanently spent: {exc}",
+            )
+
         if live_pilot_stop_is_active(stop_path=stop_path):
             return LivePilotSendResult(
                 "BLOCKED_STOP_AFTER_ATTEMPT",
@@ -533,8 +665,6 @@ def send_exactly_one_live_pilot(
                 "emergency stop became active; attempt remains permanently spent",
             )
 
-        client.watched_order_id = int(order_id)
-        client.watched_account = raw_account_id
         try:
             client.placeOrder(int(order_id), contract, order)
         except Exception as exc:
@@ -542,7 +672,7 @@ def send_exactly_one_live_pilot(
                 intent,
                 reason=f"placeOrder transport raised: {type(exc).__name__}",
                 directory=journal_dir,
-                now=now,
+                now=_current_clock(),
             )
             return LivePilotSendResult(
                 "UNKNOWN",
@@ -562,7 +692,7 @@ def send_exactly_one_live_pilot(
                 intent,
                 reason="broker acknowledgement timed out",
                 directory=journal_dir,
-                now=now,
+                now=_current_clock(),
             )
             return LivePilotSendResult(
                 "UNKNOWN",
@@ -581,7 +711,7 @@ def send_exactly_one_live_pilot(
                 intent,
                 reason=client.order_error or "broker acknowledgement lacked positive permId",
                 directory=journal_dir,
-                now=now,
+                now=_current_clock(),
             )
             return LivePilotSendResult(
                 "UNKNOWN",
@@ -602,7 +732,7 @@ def send_exactly_one_live_pilot(
             order_id=int(order_id),
             perm_id=perm_id,
             directory=journal_dir,
-            now=now,
+            now=_current_clock(),
         )
         return LivePilotSendResult(
             "ORDER_ACKNOWLEDGED",

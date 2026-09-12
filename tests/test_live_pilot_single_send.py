@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,13 +50,23 @@ def _readiness() -> dict:
     }
 
 
-def _preflight(*, ready: bool = True, checked_at: str = CHECKED_AT) -> LivePilotSameRunPreflight:
+def _preflight(
+    *,
+    ready: bool = True,
+    checked_at: str = CHECKED_AT,
+    expected_account_fingerprint: str | None = None,
+) -> LivePilotSameRunPreflight:
     return LivePilotSameRunPreflight(
         status="READY_FOR_OPERATOR_AUTHORIZATION" if ready else "BLOCKED",
         checked_at=checked_at,
         blockers=() if ready else ("blocked",),
         ticker="9432.T",
         account_fingerprint_match=ready,
+        expected_account_fingerprint=(
+            expected_account_fingerprint
+            if expected_account_fingerprint is not None
+            else (PINNED_FINGERPRINT if ready else None)
+        ),
         endpoint_port=4001 if ready else None,
         endpoint_binding_ready=ready,
         evidence_fresh=ready,
@@ -124,7 +134,17 @@ class FakeClient:
         self.connected = False
 
 
-def _patch_prereqs(monkeypatch, *, stop_values=(False, False)):
+def _patch_prereqs(
+    monkeypatch,
+    *,
+    stop_values=(False, False),
+    authorization_expires_at=None,
+):
+    expires_at = (
+        authorization_expires_at
+        if authorization_expires_at is not None
+        else (NOW + timedelta(minutes=10)).isoformat(timespec="seconds")
+    )
     monkeypatch.setattr(
         subject,
         "audit_live_pilot_source_cutover",
@@ -144,6 +164,7 @@ def _patch_prereqs(monkeypatch, *, stop_values=(False, False)):
             "status": "CONSUMED",
             "intent_id": kwargs["intent_id"],
             "nonce": kwargs["nonce"],
+            "expires_at": expires_at,
             "order_sent": False,
             "live_order_sent": False,
         },
@@ -171,7 +192,12 @@ def _patch_prereqs(monkeypatch, *, stop_values=(False, False)):
     return events
 
 
-def _send(monkeypatch, client: FakeClient, **overrides):
+def _send(monkeypatch, client: FakeClient, *, clock=None, **overrides):
+    # There is no public `clock` parameter on send_exactly_one_live_pilot by
+    # design (see _current_clock's docstring): a test controls time only by
+    # monkeypatching the private seam directly, exactly as production code
+    # would be unable to.
+    monkeypatch.setattr(subject, "_current_clock", clock if clock is not None else (lambda: NOW))
     args = dict(
         request=_request(),
         nonce="nonce-test",
@@ -182,7 +208,6 @@ def _send(monkeypatch, client: FakeClient, **overrides):
         final_confirmation=subject.FINAL_SEND_CONFIRMATION_VALUE,
         repository_root=Path("."),
         timeout_seconds=0.01,
-        now=NOW,
         client_factory=lambda: client,
     )
     args.update(overrides)
@@ -365,6 +390,28 @@ def test_exact_scope_rejects_wrong_quantity(monkeypatch):
     assert client.connected is False
 
 
+def test_quantity_requires_an_exact_non_boolean_int_not_coercion(monkeypatch):
+    """PM P2 (round 9): int(100.0), int("100"), and int(True) would each
+
+    satisfy the exact bounded-quantity comparison; only a genuine int may be
+    supplied.
+    """
+    _patch_prereqs(monkeypatch)
+    for bad_quantity in (100.0, "100", True):
+        client = FakeClient()
+        request = subject.LivePilotSendRequest(
+            intent_id="live-pilot:9432:BUY:100:test",
+            ticker="9432.T",
+            side="BUY",
+            quantity=bad_quantity,
+            limit_price=400.0,
+            estimated_notional_jpy=40_000.0,
+        )
+        with pytest.raises(ValueError, match="exact bounded pilot quantity"):
+            _send(monkeypatch, client, request=request)
+        assert client.connected is False, bad_quantity
+
+
 def test_source_pin_failure_blocks_before_connection(monkeypatch):
     monkeypatch.setattr(
         subject,
@@ -385,3 +432,497 @@ def test_module_contains_one_place_order_call_and_no_cancel_transport():
     assert source.count("client.placeOrder(") == 1
     assert "client.cancelOrder(" not in source
     assert "reqGlobalCancel" not in source
+
+
+def test_preflight_for_different_account_cannot_be_reused_for_this_send(monkeypatch):
+    """Codex P1: a genuine preflight for account A must not authorize a send
+
+    pinned to account B merely because account_fingerprint_match is True on
+    that (unrelated) preflight record.
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    other_fingerprint = hashlib.sha256(b"U_OTHER_ACCOUNT").hexdigest()
+    preflight = _preflight(expected_account_fingerprint=other_fingerprint)
+    with pytest.raises(PermissionError, match="pinned account fingerprint"):
+        _send(monkeypatch, client, same_run_preflight=preflight)
+    assert client.connected is False
+    assert events == []
+
+
+def test_final_freshness_check_rereads_the_clock_not_a_fixed_now(monkeypatch):
+    """Codex P1: the post-connection freshness re-check must observe real
+
+    elapsed time. A caller-supplied clock callable that advances past the
+    freshness window between the two checks must still block the send, even
+    though the first (pre-connection) check passed.
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    calls = {"count": 0}
+
+    def advancing_clock() -> datetime:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return NOW
+        return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
+
+    with pytest.raises(PermissionError, match="freshness window"):
+        _send(monkeypatch, client, clock=advancing_clock)
+    assert calls["count"] >= 2
+    assert client.place_calls == []
+    assert events == []
+
+
+def test_stale_evidence_after_durable_attempt_recording_blocks_transport(monkeypatch):
+    """Codex P1 (round 2): even after the post-connection freshness re-check
+
+    passes, the fsync-backed authorization/journal/attempt writes that follow
+    it can themselves stall. If evidence has aged past its window by the time
+    those durable writes finish, transport must still be blocked -- with the
+    attempt already (and irreversibly) spent -- rather than transmitting on
+    stale evidence merely because no clock was read again before placeOrder.
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    calls = {"count": 0}
+
+    def advancing_clock() -> datetime:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return NOW
+        return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
+
+    result = _send(monkeypatch, client, clock=advancing_clock)
+
+    assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
+    assert result.sent is False
+    assert result.recovery_required is True
+    assert calls["count"] >= 3
+    assert client.place_calls == []
+    # The irreversible attempt marker must already have been recorded before
+    # this check runs -- it is not skipped/rolled back just because transport
+    # is subsequently blocked.
+    assert events == ["journal", "attempt"]
+
+
+def test_freshness_is_rechecked_before_the_final_stop_check(monkeypatch):
+    """PM P1 (round 9): the bounded final sequence is watched-field
+
+    assignment -> freshness/expiry re-check (fresh clock) -> stop check
+    (fast, nonblocking) -> placeOrder, with nothing else interleaved. If
+    evidence is already stale at that point, the stop check must never even
+    run -- the send is blocked purely on staleness.
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    order = []
+
+    original_stop_check = subject.live_pilot_stop_is_active
+
+    def tracking_stop_check(**kwargs):
+        order.append("stop_check")
+        return original_stop_check(**kwargs)
+
+    monkeypatch.setattr(subject, "live_pilot_stop_is_active", tracking_stop_check)
+
+    calls = {"count": 0}
+
+    def advancing_clock() -> datetime:
+        calls["count"] += 1
+        order.append(f"clock_{calls['count']}")
+        if calls["count"] <= 2:
+            return NOW
+        return NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
+
+    result = _send(monkeypatch, client, clock=advancing_clock)
+
+    assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
+    assert client.place_calls == []
+    assert events == ["journal", "attempt"]
+    # There are two stop checks in the whole function: an early one before
+    # ever connecting, and the final one immediately before placeOrder. Only
+    # the early one should have run; the final one must never be reached
+    # once the final freshness re-check fails.
+    assert order.count("stop_check") == 1
+    assert "clock_3" in order
+    assert order.index("stop_check") < order.index("clock_3")
+
+
+def test_expired_authorization_after_durable_attempt_recording_blocks_transport(monkeypatch):
+    """Codex P1 (round 5): the post-attempt re-check must also catch an
+
+    operator authorization whose own (independent, possibly shorter) TTL
+    elapsed while the durable writes ran, even when the readiness/preflight
+    30-second freshness window has not yet been exceeded.
+    """
+    short_lived_expiry = (NOW + timedelta(seconds=5)).isoformat(timespec="seconds")
+    events = _patch_prereqs(monkeypatch, authorization_expires_at=short_lived_expiry)
+    client = FakeClient()
+    calls = {"count": 0}
+
+    def advancing_clock() -> datetime:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return NOW
+        # Past the 5-second authorization expiry, but still well inside the
+        # 30-second readiness/preflight freshness window.
+        return NOW + timedelta(seconds=10)
+
+    result = _send(monkeypatch, client, clock=advancing_clock)
+
+    assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
+    assert result.sent is False
+    assert result.recovery_required is True
+    assert client.place_calls == []
+    assert events == ["journal", "attempt"]
+
+
+def test_fixed_clock_callable_still_works_for_simple_deterministic_tests(monkeypatch):
+    """A callable wrapping a fixed instant remains the supported way for a
+
+    simple test to get deterministic behavior; only a bare datetime is
+    rejected (see the next test).
+    """
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    result = _send(monkeypatch, client, clock=lambda: NOW)
+    assert result.status == "ORDER_ACKNOWLEDGED"
+    assert events == ["journal", "attempt", "ack"]
+
+
+def test_bare_datetime_is_no_longer_accepted_as_clock(monkeypatch):
+    """PM P1 (PR #280 finding, ported): the public entry point must not
+
+    accept a plain pre-computed datetime at all, only a zero-argument
+    callable -- otherwise a future wrapper could pass one and silently
+    freeze every freshness/expiry check at that single instant.
+    """
+    _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    with pytest.raises(TypeError):
+        _send(monkeypatch, client, clock=NOW)
+
+
+def test_no_public_clock_parameter_exists_on_the_production_entry_point():
+    """PM P1 (PR #280 finding, ported): production must have no parameter at
+
+    all through which a caller could override safety-boundary time -- not
+    even one that defaults safely. Time control is only possible by
+    monkeypatching the private ``_current_clock`` seam directly, which
+    production code never does.
+    """
+    import inspect
+
+    signature = inspect.signature(subject.send_exactly_one_live_pilot)
+    assert "clock" not in signature.parameters
+    assert "now" not in signature.parameters
+
+
+def test_current_clock_defaults_to_the_real_system_clock():
+    assert subject._current_clock is not subject._system_clock
+
+    before = datetime.now(timezone.utc)
+    sampled = subject._current_clock()
+    after = datetime.now(timezone.utc)
+    assert sampled.tzinfo is not None
+    assert before <= sampled <= after
+
+
+def test_inactive_open_order_status_does_not_falsely_acknowledge():
+    """Codex P1: openOrder must not treat a non-accepted status (e.g.
+
+    Inactive) as acknowledgement merely because permId is already positive.
+    """
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+
+    inactive_order = SimpleNamespace(account=PINNED_ACCOUNT, permId=880077)
+    inactive_state = SimpleNamespace(status="Inactive")
+    client.openOrder(77, object(), inactive_order, inactive_state)
+
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id is None
+    assert client.order_error is not None
+    assert "Inactive" in client.order_error
+    # Codex P2: the decisive rejection status must be recorded, not left
+    # stuck at None.
+    assert client.broker_status == "Inactive"
+
+
+def test_accepted_open_order_status_still_acknowledges():
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+
+    order = SimpleNamespace(account=PINNED_ACCOUNT, permId=880077)
+    state = SimpleNamespace(status="Submitted")
+    client.openOrder(77, object(), order, state)
+
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+
+
+def _client() -> "subject._LivePilotClient":
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+    return client
+
+
+def test_pending_submit_alone_is_nonterminal_and_never_wakes_the_waiter():
+    """PM P1: PendingSubmit is a genuine interim state, not a rejection --
+
+    it must never set order_error or ack_ready by itself (this is what the
+    caller's overall timeout, not this callback, must eventually resolve).
+    """
+    client = _client()
+    order = SimpleNamespace(account=PINNED_ACCOUNT, permId=0)
+    state = SimpleNamespace(status="PendingSubmit")
+    client.openOrder(77, object(), order, state)
+
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+    assert client.ack_perm_id is None
+    assert client.broker_status == "PendingSubmit"
+
+
+def test_pending_submit_then_pre_submitted_acknowledges():
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    assert client.ack_ready.is_set() is False
+
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="PreSubmitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+    # Codex P2: the decisive accepted status must replace the earlier
+    # nonterminal PendingSubmit value, not leave it stuck.
+    assert client.broker_status == "PreSubmitted"
+
+
+def test_pending_submit_then_submitted_acknowledges():
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+    assert client.broker_status == "Submitted"
+
+
+def test_pending_submit_then_inactive_fails_closed_as_definitive_rejection():
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    assert client.ack_ready.is_set() is False
+
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=0),
+        SimpleNamespace(status="Inactive"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id is None
+    assert client.order_error is not None
+    assert "Inactive" in client.order_error
+    # Codex P2: the decisive rejection status must replace the earlier
+    # nonterminal PendingSubmit value.
+    assert client.broker_status == "Inactive"
+
+
+def test_duplicate_and_interleaved_pending_submit_callbacks_stay_harmless():
+    """Duplicate/interleaved PendingSubmit callbacks (openOrder and
+
+    orderStatus both firing repeatedly) must remain nonterminal and never
+    accumulate into a false ack or a false error.
+    """
+    client = _client()
+    for _ in range(3):
+        client.openOrder(
+            77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+        )
+        client.orderStatus(77, "PendingSubmit", 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+    assert client.ack_perm_id is None
+
+    # A later genuine acknowledgement still works normally afterward.
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+
+
+def test_order_status_pending_submit_then_submitted_acknowledges():
+    client = _client()
+    client.orderStatus(77, "PendingSubmit", 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+
+    client.orderStatus(77, "Submitted", 0.0, 100.0, 0.0, 880077, 0, 0.0, 0, "", 0.0)
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+
+
+def test_order_status_terminal_rejection_wakes_the_waiter():
+    """PM audit: orderStatus previously silently ignored Cancelled/
+
+    ApiCancelled/Inactive, relying solely on openOrder/error to ever wake the
+    waiter. A definitive rejection must not be able to hang until the full
+    timeout when orderStatus alone reports it.
+    """
+    for bad_status in ("Cancelled", "ApiCancelled", "Inactive"):
+        client = _client()
+        client.orderStatus(77, bad_status, 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+        assert client.ack_ready.is_set() is True, bad_status
+        assert client.ack_perm_id is None, bad_status
+        assert client.order_error is not None and bad_status in client.order_error, bad_status
+
+
+def test_order_status_pending_cancel_is_nonterminal_not_a_rejection():
+    """Codex P2: PendingCancel means a cancel is in flight but not yet
+
+    confirmed -- the order could still resolve to Cancelled/ApiCancelled or
+    even Filled. It must not be treated as a definitive rejection, matching
+    PendingSubmit's nonterminal handling.
+    """
+    client = _client()
+    client.orderStatus(77, "PendingCancel", 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+    assert client.ack_perm_id is None
+    assert client.broker_status == "PendingCancel"
+
+    # It can still resolve either way afterward.
+    client.orderStatus(77, "Cancelled", 0.0, 100.0, 0.0, 0, 0, 0.0, 0, "", 0.0)
+    assert client.ack_ready.is_set() is True
+    assert client.order_error is not None and "Cancelled" in client.order_error
+
+
+def test_open_order_pending_cancel_is_nonterminal_not_a_rejection():
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingCancel")
+    )
+    assert client.ack_ready.is_set() is False
+    assert client.order_error is None
+    assert client.ack_perm_id is None
+    assert client.broker_status == "PendingCancel"
+
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Filled"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.broker_status == "Filled"
+
+
+def test_order_status_partial_and_full_fill_both_acknowledge():
+    """A partial fill (filled < remaining) reported via a Submitted status,
+
+    and a completed fill reported via Filled, must both acknowledge -- fill
+    quantity is proven later by post-fill reconciliation, not this ack wait.
+    """
+    partial = _client()
+    partial.orderStatus(77, "Submitted", 40.0, 60.0, 400.0, 880077, 0, 0.0, 0, "", 0.0)
+    assert partial.ack_ready.is_set() is True
+    assert partial.ack_perm_id == 880077
+
+    full = _client()
+    full.orderStatus(77, "Filled", 100.0, 0.0, 400.0, 880077, 0, 0.0, 0, "", 0.0)
+    assert full.ack_ready.is_set() is True
+    assert full.ack_perm_id == 880077
+
+
+def test_error_callback_after_pending_submit_wakes_the_waiter():
+    """A definitive broker error for the watched order must wake the waiter
+
+    even while the order is still sitting in PendingSubmit.
+    """
+    client = _client()
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    assert client.ack_ready.is_set() is False
+
+    client.error(77, 201, "Order rejected - reason")
+    assert client.ack_ready.is_set() is True
+    assert client.order_error is not None
+    assert "201" in client.order_error
+
+
+def test_duplicate_accepted_callbacks_after_ack_do_not_change_the_outcome():
+    """A duplicate/late accepted callback arriving after the waiter has
+
+    already been woken must not flip a successful ack to an error or vice
+    versa -- ack_ready being an Event, re-setting it is a no-op, and the
+    caller only reads state once after its single wait().
+    """
+    client = _client()
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+
+    # A duplicate/late orderStatus for the same order must not disturb the
+    # already-recorded successful acknowledgement.
+    client.orderStatus(77, "Submitted", 100.0, 0.0, 400.0, 880077, 0, 0.0, 0, "", 0.0)
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+
+
+def test_stale_reordered_pending_submit_after_ack_does_not_disturb_the_outcome():
+    """A stale/out-of-order PendingSubmit callback arriving after a genuine
+
+    acknowledgement (e.g. delivered out of order over the socket) must not
+    downgrade broker_status or otherwise disturb the already-proven ack.
+    """
+    client = _client()
+    client.openOrder(
+        77,
+        object(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.broker_status == "Submitted"
+
+    client.openOrder(
+        77, object(), SimpleNamespace(account=PINNED_ACCOUNT, permId=0), SimpleNamespace(status="PendingSubmit")
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.order_error is None
+    assert client.broker_status == "Submitted"

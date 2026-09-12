@@ -18,6 +18,15 @@ from datetime import datetime, timezone
 import math
 from pathlib import Path
 
+from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
+    REPORT_SCHEMA_VERSION as _OPEN_ORDERS_SCHEMA_VERSION,
+)
+from ai_asset_platform.brokers.ibkr_live_fx_evidence import (
+    REPORT_SCHEMA_VERSION as _FX_SCHEMA_VERSION,
+)
+from ai_asset_platform.brokers.ibkr_live_readonly_account import (
+    REPORT_SCHEMA_VERSION as _ACCOUNT_SCHEMA_VERSION,
+)
 from ai_asset_platform.core.settings import SETTINGS, PlatformSettings
 from ai_asset_platform.execution.live_pilot_emergency_stop import (
     DEFAULT_STOP_PATH,
@@ -28,10 +37,15 @@ from ai_asset_platform.execution.live_pilot_emergency_stop import (
 DEFAULT_MAX_AGE_SECONDS = 30.0
 DEFAULT_MAX_SKEW_SECONDS = 15.0
 _VALID_LIVE_ENDPOINT_PORTS = {4001, 7496}
+_VALID_PAPER_ENDPOINT_PORTS = {4002, 7497}
 _USD_TICKERS = {"AAPL", "SPY"}
 _INSTRUMENT_CURRENCY = {"AAPL": "USD", "SPY": "USD", "9432.T": "JPY"}
 _SETTLED_CASH_RESERVE = {"JPY": 1_000.0, "USD": 10.0}
 _BASE_AVAILABLE_FUNDS_RESERVE_JPY = 1_000.0
+_CLEAN_RECONCILIATION_ACTION = "RECONCILIATION_EVIDENCE_IS_CLEAN"
+# ibkr_paper_operations_monitor.py hardcodes "schema_version": 1 inline
+# rather than exporting a constant.
+_REQUIRED_PAPER_MONITOR_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -41,6 +55,7 @@ class LivePilotSameRunPreflight:
     blockers: tuple[str, ...]
     ticker: str
     account_fingerprint_match: bool
+    expected_account_fingerprint: str | None
     endpoint_port: int | None
     endpoint_binding_ready: bool
     evidence_fresh: bool
@@ -102,35 +117,72 @@ def _port(report: dict | None) -> int | None:
     return value if value in _VALID_LIVE_ENDPOINT_PORTS else None
 
 
-def _read_only_clean(report: dict | None) -> bool:
-    return bool(
-        isinstance(report, dict)
-        and report.get("ready") is True
-        and report.get("connection_mode") == "LIVE_READ_ONLY"
-        and not report.get("order_sent")
-        and not report.get("cancel_sent")
-        and not report.get("live_order_sent")
-    )
+def _is_exact_zero_int(value: object) -> bool:
+    """True only for the exact ``int`` zero, not ``0.0``, ``"0"``, or ``False``."""
+    return isinstance(value, int) and not isinstance(value, bool) and value == 0
+
+
+def _read_only_clean(report: dict | None, *, required_schema_version: int) -> bool:
+    """Require an exact-current-schema, exact-``False``-flagged clean report.
+
+    ``cancel_sent`` is required to be exactly ``False`` only when present,
+    since not every producer's schema defines it; a report that does define
+    it and sets it to anything other than ``False`` fails closed rather than
+    being silently ignored.
+    """
+    if not isinstance(report, dict):
+        return False
+    if report.get("schema_version") != required_schema_version:
+        return False
+    if report.get("ready") is not True or report.get("connection_mode") != "LIVE_READ_ONLY":
+        return False
+    if report.get("order_sent") is not False or report.get("live_order_sent") is not False:
+        return False
+    if "cancel_sent" in report and report.get("cancel_sent") is not False:
+        return False
+    return True
 
 
 def _paper_safe(report: dict | None) -> bool:
+    """Require an exact HEALTHY, schema-current, fully-explicit Paper evidence contract.
+
+    Mirrors the equally-strict contract required by
+    ``live_pilot_completion._paper_safe``: exact ``status == "HEALTHY"`` (not
+    merely not ``CRITICAL``), the current report schema, exact non-boolean
+    integer-zero counters, an empty ``open_orders`` list, and every
+    transport flag the exact boolean ``False``.
+    """
     if not isinstance(report, dict):
         return False
+    if report.get("schema_version") != _REQUIRED_PAPER_MONITOR_SCHEMA_VERSION:
+        return False
     broker = report.get("broker")
-    broker = broker if isinstance(broker, dict) else {}
+    if not isinstance(broker, dict):
+        return False
+    if not (
+        _is_exact_zero_int(broker.get("reconciliation_blocker_count"))
+        and _is_exact_zero_int(broker.get("open_order_count"))
+    ):
+        return False
+    open_orders = broker.get("open_orders")
     try:
-        blockers = int(broker.get("reconciliation_blocker_count", 0) or 0)
-        open_orders = int(broker.get("open_order_count", 0) or 0)
+        endpoint_port = int(broker.get("endpoint_port"))
     except (TypeError, ValueError):
         return False
     return bool(
-        str(report.get("status") or "").strip().upper() != "CRITICAL"
+        report.get("status") == "HEALTHY"
+        and broker.get("account_ready") is True
+        and broker.get("execution_snapshot_ready") is True
+        and broker.get("all_open_orders_ready") is True
+        and str(broker.get("reconciliation_next_action") or "").strip()
+        == _CLEAN_RECONCILIATION_ACTION
+        and endpoint_port in _VALID_PAPER_ENDPOINT_PORTS
+        and isinstance(open_orders, list)
+        and len(open_orders) == 0
         and report.get("accounting_safe") is True
         and report.get("risk_safe") is True
-        and blockers == 0
-        and open_orders == 0
-        and not report.get("monitor_order_sent")
-        and not report.get("live_order_sent")
+        and report.get("monitor_order_sent") is False
+        and report.get("live_order_sent") is False
     )
 
 
@@ -242,32 +294,46 @@ def evaluate_live_pilot_same_run_preflight(
     if not readiness_ready:
         blockers.append("operational Live pilot readiness is not ready for this ticker")
 
-    account_clean = _read_only_clean(live_account_report)
-    open_orders_clean = _read_only_clean(live_open_orders_report)
+    account_clean = _read_only_clean(
+        live_account_report, required_schema_version=_ACCOUNT_SCHEMA_VERSION
+    )
+    open_orders_clean = _read_only_clean(
+        live_open_orders_report, required_schema_version=_OPEN_ORDERS_SCHEMA_VERSION
+    )
     if not account_clean:
         blockers.append("same-run Live account evidence is not clean read-only evidence")
     if not open_orders_clean:
         blockers.append("same-run Live open-order evidence is not clean read-only evidence")
     if open_orders_clean:
-        try:
-            open_order_count = int(live_open_orders_report.get("open_order_count", 0))
-        except (TypeError, ValueError):
-            open_order_count = -1
-        if open_order_count != 0:
-            blockers.append("same-run Live open-order evidence is not empty")
+        raw_count = live_open_orders_report.get("open_order_count")
+        raw_orders = live_open_orders_report.get("orders")
+        if (
+            not _is_exact_zero_int(raw_count)
+            or not isinstance(raw_orders, list)
+            or len(raw_orders) != 0
+        ):
+            blockers.append("same-run Live open-order evidence is not exactly empty")
 
     observed_fingerprint = (
         str(live_account_report.get("account_fingerprint") or "").strip().lower()
         if isinstance(live_account_report, dict)
         else ""
     )
+    open_orders_fingerprint = (
+        str(live_open_orders_report.get("account_fingerprint") or "").strip().lower()
+        if isinstance(live_open_orders_report, dict)
+        else ""
+    )
     fingerprint_match = bool(
         expected_fingerprint
         and len(expected_fingerprint) == 64
         and observed_fingerprint == expected_fingerprint
+        and open_orders_fingerprint == expected_fingerprint
     )
     if not fingerprint_match:
-        blockers.append("same-run Live account fingerprint does not match the pinned account")
+        blockers.append(
+            "same-run Live account/open-order fingerprints do not match the pinned account"
+        )
 
     account_port = _port(live_account_report)
     open_orders_port = _port(live_open_orders_report)
@@ -280,7 +346,7 @@ def evaluate_live_pilot_same_run_preflight(
     fx_port: int | None = None
     if fx_required:
         fx_clean = bool(
-            _read_only_clean(live_fx_report)
+            _read_only_clean(live_fx_report, required_schema_version=_FX_SCHEMA_VERSION)
             and str(live_fx_report.get("base_currency") or "").strip().upper() == "USD"
             and str(live_fx_report.get("quote_currency") or "").strip().upper() == "JPY"
         )
@@ -371,6 +437,7 @@ def evaluate_live_pilot_same_run_preflight(
         blockers=tuple(blockers),
         ticker=normalized_ticker,
         account_fingerprint_match=fingerprint_match,
+        expected_account_fingerprint=expected_fingerprint or None,
         endpoint_port=endpoint_port,
         endpoint_binding_ready=endpoint_binding_ready,
         evidence_fresh=evidence_fresh,
@@ -392,7 +459,7 @@ def evaluate_live_pilot_same_run_preflight(
 
 def preflight_record(result: LivePilotSameRunPreflight) -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         **asdict(result),
         "cash_policy": {
             "base_available_funds_reserve_jpy": _BASE_AVAILABLE_FUNDS_RESERVE_JPY,
