@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import ai_asset_platform.execution.live_pilot_one_shot_authorization as authorization_module
 from ai_asset_platform.execution.live_pilot_one_shot_authorization import (
     OPERATOR_CONFIRMATION_VALUE,
     authorization_consumed,
@@ -118,6 +119,22 @@ def test_ttl_is_short_and_bounded(tmp_path: Path):
 def test_invalid_live_endpoint_is_rejected_at_issue_time(tmp_path: Path):
     with pytest.raises(ValueError, match="audited Live endpoint"):
         _issue(tmp_path, endpoint_port=4002)
+
+
+def test_issue_and_consume_fsync_parent_directory(tmp_path: Path, monkeypatch):
+    calls: list[Path] = []
+    real_fsync_directory = authorization_module._fsync_directory
+
+    def spy(directory: Path) -> None:
+        calls.append(directory)
+        real_fsync_directory(directory)
+
+    monkeypatch.setattr(authorization_module, "_fsync_directory", spy)
+    authorization = _issue(tmp_path)
+    assert tmp_path in calls
+    calls.clear()
+    _consume(tmp_path, authorization.nonce)
+    assert tmp_path in calls
 
 
 def test_module_contains_no_broker_order_transport():

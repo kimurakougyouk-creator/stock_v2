@@ -23,6 +23,12 @@ DEFAULT_JOURNAL_DIR = Path("results/live_pilot_send_journal")
 REPORT_SCHEMA_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 
+# This filename is deliberately fixed and does not vary with intent_id. It is
+# the exclusive, pilot-campaign-wide no-resend marker: a caller cannot defeat
+# the single-attempt guarantee by restarting under a new intent_id/nonce, since
+# every such attempt must create this same marker before any per-intent state.
+CAMPAIGN_ATTEMPT_FILENAME = "LIVE_PILOT_CAMPAIGN_SEND_ATTEMPT.json"
+
 
 def _now(value: datetime | None) -> str:
     current = value if value is not None else datetime.now(timezone.utc)
@@ -50,6 +56,25 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.attempted.json"
 
 
+def _campaign_attempt_path(directory: Path) -> Path:
+    return directory / CAMPAIGN_ATTEMPT_FILENAME
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Fsync the directory itself so a new exclusive marker's dirent survives a crash.
+
+    Fsyncing only the marker file guarantees the file's contents are durable,
+    not that the directory entry pointing to it is. Without this, a power loss
+    right after marker creation can lose the dirent and let a later restart
+    create the marker again, spending a second irreversible send attempt.
+    """
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_new(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -61,6 +86,7 @@ def _atomic_new(path: Path, payload: dict) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_directory(path.parent)
 
 
 def _atomic_replace(path: Path, payload: dict) -> None:
@@ -103,6 +129,11 @@ def send_attempt_recorded(
 ) -> bool:
     """Return True when the irreversible single-send marker already exists."""
     return _attempt_path(intent_id, directory).exists()
+
+
+def campaign_send_attempt_recorded(*, directory: Path = DEFAULT_JOURNAL_DIR) -> bool:
+    """Return True when the pilot-wide (not per-intent) send marker exists."""
+    return _campaign_attempt_path(directory).exists()
 
 
 def create_consumed_authorization_journal(
@@ -176,6 +207,23 @@ def record_send_attempt(
     ):
         raise PermissionError("a Live send attempt is no longer permitted for this intent")
 
+    # Create the pilot-wide (not per-intent) marker first. Its identity does
+    # not vary with intent_id, so restarting under a brand-new intent_id/nonce
+    # cannot bypass it and create a second reachable send attempt.
+    campaign_marker = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "scope": "LIVE_PILOT_CAMPAIGN_SINGLE_SEND",
+        "first_intent_id": intent,
+        "recorded_at": _now(now),
+        "automatic_resend_allowed": False,
+    }
+    try:
+        _atomic_new(_campaign_attempt_path(directory), campaign_marker)
+    except FileExistsError as exc:
+        raise PermissionError(
+            "the single Live send attempt for the entire pilot campaign has already been spent"
+        ) from exc
+
     marker = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "intent_id": intent,
@@ -211,6 +259,21 @@ def record_send_attempt(
 def _require_attempt_marker(intent_id: str, directory: Path) -> None:
     if not send_attempt_recorded(intent_id, directory=directory):
         raise PermissionError("irreversible Live send-attempt marker is missing")
+
+
+def load_send_attempt_marker(
+    intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    """Load the immutable `.attempted.json` marker's own content, not just its presence.
+
+    The completion judge must verify this marker itself (state/nonce/intent_id
+    and every automatic-action flag), not merely trust the mutable summary
+    journal's claimed state.
+    """
+    path = _attempt_path(intent_id, directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="send-attempt marker")
 
 
 def mark_order_acknowledged(

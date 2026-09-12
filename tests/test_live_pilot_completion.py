@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
+import pytest
+
 import ai_asset_platform.execution.live_pilot_completion as subject
 
 
@@ -21,6 +23,7 @@ def _journal(**overrides) -> dict:
     data = {
         "schema_version": 2,
         "intent_id": INTENT,
+        "nonce": "nonce-test",
         "state": "POSTFILL_PROVEN",
         "send_attempt_count": 1,
         "order_id": 77,
@@ -35,8 +38,25 @@ def _journal(**overrides) -> dict:
     return data
 
 
+def _marker(**overrides) -> dict:
+    data = {
+        "schema_version": 2,
+        "intent_id": INTENT,
+        "nonce": "nonce-test",
+        "state": "SEND_ATTEMPT_RECORDED",
+        "automatic_resend_allowed": False,
+        "automatic_cancel_allowed": False,
+        "automatic_modify_allowed": False,
+        "automatic_flatten_allowed": False,
+        "automatic_close_allowed": False,
+    }
+    data.update(overrides)
+    return data
+
+
 def _postfill(**overrides) -> dict:
     data = {
+        "schema_version": 2,
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
@@ -97,7 +117,9 @@ def _open_orders(count: int = 0, **overrides) -> dict:
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
         "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
         "open_order_count": count,
+        "orders": [],
         "order_sent": False,
         "cancel_sent": False,
         "live_order_sent": False,
@@ -106,7 +128,7 @@ def _open_orders(count: int = 0, **overrides) -> dict:
     return data
 
 
-def _paper(**overrides) -> dict:
+def _paper(*, broker: dict | None = None, **overrides) -> dict:
     data = {
         "status": "WARNING",
         "checked_at": _stamp(),
@@ -114,7 +136,17 @@ def _paper(**overrides) -> dict:
         "risk_safe": True,
         "monitor_order_sent": False,
         "live_order_sent": False,
-        "broker": {"reconciliation_blocker_count": 0, "open_order_count": 0},
+        "broker": {
+            "reconciliation_blocker_count": 0,
+            "open_order_count": 0,
+            "account_ready": True,
+            "execution_snapshot_ready": True,
+            "endpoint_port": 4002,
+            "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+            "all_open_orders_ready": True,
+        }
+        if broker is None
+        else broker,
     }
     data.update(overrides)
     return data
@@ -128,6 +160,7 @@ def _evaluate(**overrides):
         "quantity": 100,
         "expected_account_fingerprint": FINGERPRINT,
         "send_journal": _journal(),
+        "send_attempt_marker": _marker(),
         "postfill_report": _postfill(),
         "final_account_report": _account(),
         "final_open_orders_report": _open_orders(),
@@ -413,6 +446,270 @@ def test_persist_blocked_alert_explicitly_forbids_retry(tmp_path: Path):
     alert_payload = json.loads(alert.read_text(encoding="utf-8"))
     assert alert_payload["severity"] == "CRITICAL"
     assert "DO NOT RETRY AUTOMATICALLY" in alert_payload["message"]
+
+
+def test_warning_paper_monitor_with_incomplete_broker_snapshot_blocks():
+    result = _evaluate(
+        paper_monitor_report=_paper(
+            status="WARNING",
+            broker={"reconciliation_blocker_count": 0, "open_order_count": 0},
+        )
+    )
+    assert result.complete is False
+    assert result.paper_monitor_safe is False
+
+
+def test_wrong_open_orders_fingerprint_blocks():
+    result = _evaluate(final_open_orders_report=_open_orders(account_fingerprint="b" * 64))
+    assert result.complete is False
+    assert any("open-orders" in item and "fingerprint mismatch" in item for item in result.blockers)
+
+
+def test_execution_currency_mismatched_with_instrument_ticker_blocks():
+    result = _evaluate(
+        postfill_report=_postfill(
+            executions=[
+                {
+                    "exec_id": EXEC_ID,
+                    "order_id": 77,
+                    "perm_id": 880077,
+                    "symbol": "9432",
+                    "sec_type": "STK",
+                    "currency": "USD",
+                    "side": "BUY",
+                    "quantity": 100.0,
+                    "price": 402.0,
+                    "account_fingerprint": FINGERPRINT,
+                }
+            ],
+            commissions=[{"exec_id": EXEC_ID, "commission": 80.0, "currency": "USD"}],
+        )
+    )
+    assert result.complete is False
+    assert any("instrument currency" in item for item in result.blockers)
+
+
+def test_non_integer_open_order_count_fails_closed():
+    result = _evaluate(final_open_orders_report=_open_orders(open_order_count=0.5))
+    assert result.complete is False
+    assert any("open-order count" in item for item in result.blockers)
+
+
+def test_zero_open_order_count_with_nonempty_orders_list_fails_closed():
+    result = _evaluate(
+        final_open_orders_report=_open_orders(open_order_count=0, orders=[{"order_id": 1}])
+    )
+    assert result.complete is False
+    assert any("orders list is not empty" in item for item in result.blockers)
+
+
+def test_postfill_report_missing_order_sent_key_blocks():
+    postfill = _postfill()
+    del postfill["order_sent"]
+    result = _evaluate(postfill_report=postfill)
+    assert result.complete is False
+    assert any("not clean read-only evidence" in item for item in result.blockers)
+
+
+def test_open_orders_report_missing_cancel_sent_key_blocks():
+    orders = _open_orders()
+    del orders["cancel_sent"]
+    result = _evaluate(final_open_orders_report=orders)
+    assert result.complete is False
+    assert any("not clean read-only evidence" in item for item in result.blockers)
+
+
+def test_postfill_report_does_not_require_cancel_sent_key():
+    postfill = _postfill()
+    assert "cancel_sent" not in postfill
+    result = _evaluate(postfill_report=postfill)
+    assert result.complete is True
+
+
+def test_partial_persist_failure_cannot_leave_stale_success_alert_paired_with_new_blocked_report(
+    tmp_path: Path, monkeypatch
+):
+    report_path = tmp_path / "completion.json"
+    alert_path = tmp_path / "alert.json"
+
+    success = _evaluate()
+    subject.persist_live_pilot_completion(success, report_path=report_path, alert_path=alert_path)
+
+    blocked = _evaluate(final_open_orders_report=_open_orders(1))
+
+    real_replace = Path.replace
+    report_tmp = report_path.with_suffix(report_path.suffix + ".tmp")
+
+    def failing_replace(self, target):
+        if self == report_tmp:
+            raise OSError("simulated crash before report replace")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+    with pytest.raises(OSError, match="simulated crash"):
+        subject.persist_live_pilot_completion(blocked, report_path=report_path, alert_path=alert_path)
+
+    alert_payload = json.loads(alert_path.read_text(encoding="utf-8"))
+    assert alert_payload["severity"] == "CRITICAL"
+
+
+def test_missing_send_attempt_marker_blocks_even_with_postfill_proven_journal():
+    result = _evaluate(send_attempt_marker=None)
+    assert result.complete is False
+    assert any("send-attempt marker" in item for item in result.blockers)
+
+
+def test_send_attempt_marker_nonce_mismatch_blocks():
+    result = _evaluate(send_attempt_marker=_marker(nonce="different-nonce"))
+    assert result.complete is False
+    assert any("send-attempt marker" in item for item in result.blockers)
+
+
+def test_send_attempt_marker_with_automatic_resend_allowed_true_blocks():
+    result = _evaluate(send_attempt_marker=_marker(automatic_resend_allowed=True))
+    assert result.complete is False
+    assert any("send-attempt marker" in item for item in result.blockers)
+
+
+def test_stale_or_missing_postfill_schema_version_blocks():
+    result = _evaluate(postfill_report=_postfill(schema_version=1))
+    assert result.complete is False
+    assert any("schema_version" in item for item in result.blockers)
+
+    postfill = _postfill()
+    del postfill["schema_version"]
+    result = _evaluate(postfill_report=postfill)
+    assert result.complete is False
+    assert any("schema_version" in item for item in result.blockers)
+
+
+def test_conflicting_exec_id_outside_matched_order_blocks():
+    postfill = _postfill()
+    conflicting_row = dict(postfill["executions"][0])
+    conflicting_row["order_id"] = 999
+    postfill["executions"].append(conflicting_row)
+    result = _evaluate(postfill_report=postfill)
+    assert result.complete is False
+    assert any("conflicts with execution evidence" in item for item in result.blockers)
+
+
+def test_extreme_price_overflow_in_gross_computation_fails_closed():
+    result = _evaluate(
+        postfill_report=_postfill(
+            executions=[
+                {
+                    "exec_id": EXEC_ID,
+                    "order_id": 77,
+                    "perm_id": 880077,
+                    "symbol": "9432",
+                    "sec_type": "STK",
+                    "currency": "JPY",
+                    "side": "BUY",
+                    "quantity": 100.0,
+                    "price": 1e308,
+                    "account_fingerprint": FINGERPRINT,
+                }
+            ]
+        )
+    )
+    assert result.complete is False
+    assert any("overflowed" in item for item in result.blockers)
+
+
+def test_near_exact_but_not_exact_quantity_now_fails_closed():
+    result = _evaluate(
+        postfill_report=_postfill(
+            executions=[
+                {
+                    "exec_id": EXEC_ID,
+                    "order_id": 77,
+                    "perm_id": 880077,
+                    "symbol": "9432",
+                    "sec_type": "STK",
+                    "currency": "JPY",
+                    "side": "BUY",
+                    "quantity": 100.0000000005,
+                    "price": 402.0,
+                    "account_fingerprint": FINGERPRINT,
+                }
+            ]
+        )
+    )
+    assert result.complete is False
+    assert any("total quantity" in item for item in result.blockers)
+
+
+def test_audit_live_pilot_completion_loads_and_requires_attempt_marker(tmp_path: Path):
+    from ai_asset_platform.execution.live_pilot_send_journal import (
+        create_consumed_authorization_journal,
+        mark_order_acknowledged,
+        mark_postfill_proven,
+        record_send_attempt,
+    )
+
+    journal_dir = tmp_path / "journal"
+    postfill_path = tmp_path / "postfill.json"
+    account_path = tmp_path / "account.json"
+    open_orders_path = tmp_path / "open_orders.json"
+    paper_path = tmp_path / "paper.json"
+
+    create_consumed_authorization_journal(
+        intent_id=INTENT,
+        nonce="nonce-test",
+        consumed_authorization={
+            "status": "CONSUMED",
+            "intent_id": INTENT,
+            "nonce": "nonce-test",
+            "order_sent": False,
+            "live_order_sent": False,
+        },
+        directory=journal_dir,
+        now=NOW,
+    )
+    record_send_attempt(INTENT, directory=journal_dir, now=NOW)
+    mark_order_acknowledged(INTENT, order_id=77, perm_id=880077, directory=journal_dir, now=NOW)
+    mark_postfill_proven(
+        INTENT, exec_id=EXEC_ID, order_id=77, perm_id=880077, directory=journal_dir, now=NOW
+    )
+
+    postfill_path.write_text(json.dumps(_postfill()), encoding="utf-8")
+    account_path.write_text(json.dumps(_account()), encoding="utf-8")
+    open_orders_path.write_text(json.dumps(_open_orders()), encoding="utf-8")
+    paper_path.write_text(json.dumps(_paper()), encoding="utf-8")
+
+    result = subject.audit_live_pilot_completion(
+        intent_id=INTENT,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        expected_account_fingerprint=FINGERPRINT,
+        journal_dir=journal_dir,
+        postfill_report_path=postfill_path,
+        live_account_report_path=account_path,
+        live_open_orders_report_path=open_orders_path,
+        paper_monitor_report_path=paper_path,
+        now=NOW,
+    )
+    assert result.complete is True
+
+    marker_path = journal_dir / f"{INTENT.replace(':', '_')}.attempted.json"
+    marker_path.unlink()
+
+    result_after_marker_removed = subject.audit_live_pilot_completion(
+        intent_id=INTENT,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        expected_account_fingerprint=FINGERPRINT,
+        journal_dir=journal_dir,
+        postfill_report_path=postfill_path,
+        live_account_report_path=account_path,
+        live_open_orders_report_path=open_orders_path,
+        paper_monitor_report_path=paper_path,
+        now=NOW,
+    )
+    assert result_after_marker_removed.complete is False
+    assert any("send-attempt marker" in item for item in result_after_marker_removed.blockers)
 
 
 def test_module_contains_no_broker_transport():

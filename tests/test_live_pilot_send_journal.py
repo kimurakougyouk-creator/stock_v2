@@ -7,7 +7,9 @@ import pytest
 
 import ai_asset_platform.execution.live_pilot_send_journal as journal
 from ai_asset_platform.execution.live_pilot_send_journal import (
+    campaign_send_attempt_recorded,
     create_consumed_authorization_journal,
+    load_send_attempt_marker,
     load_send_journal,
     mark_order_acknowledged,
     mark_postfill_proven,
@@ -125,6 +127,61 @@ def test_corrupt_journal_fails_closed_for_send_permission(tmp_path: Path):
     path = next(tmp_path.glob("*.json"))
     path.write_text("not-json\n", encoding="utf-8")
     assert send_attempt_permitted(INTENT, directory=tmp_path) is False
+
+
+def test_atomic_new_fsyncs_parent_directory_after_marker_creation(tmp_path: Path, monkeypatch):
+    calls: list[Path] = []
+    real_fsync_directory = journal._fsync_directory
+
+    def spy(directory: Path) -> None:
+        calls.append(directory)
+        real_fsync_directory(directory)
+
+    monkeypatch.setattr(journal, "_fsync_directory", spy)
+    _create(tmp_path)
+    assert tmp_path in calls
+    calls.clear()
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    assert tmp_path in calls
+
+
+def test_campaign_wide_marker_blocks_second_attempt_under_a_different_intent_id(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    assert campaign_send_attempt_recorded(directory=tmp_path) is True
+
+    other_intent = "live-pilot:9432.T:BUY:100:20260908"
+    create_consumed_authorization_journal(
+        intent_id=other_intent,
+        nonce="different-nonce",
+        consumed_authorization=_consumed(intent_id=other_intent, nonce="different-nonce"),
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert send_attempt_permitted(other_intent, directory=tmp_path) is True
+    with pytest.raises(PermissionError, match="campaign"):
+        record_send_attempt(other_intent, directory=tmp_path, now=NOW + timedelta(seconds=3))
+    assert send_attempt_recorded(other_intent, directory=tmp_path) is False
+
+
+def test_campaign_send_attempt_recorded_reflects_marker_presence(tmp_path: Path):
+    assert campaign_send_attempt_recorded(directory=tmp_path) is False
+    _create(tmp_path)
+    assert campaign_send_attempt_recorded(directory=tmp_path) is False
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    assert campaign_send_attempt_recorded(directory=tmp_path) is True
+
+
+def test_load_send_attempt_marker_returns_none_then_marker_content(tmp_path: Path):
+    assert load_send_attempt_marker(INTENT, directory=tmp_path) is None
+    _create(tmp_path)
+    assert load_send_attempt_marker(INTENT, directory=tmp_path) is None
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    marker = load_send_attempt_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["intent_id"] == INTENT
+    assert marker["state"] == "SEND_ATTEMPT_RECORDED"
+    assert marker["automatic_resend_allowed"] is False
 
 
 def test_module_contains_no_broker_transport_or_automatic_recovery_action():

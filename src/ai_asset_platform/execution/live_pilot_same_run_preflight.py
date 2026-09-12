@@ -50,6 +50,7 @@ class LivePilotSameRunPreflight:
     emergency_stop_clear: bool
     live_global_lock_intact: bool
     ready: bool
+    expected_account_fingerprint: str | None = None
     available_funds_jpy: float | None = None
     required_available_funds_jpy: float | None = None
     available_funds_ready: bool = False
@@ -380,6 +381,7 @@ def evaluate_live_pilot_same_run_preflight(
         emergency_stop_clear=emergency_clear,
         live_global_lock_intact=live_lock_intact,
         ready=ready,
+        expected_account_fingerprint=expected_fingerprint or None,
         available_funds_jpy=available_funds_jpy,
         required_available_funds_jpy=required_available_funds_jpy,
         available_funds_ready=available_funds_ready,
