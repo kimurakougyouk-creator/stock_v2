@@ -23,12 +23,20 @@ from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
 )
 from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
     DEFAULT_REPORT_PATH as DEFAULT_POSTFILL_REPORT,
+    REPORT_SCHEMA_VERSION as POSTFILL_REPORT_SCHEMA_VERSION,
 )
 from ai_asset_platform.brokers.ibkr_live_readonly_account import (
     DEFAULT_REPORT_PATH as DEFAULT_LIVE_ACCOUNT_REPORT,
 )
+from ai_asset_platform.brokers.ibkr_paper_operations_monitor import (
+    _VALID_ENDPOINT_PORTS as _VALID_PAPER_ENDPOINT_PORTS,
+)
+from ai_asset_platform.execution.live_pilot_same_run_preflight import (
+    _INSTRUMENT_CURRENCY,
+)
 from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
+    load_send_attempt_marker,
     load_send_journal,
 )
 
@@ -113,6 +121,11 @@ def _paper_safe(report: dict | None) -> bool:
     try:
         reconciliation_blockers = int(broker.get("reconciliation_blocker_count", 0) or 0)
         paper_open_orders = int(broker.get("open_order_count", 0) or 0)
+        endpoint_port = (
+            int(broker.get("endpoint_port"))
+            if broker.get("endpoint_port") is not None
+            else None
+        )
     except (TypeError, ValueError):
         return False
     return bool(
@@ -121,6 +134,11 @@ def _paper_safe(report: dict | None) -> bool:
         and report.get("risk_safe") is True
         and reconciliation_blockers == 0
         and paper_open_orders == 0
+        and broker.get("account_ready") is True
+        and broker.get("execution_snapshot_ready") is True
+        and broker.get("reconciliation_next_action") == "RECONCILIATION_EVIDENCE_IS_CLEAN"
+        and endpoint_port in _VALID_PAPER_ENDPOINT_PORTS
+        and broker.get("all_open_orders_ready") is True
         and not report.get("monitor_order_sent")
         and not report.get("live_order_sent")
     )
@@ -152,15 +170,25 @@ def _target_position_quantity(account_report: dict | None, ticker: str) -> float
     return total
 
 
-def _clean_live_report(report: dict | None) -> bool:
-    return bool(
-        isinstance(report, dict)
-        and report.get("ready") is True
-        and report.get("connection_mode") == "LIVE_READ_ONLY"
-        and not report.get("order_sent")
-        and not report.get("cancel_sent")
-        and not report.get("live_order_sent")
-    )
+def _clean_live_report(report: dict | None, *, require_cancel_sent: bool = False) -> bool:
+    """Every applicable flag must be explicitly False. A missing key is not safe.
+
+    Only the open-orders report schema defines `cancel_sent`; postfill/account
+    reports do not, so `require_cancel_sent` must stay False for them.
+    """
+    if not isinstance(report, dict):
+        return False
+    if report.get("ready") is not True:
+        return False
+    if report.get("connection_mode") != "LIVE_READ_ONLY":
+        return False
+    if report.get("order_sent") is not False:
+        return False
+    if report.get("live_order_sent") is not False:
+        return False
+    if require_cancel_sent and report.get("cancel_sent") is not False:
+        return False
+    return True
 
 
 def evaluate_live_pilot_completion(
@@ -171,6 +199,7 @@ def evaluate_live_pilot_completion(
     quantity: int,
     expected_account_fingerprint: str,
     send_journal: dict | None,
+    send_attempt_marker: dict | None = None,
     postfill_report: dict | None,
     final_account_report: dict | None,
     final_open_orders_report: dict | None,
@@ -205,6 +234,25 @@ def evaluate_live_pilot_completion(
     if len(fingerprint) != 64 or any(ch not in "0123456789abcdef" for ch in fingerprint):
         blockers.append("expected account fingerprint is invalid")
 
+    marker_consistent = bool(
+        isinstance(send_attempt_marker, dict)
+        and isinstance(send_journal, dict)
+        and send_attempt_marker.get("state") == "SEND_ATTEMPT_RECORDED"
+        and str(send_attempt_marker.get("intent_id") or "").strip() == intent
+        and str(send_attempt_marker.get("nonce") or "").strip()
+        and str(send_attempt_marker.get("nonce") or "").strip()
+        == str(send_journal.get("nonce") or "").strip()
+        and send_attempt_marker.get("automatic_resend_allowed") is False
+        and send_attempt_marker.get("automatic_cancel_allowed") is False
+        and send_attempt_marker.get("automatic_modify_allowed") is False
+        and send_attempt_marker.get("automatic_flatten_allowed") is False
+        and send_attempt_marker.get("automatic_close_allowed") is False
+    )
+    if not marker_consistent:
+        blockers.append(
+            "irreversible send-attempt marker is missing or inconsistent with the send journal"
+        )
+
     order_id: int | None = None
     perm_id: int | None = None
     exec_id: str | None = None
@@ -217,7 +265,8 @@ def evaluate_live_pilot_completion(
             order_id = perm_id = None
         exec_id = str(send_journal.get("exec_id") or "").strip() or None
         journal_ready = bool(
-            send_journal.get("state") == "POSTFILL_PROVEN"
+            marker_consistent
+            and send_journal.get("state") == "POSTFILL_PROVEN"
             and str(send_journal.get("intent_id") or "").strip() == intent
             and int(send_journal.get("send_attempt_count", 0) or 0) == 1
             and order_id is not None
@@ -247,9 +296,17 @@ def evaluate_live_pilot_completion(
     if not paper_fresh:
         blockers.append("Paper monitor evidence is missing or stale")
 
+    if (
+        not isinstance(postfill_report, dict)
+        or postfill_report.get("schema_version") != POSTFILL_REPORT_SCHEMA_VERSION
+    ):
+        blockers.append(
+            f"Live post-fill report schema_version must equal {POSTFILL_REPORT_SCHEMA_VERSION}"
+        )
+
     postfill_clean = _clean_live_report(postfill_report)
     account_clean = _clean_live_report(final_account_report)
-    open_orders_clean = _clean_live_report(final_open_orders_report)
+    open_orders_clean = _clean_live_report(final_open_orders_report, require_cancel_sent=True)
     if not postfill_clean:
         blockers.append("Live post-fill report is not clean read-only evidence")
     if not account_clean:
@@ -275,6 +332,7 @@ def evaluate_live_pilot_completion(
     for label, report in (
         ("post-fill", postfill_report),
         ("account", final_account_report),
+        ("open-orders", final_open_orders_report),
     ):
         observed = (
             str(report.get("account_fingerprint") or "").strip().lower()
@@ -326,6 +384,24 @@ def evaluate_live_pilot_completion(
             if exec_id not in ids:
                 blockers.append("durable journal exec_id is not present in final Live execution evidence")
 
+            # A conflicting row sharing an exec_id but belonging to a different
+            # order/account/symbol/side is filtered out of `matches` above and
+            # would otherwise be invisible to the duplicate check. Verify each
+            # matched exec_id's occurrence count is unchanged across the full,
+            # unfiltered execution set.
+            for target_id in {value for value in ids if value}:
+                matched_occurrences = ids.count(target_id)
+                total_occurrences = sum(
+                    1
+                    for row in executions
+                    if isinstance(row, dict)
+                    and str(row.get("exec_id") or "").strip() == target_id
+                )
+                if total_occurrences != matched_occurrences:
+                    blockers.append(
+                        f"final Live exec_id {target_id} conflicts with execution evidence outside the matched order/account"
+                    )
+
             total_quantity = 0.0
             gross = 0.0
             currencies: set[str] = set()
@@ -341,25 +417,42 @@ def evaluate_live_pilot_completion(
                 if len(currency) != 3:
                     blockers.append("final Live execution contains invalid currency")
                     rows_valid = False
+                product = row_qty * row_price
+                if not math.isfinite(product):
+                    blockers.append(
+                        f"final Live execution product overflowed to a non-finite value for exec_id {row.get('exec_id')}"
+                    )
+                    rows_valid = False
+                    continue
                 currencies.add(currency)
                 total_quantity += row_qty
-                gross += row_qty * row_price
+                gross += product
+                if not math.isfinite(gross):
+                    blockers.append("final Live execution running gross total overflowed to a non-finite value")
+                    rows_valid = False
 
             filled_quantity = total_quantity
-            if not math.isclose(
-                total_quantity,
-                float(normalized_quantity),
-                rel_tol=1e-12,
-                abs_tol=1e-9,
-            ):
+            if total_quantity != float(normalized_quantity):
                 blockers.append(
                     f"final Live execution total quantity does not equal pilot quantity: {total_quantity} != {normalized_quantity}"
                 )
             if len(currencies) != 1:
                 blockers.append("final Live execution rows do not share one currency")
             execution_currency = next(iter(currencies)) if len(currencies) == 1 else None
+            expected_currency = _INSTRUMENT_CURRENCY.get(normalized_ticker)
+            if (
+                execution_currency is None
+                or expected_currency is None
+                or execution_currency != expected_currency
+            ):
+                blockers.append(
+                    f"final Live execution currency does not match the expected instrument currency for {normalized_ticker}"
+                )
             if rows_valid and total_quantity > 0:
                 execution_price = gross / total_quantity
+                if not math.isfinite(execution_price):
+                    blockers.append("final Live execution price is not finite")
+                    execution_price = None
 
             commissions = postfill_report.get("commissions")
             commissions = commissions if isinstance(commissions, list) else []
@@ -390,6 +483,11 @@ def evaluate_live_pilot_completion(
                     )
                     continue
                 commission_total += parsed_commission
+                if not math.isfinite(commission_total):
+                    blockers.append(
+                        f"running commission total overflowed to a non-finite value at exec_id {execution_exec_id}"
+                    )
+                    continue
                 valid_commission_count += 1
 
             commission_count = valid_commission_count
@@ -406,12 +504,19 @@ def evaluate_live_pilot_completion(
 
     final_open_order_count: int | None = None
     if isinstance(final_open_orders_report, dict):
-        try:
-            final_open_order_count = int(final_open_orders_report.get("open_order_count"))
-        except (TypeError, ValueError):
-            final_open_order_count = None
+        raw_count = final_open_orders_report.get("open_order_count")
+        if isinstance(raw_count, int) and not isinstance(raw_count, bool):
+            final_open_order_count = raw_count
     if final_open_order_count != 0:
         blockers.append("final Live open-order count is not zero")
+    else:
+        orders = (
+            final_open_orders_report.get("orders")
+            if isinstance(final_open_orders_report, dict)
+            else None
+        )
+        if not isinstance(orders, list) or len(orders) != 0:
+            blockers.append("final Live open-order count is zero but the orders list is not empty")
 
     paper_safe = _paper_safe(paper_monitor_report)
     if not paper_safe:
@@ -471,6 +576,7 @@ def audit_live_pilot_completion(
 ) -> LivePilotCompletion:
     try:
         journal = load_send_journal(intent_id, directory=journal_dir)
+        attempt_marker = load_send_attempt_marker(intent_id, directory=journal_dir)
         postfill = _load(postfill_report_path)
         account = _load(live_account_report_path)
         open_orders = _load(live_open_orders_report_path)
@@ -506,6 +612,7 @@ def audit_live_pilot_completion(
         quantity=quantity,
         expected_account_fingerprint=expected_account_fingerprint,
         send_journal=journal,
+        send_attempt_marker=attempt_marker,
         postfill_report=postfill,
         final_account_report=account,
         final_open_orders_report=open_orders,
@@ -520,23 +627,13 @@ def persist_live_pilot_completion(
     report_path: Path = DEFAULT_COMPLETION_REPORT,
     alert_path: Path = DEFAULT_OPERATOR_ALERT,
 ) -> None:
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": REPORT_SCHEMA_VERSION,
-        **asdict(result),
-        "interpretation": (
-            "COMPLETE means every matching execution and per-exec commission reconciles to the exact "
-            "pilot quantity, with final position, zero final Live open orders, matching account/endpoint, "
-            "and clean Paper safety evidence."
-        ),
-    }
-    temporary = report_path.with_suffix(report_path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(report_path)
+    """Write the operator alert before the completion report.
 
+    A crash between the two writes can then only ever leave the report stale
+    relative to an already-updated alert -- never a stale SUCCESS alert next
+    to a freshly blocked report, which is the failure mode this ordering
+    prevents.
+    """
     alert = {
         "schema_version": 1,
         "checked_at": result.checked_at,
@@ -559,3 +656,20 @@ def persist_live_pilot_completion(
         encoding="utf-8",
     )
     alert_tmp.replace(alert_path)
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        **asdict(result),
+        "interpretation": (
+            "COMPLETE means every matching execution and per-exec commission reconciles to the exact "
+            "pilot quantity, with final position, zero final Live open orders, matching account/endpoint, "
+            "and clean Paper safety evidence."
+        ),
+    }
+    temporary = report_path.with_suffix(report_path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(report_path)

@@ -130,6 +130,8 @@ class _LivePilotClient(EWrapper, EClient):
     ) -> None:
         if self.watched_order_id is None or int(orderId) != self.watched_order_id:
             return
+        if self.order_error is not None:
+            return
         self.broker_status = str(status)
         try:
             perm = int(permId)
@@ -146,13 +148,16 @@ class _LivePilotClient(EWrapper, EClient):
             self.order_error = "broker acknowledgement account does not match the same-session account"
             self.ack_ready.set()
             return
+        if self.order_error is not None:
+            return
+        status = str(getattr(orderState, "status", "") or "").strip()
         try:
             perm = int(getattr(order, "permId", 0) or 0)
         except (TypeError, ValueError):
             perm = 0
-        if perm > 0:
+        if status in _ACCEPTED_STATUSES and perm > 0:
             self.ack_perm_id = perm
-            self.broker_status = self.broker_status or "OpenOrder"
+            self.broker_status = status
             self.ack_ready.set()
 
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson="") -> None:  # noqa: N802
@@ -329,6 +334,7 @@ def send_exactly_one_live_pilot(
     repository_root: Path = Path("."),
     timeout_seconds: float = 10.0,
     now: datetime | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     client_factory: Callable[[], _LivePilotClient] = _LivePilotClient,
 ) -> LivePilotSendResult:
     """Make at most one broker transport call for one fully-bound Live pilot.
@@ -368,6 +374,10 @@ def send_exactly_one_live_pilot(
         raise PermissionError("same-run preflight status is not send-eligible")
     if str(same_run_preflight.ticker).strip().upper() != ticker:
         raise PermissionError("same-run preflight ticker mismatch")
+    if same_run_preflight.expected_account_fingerprint != fingerprint:
+        raise PermissionError(
+            "same-run preflight was not computed for this pinned account fingerprint"
+        )
     if not (
         same_run_preflight.account_fingerprint_match
         and same_run_preflight.endpoint_binding_ready
@@ -474,7 +484,10 @@ def send_exactly_one_live_pilot(
 
         # Re-check evidence after the final Live connection/account handshake so
         # a slow connection cannot silently age a preflight past its window.
-        final_clock = _utc(now)
+        # This must use an advancing clock, not the frozen `now` argument used
+        # for pre-connection checks/journal timestamps — otherwise a caller
+        # could fix `now` to the evidence timestamp and defeat this re-check.
+        final_clock = _utc(clock())
         _require_fresh_timestamp(
             readiness_report.get("checked_at"),
             label="operational readiness",
@@ -517,8 +530,13 @@ def send_exactly_one_live_pilot(
         )
         record_send_attempt(intent, directory=journal_dir, now=now)
 
-        # Last possible stop check. The irreversible attempt is deliberately
-        # spent first, so a stop arriving here can never be bypassed by retry.
+        client.watched_order_id = int(order_id)
+        client.watched_account = raw_account_id
+
+        # Last possible stop check. It is deliberately the final statement
+        # before placeOrder, after the irreversible attempt is spent, so a
+        # stop arriving in the window between this check and transport can
+        # never be bypassed, and no later assignment can occur after it.
         if live_pilot_stop_is_active(stop_path=stop_path):
             return LivePilotSendResult(
                 "BLOCKED_STOP_AFTER_ATTEMPT",
@@ -533,8 +551,6 @@ def send_exactly_one_live_pilot(
                 "emergency stop became active; attempt remains permanently spent",
             )
 
-        client.watched_order_id = int(order_id)
-        client.watched_account = raw_account_id
         try:
             client.placeOrder(int(order_id), contract, order)
         except Exception as exc:

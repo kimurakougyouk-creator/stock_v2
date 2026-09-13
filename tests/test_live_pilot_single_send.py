@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,7 +50,12 @@ def _readiness() -> dict:
     }
 
 
-def _preflight(*, ready: bool = True, checked_at: str = CHECKED_AT) -> LivePilotSameRunPreflight:
+def _preflight(
+    *,
+    ready: bool = True,
+    checked_at: str = CHECKED_AT,
+    expected_account_fingerprint: str | None = None,
+) -> LivePilotSameRunPreflight:
     return LivePilotSameRunPreflight(
         status="READY_FOR_OPERATOR_AUTHORIZATION" if ready else "BLOCKED",
         checked_at=checked_at,
@@ -66,6 +71,11 @@ def _preflight(*, ready: bool = True, checked_at: str = CHECKED_AT) -> LivePilot
         emergency_stop_clear=ready,
         live_global_lock_intact=ready,
         ready=ready,
+        expected_account_fingerprint=(
+            expected_account_fingerprint
+            if expected_account_fingerprint is not None
+            else (PINNED_FINGERPRINT if ready else None)
+        ),
     )
 
 
@@ -183,6 +193,7 @@ def _send(monkeypatch, client: FakeClient, **overrides):
         repository_root=Path("."),
         timeout_seconds=0.01,
         now=NOW,
+        clock=lambda: NOW,
         client_factory=lambda: client,
     )
     args.update(overrides)
@@ -376,6 +387,91 @@ def test_source_pin_failure_blocks_before_connection(monkeypatch):
     with pytest.raises(PermissionError, match="source/PIN"):
         _send(monkeypatch, client)
     assert client.connected is False
+
+
+def test_stale_preflight_for_a_different_account_fingerprint_blocks_even_with_matching_socket(monkeypatch):
+    _patch_prereqs(monkeypatch)
+    client = FakeClient()  # socket account/fingerprint match PINNED_FINGERPRINT
+    other_account_preflight = _preflight(expected_account_fingerprint="b" * 64)
+    with pytest.raises(PermissionError, match="pinned account fingerprint"):
+        _send(monkeypatch, client, same_run_preflight=other_account_preflight)
+    assert client.connected is False
+    assert client.place_calls == []
+
+
+def test_post_connection_recheck_uses_injected_clock_not_frozen_now(monkeypatch):
+    _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    stale_clock = lambda: NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 5)
+    with pytest.raises(PermissionError, match="freshness window"):
+        _send(monkeypatch, client, clock=stale_clock)
+    assert client.accounts_ready.is_set() is True
+    assert client.place_calls == []
+
+
+def test_open_order_callback_ignores_non_accepted_status():
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+    client.openOrder(
+        77,
+        SimpleNamespace(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Inactive"),
+    )
+    assert client.ack_ready.is_set() is False
+    assert client.ack_perm_id is None
+
+
+def test_open_order_callback_accepts_when_status_is_accepted():
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+    client.openOrder(
+        77,
+        SimpleNamespace(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="PreSubmitted"),
+    )
+    assert client.ack_ready.is_set() is True
+    assert client.ack_perm_id == 880077
+    assert client.broker_status == "PreSubmitted"
+
+
+def test_open_order_callback_does_not_overwrite_existing_order_error():
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+    client.order_error = "already rejected"
+    client.openOrder(
+        77,
+        SimpleNamespace(),
+        SimpleNamespace(account=PINNED_ACCOUNT, permId=880077),
+        SimpleNamespace(status="Submitted"),
+    )
+    assert client.order_error == "already rejected"
+    assert client.ack_ready.is_set() is False
+
+
+def test_order_status_callback_does_not_overwrite_existing_order_error():
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.order_error = "already rejected"
+    client.orderStatus(77, "Submitted", 0, 0, 0.0, 880077, 0, 0.0, 1, "", 0.0)
+    assert client.ack_ready.is_set() is False
+    assert client.ack_perm_id is None
+
+
+def test_stop_check_is_the_last_statement_before_place_order():
+    import inspect
+
+    source = inspect.getsource(subject.send_exactly_one_live_pilot)
+    watched_order_idx = source.rindex("client.watched_order_id = int(order_id)")
+    watched_account_idx = source.rindex("client.watched_account = raw_account_id")
+    stop_idx = source.rindex("if live_pilot_stop_is_active(stop_path=stop_path):")
+    place_idx = source.index("client.placeOrder(int(order_id), contract, order)")
+    assert watched_order_idx < stop_idx < place_idx
+    assert watched_account_idx < stop_idx < place_idx
 
 
 def test_module_contains_one_place_order_call_and_no_cancel_transport():

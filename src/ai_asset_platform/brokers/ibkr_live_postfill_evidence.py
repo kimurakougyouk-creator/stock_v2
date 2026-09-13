@@ -300,6 +300,21 @@ def match_live_postfill(
     if any(not value for value in exec_ids) or len(exec_ids) != len(set(exec_ids)):
         blockers.append("matching Live executions contain missing or duplicate exec_id evidence")
 
+    # A conflicting row sharing an exec_id but belonging to a different
+    # order/account/symbol/side is filtered out of `matches` above and would
+    # otherwise be invisible to the duplicate check. Verify each matched
+    # exec_id's occurrence count is unchanged across the full, unfiltered
+    # execution set.
+    for target_id in {value for value in exec_ids if value}:
+        matched_occurrences = exec_ids.count(target_id)
+        total_occurrences = sum(
+            1 for row in snapshot.executions if str(row.exec_id or "").strip() == target_id
+        )
+        if total_occurrences != matched_occurrences:
+            blockers.append(
+                f"exec_id {target_id} conflicts with Live execution evidence outside the matched order/account"
+            )
+
     currencies = {str(row.currency or "").strip().upper() for row in matches}
     if len(currencies) != 1 or any(len(value) != 3 for value in currencies):
         blockers.append("matching Live executions do not share one valid currency")
@@ -313,15 +328,18 @@ def match_live_postfill(
         if row_quantity is None or row_price is None:
             blockers.append("matching Live execution contains non-positive or non-finite quantity/price")
             continue
+        product = row_quantity * row_price
+        if not math.isfinite(product):
+            blockers.append(
+                f"matching Live execution product overflowed to a non-finite value for exec_id {row.exec_id}"
+            )
+            continue
         total_quantity += row_quantity
-        gross += row_quantity * row_price
+        gross += product
+        if not math.isfinite(gross):
+            blockers.append("matching Live execution running gross total overflowed to a non-finite value")
 
-    if expected_quantity is not None and not math.isclose(
-        total_quantity,
-        expected_quantity,
-        rel_tol=1e-12,
-        abs_tol=1e-9,
-    ):
+    if expected_quantity is not None and total_quantity != expected_quantity:
         blockers.append(
             f"matching Live execution quantity does not equal expected total: {total_quantity} != {expected_quantity}"
         )
@@ -347,6 +365,11 @@ def match_live_postfill(
             continue
         matched_commissions.append(commission)
         commission_total += parsed_commission
+        if not math.isfinite(commission_total):
+            blockers.append(
+                f"running commission total overflowed to a non-finite value at exec_id {execution.exec_id}"
+            )
+            continue
 
     if blockers:
         return LivePostFillMatch(
