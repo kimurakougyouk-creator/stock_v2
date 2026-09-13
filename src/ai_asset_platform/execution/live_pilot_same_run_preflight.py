@@ -2,8 +2,8 @@
 
 This gate is intentionally stricter than the broader readiness report. It is
 meant to be evaluated immediately before the operator-authorization/send phase
-so evidence from different Live endpoints or widely separated snapshots cannot
-be mixed together.
+so evidence from different Live endpoints, accounts, or widely separated
+snapshots cannot be mixed together.
 
 For the first cash pilot it also requires settled cash in the instrument currency
 plus an explicit conservative reserve, so margin buying power or an implicit FX
@@ -28,6 +28,7 @@ from ai_asset_platform.execution.live_pilot_emergency_stop import (
 DEFAULT_MAX_AGE_SECONDS = 30.0
 DEFAULT_MAX_SKEW_SECONDS = 15.0
 _VALID_LIVE_ENDPOINT_PORTS = {4001, 7496}
+_VALID_PAPER_ENDPOINT_PORTS = {4002, 7497}
 _USD_TICKERS = {"AAPL", "SPY"}
 _INSTRUMENT_CURRENCY = {"AAPL": "USD", "SPY": "USD", "9432.T": "JPY"}
 _SETTLED_CASH_RESERVE = {"JPY": 1_000.0, "USD": 10.0}
@@ -40,6 +41,7 @@ class LivePilotSameRunPreflight:
     checked_at: str
     blockers: tuple[str, ...]
     ticker: str
+    account_fingerprint: str
     account_fingerprint_match: bool
     endpoint_port: int | None
     endpoint_binding_ready: bool
@@ -103,34 +105,44 @@ def _port(report: dict | None) -> int | None:
 
 
 def _read_only_clean(report: dict | None) -> bool:
-    return bool(
-        isinstance(report, dict)
-        and report.get("ready") is True
-        and report.get("connection_mode") == "LIVE_READ_ONLY"
-        and not report.get("order_sent")
-        and not report.get("cancel_sent")
-        and not report.get("live_order_sent")
-    )
+    if not isinstance(report, dict):
+        return False
+    if report.get("ready") is not True or report.get("connection_mode") != "LIVE_READ_ONLY":
+        return False
+    if report.get("order_sent") is not False or report.get("live_order_sent") is not False:
+        return False
+    if "cancel_sent" in report and report.get("cancel_sent") is not False:
+        return False
+    return True
 
 
 def _paper_safe(report: dict | None) -> bool:
-    if not isinstance(report, dict):
+    if not isinstance(report, dict) or report.get("schema_version") != 1:
         return False
     broker = report.get("broker")
-    broker = broker if isinstance(broker, dict) else {}
-    try:
-        blockers = int(broker.get("reconciliation_blocker_count", 0) or 0)
-        open_orders = int(broker.get("open_order_count", 0) or 0)
-    except (TypeError, ValueError):
+    if not isinstance(broker, dict):
         return False
+    blocker_count = broker.get("reconciliation_blocker_count")
+    open_order_count = broker.get("open_order_count")
+    open_orders = broker.get("open_orders")
+    endpoint_port = broker.get("endpoint_port")
     return bool(
-        str(report.get("status") or "").strip().upper() != "CRITICAL"
+        str(report.get("status") or "").strip().upper() == "HEALTHY"
+        and broker.get("account_ready") is True
+        and broker.get("execution_snapshot_ready") is True
+        and endpoint_port in _VALID_PAPER_ENDPOINT_PORTS
+        and broker.get("reconciliation_next_action") == "RECONCILIATION_EVIDENCE_IS_CLEAN"
+        and type(blocker_count) is int
+        and blocker_count == 0
+        and broker.get("all_open_orders_ready") is True
+        and type(open_order_count) is int
+        and open_order_count == 0
+        and isinstance(open_orders, list)
+        and len(open_orders) == 0
         and report.get("accounting_safe") is True
         and report.get("risk_safe") is True
-        and blockers == 0
-        and open_orders == 0
-        and not report.get("monitor_order_sent")
-        and not report.get("live_order_sent")
+        and report.get("monitor_order_sent") is False
+        and report.get("live_order_sent") is False
     )
 
 
@@ -236,8 +248,8 @@ def evaluate_live_pilot_same_run_preflight(
         and readiness_report.get("operational_pilot_ready") is True
         and readiness_report.get("status") == "READY_FOR_ONE_OPERATIONAL_PILOT"
         and str(readiness_report.get("ticker") or "").strip().upper() == normalized_ticker
-        and not readiness_report.get("order_sent")
-        and not readiness_report.get("live_order_sent")
+        and readiness_report.get("order_sent") is False
+        and readiness_report.get("live_order_sent") is False
     )
     if not readiness_ready:
         blockers.append("operational Live pilot readiness is not ready for this ticker")
@@ -249,25 +261,29 @@ def evaluate_live_pilot_same_run_preflight(
     if not open_orders_clean:
         blockers.append("same-run Live open-order evidence is not clean read-only evidence")
     if open_orders_clean:
-        try:
-            open_order_count = int(live_open_orders_report.get("open_order_count", 0))
-        except (TypeError, ValueError):
-            open_order_count = -1
-        if open_order_count != 0:
-            blockers.append("same-run Live open-order evidence is not empty")
+        raw_count = live_open_orders_report.get("open_order_count")
+        raw_orders = live_open_orders_report.get("orders")
+        if type(raw_count) is not int or raw_count != 0 or not isinstance(raw_orders, list) or raw_orders:
+            blockers.append("same-run Live open-order evidence is not exactly empty")
 
     observed_fingerprint = (
         str(live_account_report.get("account_fingerprint") or "").strip().lower()
         if isinstance(live_account_report, dict)
         else ""
     )
+    open_orders_fingerprint = (
+        str(live_open_orders_report.get("account_fingerprint") or "").strip().lower()
+        if isinstance(live_open_orders_report, dict)
+        else ""
+    )
     fingerprint_match = bool(
         expected_fingerprint
         and len(expected_fingerprint) == 64
         and observed_fingerprint == expected_fingerprint
+        and open_orders_fingerprint == expected_fingerprint
     )
     if not fingerprint_match:
-        blockers.append("same-run Live account fingerprint does not match the pinned account")
+        blockers.append("same-run Live account/open-order fingerprints do not match the pinned account")
 
     account_port = _port(live_account_report)
     open_orders_port = _port(live_open_orders_report)
@@ -327,6 +343,7 @@ def evaluate_live_pilot_same_run_preflight(
     if observed_times:
         skew_seconds = (max(observed_times) - min(observed_times)).total_seconds()
         if skew_seconds > float(max_skew_seconds):
+            evidence_fresh = False
             blockers.append("same-run evidence timestamps are too far apart")
     else:
         evidence_fresh = False
@@ -370,6 +387,7 @@ def evaluate_live_pilot_same_run_preflight(
         checked_at=current.isoformat(timespec="seconds"),
         blockers=tuple(blockers),
         ticker=normalized_ticker,
+        account_fingerprint=expected_fingerprint if fingerprint_match else "",
         account_fingerprint_match=fingerprint_match,
         endpoint_port=endpoint_port,
         endpoint_binding_ready=endpoint_binding_ready,
@@ -392,7 +410,7 @@ def evaluate_live_pilot_same_run_preflight(
 
 def preflight_record(result: LivePilotSameRunPreflight) -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         **asdict(result),
         "cash_policy": {
             "base_available_funds_reserve_jpy": _BASE_AVAILABLE_FUNDS_RESERVE_JPY,

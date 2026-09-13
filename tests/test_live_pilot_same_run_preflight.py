@@ -57,7 +57,9 @@ def _open_orders(**overrides) -> dict:
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
         "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
         "open_order_count": 0,
+        "orders": [],
         "order_sent": False,
         "cancel_sent": False,
         "live_order_sent": False,
@@ -84,15 +86,22 @@ def _fx(**overrides) -> dict:
 
 def _paper(**overrides) -> dict:
     data = {
-        "status": "WARNING",
+        "schema_version": 1,
+        "status": "HEALTHY",
         "checked_at": _stamp(),
         "accounting_safe": True,
         "risk_safe": True,
         "monitor_order_sent": False,
         "live_order_sent": False,
         "broker": {
+            "account_ready": True,
+            "execution_snapshot_ready": True,
+            "endpoint_port": 4002,
+            "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
             "reconciliation_blocker_count": 0,
+            "all_open_orders_ready": True,
             "open_order_count": 0,
+            "open_orders": [],
         },
     }
     data.update(overrides)
@@ -123,6 +132,7 @@ def test_clean_same_run_evidence_is_ready_only_for_operator_authorization(tmp_pa
     assert result.status == "READY_FOR_OPERATOR_AUTHORIZATION"
     assert result.endpoint_port == 4001
     assert result.endpoint_binding_ready is True
+    assert result.account_fingerprint == FINGERPRINT
     assert result.account_fingerprint_match is True
     assert result.evidence_fresh is True
     assert result.available_funds_ready is True
@@ -196,7 +206,7 @@ def test_evidence_skew_is_bounded_even_when_each_report_is_fresh(tmp_path: Path)
     )
 
     assert result.ready is False
-    assert result.evidence_fresh is True
+    assert result.evidence_fresh is False
     assert result.evidence_skew_seconds == 20.0
     assert "same-run evidence timestamps are too far apart" in result.blockers
 
@@ -205,17 +215,47 @@ def test_wrong_pinned_account_fails_closed(tmp_path: Path):
     result = _evaluate(tmp_path, expected_account_fingerprint="b" * 64)
 
     assert result.ready is False
+    assert result.account_fingerprint == ""
+    assert result.account_fingerprint_match is False
+
+
+def test_open_order_snapshot_from_other_account_fails_closed(tmp_path: Path):
+    result = _evaluate(
+        tmp_path,
+        live_open_orders_report=_open_orders(account_fingerprint="b" * 64),
+    )
+    assert result.ready is False
     assert result.account_fingerprint_match is False
 
 
 def test_unexpected_open_live_order_fails_closed(tmp_path: Path):
     result = _evaluate(
         tmp_path,
-        live_open_orders_report=_open_orders(open_order_count=1),
+        live_open_orders_report=_open_orders(open_order_count=1, orders=[{"order_id": 1}]),
     )
 
     assert result.ready is False
-    assert "same-run Live open-order evidence is not empty" in result.blockers
+    assert "same-run Live open-order evidence is not exactly empty" in result.blockers
+
+
+def test_malformed_open_order_count_or_inconsistent_rows_fail_closed(tmp_path: Path):
+    non_integral = _evaluate(
+        tmp_path,
+        live_open_orders_report=_open_orders(open_order_count=0.5),
+    )
+    assert non_integral.ready is False
+
+    inconsistent = _evaluate(
+        tmp_path,
+        live_open_orders_report=_open_orders(open_order_count=0, orders=[{"order_id": 1}]),
+    )
+    assert inconsistent.ready is False
+
+
+def test_partial_paper_warning_never_counts_as_safe(tmp_path: Path):
+    result = _evaluate(tmp_path, paper_monitor_report=_paper(status="WARNING"))
+    assert result.ready is False
+    assert result.paper_monitor_safe is False
 
 
 def test_emergency_stop_is_checked_in_final_read_only_gate(tmp_path: Path):

@@ -1,10 +1,11 @@
 """Durable fail-closed no-resend journal for one future Live pilot.
 
-A future sender must persist an exclusive SEND_ATTEMPT marker *before* calling
-any broker order API.  The marker, not the mutable summary journal, is the
-irreversible source of truth for whether the single allowed transmission attempt
-has already been spent.  A crash after marker creation therefore still blocks
-all later sends.
+A future sender must persist an exclusive pilot-wide SEND_ATTEMPT marker *before*
+calling any broker order API.  That marker, not the caller-selected intent ID and
+not the mutable summary journal, is the irreversible source of truth for whether
+the single allowed first-pilot transmission attempt has already been spent.  A
+crash after marker creation therefore still blocks every later send, even if a
+caller changes ``intent_id`` or nonce after restart.
 
 Timeout, disconnect, exceptions, and any ambiguous outcome transition to
 UNKNOWN and require read-only broker recovery.  This module has no broker
@@ -20,7 +21,8 @@ import re
 
 
 DEFAULT_JOURNAL_DIR = Path("results/live_pilot_send_journal")
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
+PILOT_ATTEMPT_MARKER_NAME = "first_live_pilot.attempted.json"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 
 
@@ -50,6 +52,20 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.attempted.json"
 
 
+def _pilot_attempt_path(directory: Path) -> Path:
+    return directory / PILOT_ATTEMPT_MARKER_NAME
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Durably persist directory-entry changes before Live transport proceeds."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_new(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -57,10 +73,16 @@ def _atomic_new(path: Path, payload: dict) -> None:
         encoded = (
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        os.write(descriptor, encoded)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError("failed to persist Live pilot journal record")
+            offset += written
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_directory(path.parent)
 
 
 def _atomic_replace(path: Path, payload: dict) -> None:
@@ -75,11 +97,17 @@ def _atomic_replace(path: Path, payload: dict) -> None:
         encoded = (
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        os.write(descriptor, encoded)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError("failed to persist Live pilot journal record")
+            offset += written
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
     os.replace(temporary, path)
+    _fsync_directory(path.parent)
 
 
 def _load_json(path: Path, *, label: str) -> dict:
@@ -98,11 +126,27 @@ def load_send_journal(
     return _load_json(path, label="send journal")
 
 
+def load_pilot_attempt_marker(
+    *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    path = _pilot_attempt_path(directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="pilot-wide send-attempt marker")
+
+
+def pilot_send_attempt_recorded(*, directory: Path = DEFAULT_JOURNAL_DIR) -> bool:
+    """Return True once any first-pilot transport attempt has been spent."""
+    return _pilot_attempt_path(directory).exists()
+
+
 def send_attempt_recorded(
     intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
 ) -> bool:
-    """Return True when the irreversible single-send marker already exists."""
-    return _attempt_path(intent_id, directory).exists()
+    """Return True when this intent or the pilot-wide irreversible marker exists."""
+    return pilot_send_attempt_recorded(directory=directory) or _attempt_path(
+        intent_id, directory
+    ).exists()
 
 
 def create_consumed_authorization_journal(
@@ -126,7 +170,9 @@ def create_consumed_authorization_journal(
         "live_order_sent"
     ):
         raise PermissionError("consumed authorization record is not pre-send evidence")
-    if send_attempt_recorded(intent, directory=directory):
+    if pilot_send_attempt_recorded(directory=directory):
+        raise PermissionError("the first Live pilot send attempt has already been spent")
+    if _attempt_path(intent, directory).exists():
         raise PermissionError("a Live send attempt is already recorded for this intent")
 
     payload = {
@@ -160,11 +206,11 @@ def record_send_attempt(
     directory: Path = DEFAULT_JOURNAL_DIR,
     now: datetime | None = None,
 ) -> dict:
-    """Irreversibly spend the sole allowed send attempt before broker transport.
+    """Irreversibly spend the sole pilot-wide send attempt before transport.
 
-    The exclusive attempt marker is created first.  If the process crashes or
-    the summary update fails afterwards, that marker survives and every later
-    call still fails closed.
+    The pilot-wide marker is created before the per-intent marker and summary.
+    Therefore any crash after the first durable creation blocks every subsequent
+    attempt, including attempts made with another caller-selected intent ID.
     """
     intent = _safe(intent_id, "intent_id")
     payload = load_send_journal(intent, directory=directory)
@@ -176,27 +222,37 @@ def record_send_attempt(
     ):
         raise PermissionError("a Live send attempt is no longer permitted for this intent")
 
+    recorded_at = _now(now)
     marker = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "intent_id": intent,
         "nonce": str(payload.get("nonce") or ""),
         "state": "SEND_ATTEMPT_RECORDED",
-        "recorded_at": _now(now),
+        "recorded_at": recorded_at,
+        "send_attempt_count": 1,
         "automatic_resend_allowed": False,
         "automatic_cancel_allowed": False,
         "automatic_modify_allowed": False,
         "automatic_flatten_allowed": False,
         "automatic_close_allowed": False,
+        "order_sent": False,
+        "live_order_sent": False,
     }
+    try:
+        _atomic_new(_pilot_attempt_path(directory), marker)
+    except FileExistsError as exc:
+        raise PermissionError("the first Live pilot send attempt has already been spent") from exc
+
     try:
         _atomic_new(_attempt_path(intent, directory), marker)
     except FileExistsError as exc:
         raise PermissionError("the single Live send attempt has already been spent") from exc
 
     payload.update(
+        schema_version=REPORT_SCHEMA_VERSION,
         state="SEND_ATTEMPT_RECORDED",
         send_attempt_count=1,
-        send_attempt_recorded_at=marker["recorded_at"],
+        send_attempt_recorded_at=recorded_at,
         recovery_required=True,
         automatic_resend_allowed=False,
         automatic_cancel_allowed=False,
@@ -208,9 +264,24 @@ def record_send_attempt(
     return payload
 
 
-def _require_attempt_marker(intent_id: str, directory: Path) -> None:
-    if not send_attempt_recorded(intent_id, directory=directory):
-        raise PermissionError("irreversible Live send-attempt marker is missing")
+def _require_attempt_marker(intent_id: str, directory: Path) -> dict:
+    intent = _safe(intent_id, "intent_id")
+    pilot = load_pilot_attempt_marker(directory=directory)
+    if pilot is None:
+        raise PermissionError("irreversible pilot-wide Live send-attempt marker is missing")
+    if (
+        pilot.get("state") != "SEND_ATTEMPT_RECORDED"
+        or str(pilot.get("intent_id") or "") != intent
+        or int(pilot.get("send_attempt_count", 0) or 0) != 1
+    ):
+        raise PermissionError("pilot-wide Live send-attempt marker is inconsistent")
+    per_intent = _attempt_path(intent, directory)
+    if not per_intent.exists():
+        raise PermissionError("irreversible per-intent Live send-attempt marker is missing")
+    marker = _load_json(per_intent, label="per-intent send-attempt marker")
+    if marker != pilot:
+        raise PermissionError("pilot-wide and per-intent send-attempt markers disagree")
+    return pilot
 
 
 def mark_order_acknowledged(
@@ -228,6 +299,7 @@ def mark_order_acknowledged(
     if int(order_id) <= 0 or int(perm_id) <= 0:
         raise ValueError("order_id and perm_id must be positive")
     payload.update(
+        schema_version=REPORT_SCHEMA_VERSION,
         state="ORDER_ACKNOWLEDGED",
         order_id=int(order_id),
         perm_id=int(perm_id),
@@ -255,6 +327,7 @@ def mark_unknown(
     if not normalized:
         raise ValueError("UNKNOWN reason is required")
     payload.update(
+        schema_version=REPORT_SCHEMA_VERSION,
         state="UNKNOWN",
         unknown_at=_now(now),
         unknown_reason=normalized,
@@ -295,6 +368,7 @@ def mark_postfill_proven(
     }:
         raise PermissionError("post-fill broker identity conflicts with acknowledged order")
     payload.update(
+        schema_version=REPORT_SCHEMA_VERSION,
         state="POSTFILL_PROVEN",
         exec_id=execution,
         order_id=int(order_id),
@@ -314,9 +388,11 @@ def mark_postfill_proven(
 def send_attempt_permitted(
     intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
 ) -> bool:
-    """Fail closed if either the summary or irreversible marker says spent."""
+    """Fail closed if either pilot-wide, per-intent, or summary evidence is spent."""
     try:
-        if send_attempt_recorded(intent_id, directory=directory):
+        if pilot_send_attempt_recorded(directory=directory):
+            return False
+        if _attempt_path(intent_id, directory).exists():
             return False
         payload = load_send_journal(intent_id, directory=directory)
         return bool(

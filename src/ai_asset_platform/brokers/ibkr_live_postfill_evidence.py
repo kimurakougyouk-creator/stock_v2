@@ -6,12 +6,14 @@ IDs are used only in memory and are never persisted. No order API exists here.
 
 A single order may produce multiple execution rows. Evidence is therefore kept
 per ``exec_id`` and must reconcile all matching executions and one commission
-record per execution before a fill is considered proven.
+record per execution before a fill is considered proven. Conflicting reuse of an
+exec_id anywhere in the snapshot fails closed.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import math
 import os
@@ -34,6 +36,7 @@ from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_
 
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_postfill_evidence_latest.json")
 REPORT_SCHEMA_VERSION = 2
+_EXPECTED_CURRENCY = {"AAPL": "USD", "SPY": "USD", "9432.T": "JPY"}
 
 
 @dataclass(frozen=True)
@@ -107,9 +110,25 @@ def _finite(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def _positive(value: object) -> float | None:
-    parsed = _finite(value)
+def _decimal(value: object) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _positive_decimal(value: object) -> Decimal | None:
+    parsed = _decimal(value)
     return parsed if parsed is not None and parsed > 0 else None
+
+
+def _finite_float_from_decimal(value: Decimal) -> float | None:
+    try:
+        parsed = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 class _LivePostFillProbe(EWrapper, EClient):
@@ -244,9 +263,6 @@ def preview_ibkr_live_postfill_snapshot(
                 for contract, execution in probe.raw_executions
                 if (row := _execution_row(contract, execution, account_id)) is not None
             ]
-            # Keep every row. Duplicate/conflicting exec_id or commission evidence
-            # must remain visible so reconciliation can fail closed rather than
-            # silently overwriting one broker callback with another.
             return IbkrLivePostFillSnapshot(
                 attempted=True,
                 connected=True,
@@ -274,13 +290,17 @@ def match_live_postfill(
     if snapshot.account_fingerprint != expected_fp:
         blockers.append("Live account fingerprint mismatch")
 
-    symbol = "9432" if str(ticker).strip().upper() == "9432.T" else str(ticker).strip().upper()
+    normalized_ticker = str(ticker).strip().upper()
+    symbol = "9432" if normalized_ticker == "9432.T" else normalized_ticker
+    expected_currency = _EXPECTED_CURRENCY.get(normalized_ticker)
     normalized_side = str(side).strip().upper()
-    expected_quantity = _positive(quantity)
+    expected_quantity = _positive_decimal(quantity)
     if normalized_side not in {"BUY", "SELL"}:
         blockers.append("side must be BUY or SELL")
     if expected_quantity is None:
         blockers.append("quantity must be positive and finite")
+    if expected_currency is None:
+        blockers.append("ticker has no approved execution currency")
 
     matches = [
         row
@@ -299,35 +319,40 @@ def match_live_postfill(
     exec_ids = [str(row.exec_id or "").strip() for row in matches]
     if any(not value for value in exec_ids) or len(exec_ids) != len(set(exec_ids)):
         blockers.append("matching Live executions contain missing or duplicate exec_id evidence")
+    all_exec_ids = [str(row.exec_id or "").strip() for row in snapshot.executions]
+    for exec_id in set(exec_ids):
+        if all_exec_ids.count(exec_id) != 1:
+            blockers.append(f"exec_id {exec_id} is conflicting across the complete execution snapshot")
 
     currencies = {str(row.currency or "").strip().upper() for row in matches}
-    if len(currencies) != 1 or any(len(value) != 3 for value in currencies):
-        blockers.append("matching Live executions do not share one valid currency")
-    execution_currency = next(iter(currencies)) if len(currencies) == 1 else None
+    if currencies != {expected_currency}:
+        blockers.append("matching Live executions do not use the approved instrument currency")
 
-    total_quantity = 0.0
-    gross = 0.0
+    total_quantity = Decimal("0")
+    gross = Decimal("0")
     for row in matches:
-        row_quantity = _positive(row.quantity)
-        row_price = _positive(row.price)
+        row_quantity = _positive_decimal(row.quantity)
+        row_price = _positive_decimal(row.price)
         if row_quantity is None or row_price is None:
             blockers.append("matching Live execution contains non-positive or non-finite quantity/price")
             continue
+        product = row_quantity * row_price
+        if not product.is_finite():
+            blockers.append("matching Live execution gross value is non-finite")
+            continue
         total_quantity += row_quantity
-        gross += row_quantity * row_price
+        gross += product
+        if not total_quantity.is_finite() or not gross.is_finite():
+            blockers.append("matching Live execution aggregate is non-finite")
+            break
 
-    if expected_quantity is not None and not math.isclose(
-        total_quantity,
-        expected_quantity,
-        rel_tol=1e-12,
-        abs_tol=1e-9,
-    ):
+    if expected_quantity is not None and total_quantity != expected_quantity:
         blockers.append(
             f"matching Live execution quantity does not equal expected total: {total_quantity} != {expected_quantity}"
         )
 
     matched_commissions: list[LiveCommissionEvidence] = []
-    commission_total = 0.0
+    commission_total = Decimal("0")
     for execution in matches:
         rows = [row for row in snapshot.commissions if row.exec_id == execution.exec_id]
         if len(rows) != 1:
@@ -336,45 +361,68 @@ def match_live_postfill(
             )
             continue
         commission = rows[0]
-        parsed_commission = _finite(commission.commission)
+        parsed_commission = _decimal(commission.commission)
         if parsed_commission is None:
             blockers.append(f"commission for exec_id {execution.exec_id} is non-finite")
             continue
-        if execution_currency is None or commission.currency != execution_currency:
+        if expected_currency is None or commission.currency != expected_currency:
             blockers.append(
-                f"commission currency for exec_id {execution.exec_id} does not match execution currency"
+                f"commission currency for exec_id {execution.exec_id} does not match approved instrument currency"
             )
             continue
         matched_commissions.append(commission)
         commission_total += parsed_commission
+        if not commission_total.is_finite():
+            blockers.append("aggregate commission is non-finite")
+            break
+
+    vwap_decimal = gross / total_quantity if total_quantity > 0 else None
+    cash_decimal = None
+    if vwap_decimal is not None and vwap_decimal.is_finite() and commission_total.is_finite():
+        cash_decimal = -(gross + commission_total) if normalized_side == "BUY" else gross - commission_total
+    if vwap_decimal is None or not vwap_decimal.is_finite():
+        blockers.append("aggregate VWAP is non-finite")
+    if cash_decimal is None or not cash_decimal.is_finite():
+        blockers.append("aggregate native cash effect is non-finite")
+
+    filled_float = _finite_float_from_decimal(total_quantity)
+    gross_float = _finite_float_from_decimal(vwap_decimal) if vwap_decimal is not None else None
+    commission_float = _finite_float_from_decimal(commission_total)
+    cash_float = _finite_float_from_decimal(cash_decimal) if cash_decimal is not None else None
+    if total_quantity > 0 and filled_float is None:
+        blockers.append("filled quantity cannot be represented as a finite result")
+    if vwap_decimal is not None and gross_float is None:
+        blockers.append("VWAP cannot be represented as a finite result")
+    if commission_float is None:
+        blockers.append("commission total cannot be represented as a finite result")
+    if cash_decimal is not None and cash_float is None:
+        blockers.append("native cash effect cannot be represented as a finite result")
 
     if blockers:
         return LivePostFillMatch(
             False,
-            tuple(blockers),
+            tuple(dict.fromkeys(blockers)),
             matches[0] if matches else None,
             matched_commissions[0] if matched_commissions else None,
             None,
             executions=tuple(matches),
             commissions=tuple(matched_commissions),
-            filled_quantity=total_quantity if matches else None,
-            vwap_price=(gross / total_quantity) if total_quantity > 0 else None,
-            commission_total=commission_total if matched_commissions else None,
+            filled_quantity=filled_float,
+            vwap_price=gross_float,
+            commission_total=commission_float if matched_commissions else None,
         )
 
-    vwap = gross / total_quantity
-    cash_effect = -(gross + commission_total) if normalized_side == "BUY" else gross - commission_total
     return LivePostFillMatch(
         True,
         (),
         matches[0],
         matched_commissions[0],
-        cash_effect,
+        cash_float,
         executions=tuple(matches),
         commissions=tuple(matched_commissions),
-        filled_quantity=total_quantity,
-        vwap_price=vwap,
-        commission_total=commission_total,
+        filled_quantity=filled_float,
+        vwap_price=gross_float,
+        commission_total=commission_float,
     )
 
 
