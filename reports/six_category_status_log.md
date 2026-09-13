@@ -27,3 +27,16 @@
 
 ### 前回からの変化点
 コード面(`main`)に変更なし。GitHub上ではPR #281のCodexレビュー往復が本日も継続し、追加の fail-closed 修正案が提示されたが、Codex実行環境のGit remote未設定によりPRブランチへの実プッシュは行われておらず、GitHub上のPR実HEADは前回確認時から変化していない(未反映のまま)。Issue #255はNO-GO状態を維持。
+
+---
+
+## 2026-09-14 (JST)
+- 分析: 完成 — 変化なし。`main`(SHA `d3d46e0`)は前回ログ以降コミットなし。`indicators.py` の `add_indicators()`(MA5/MA25/MA75, RSI, MACD/Signal, ATR, VOL20)、`tests/test_signal_engine.py` 経由の間接検証は存在を再確認済み、内容に変更なし。
+- シグナル: 完成 — 変化なし。`signal_engine.py` の `determine_signal()` および `src/ai_asset_platform/decision*` 系、対応テスト群に変更なし。
+- バックテスト: 完成 — 変化なし。`backtest.py` および `src/ai_asset_platform/reports/backtest_*.py`、対応テスト群に変更なし。
+- 資産推移: 完成 — 変化なし。`src/ai_asset_platform/reports/equity_chart.py` ほかエクイティ/損益推移関連ファイル、対応テスト群に変更なし。
+- リスク管理: 完成(Paper運用範囲) — 変化なし。`risk_manager.py`、`execution/shared_risk_gate.py`/`legacy_risk_gate.py`、`risk/market_sizing.py`、対応テスト群に変更なし。
+- 実運用: 一部実装 — `main` に前回ログ以降コミットなし(`src/ai_asset_platform/execution/live_pilot_single_send.py` 等の主要ファイルは存在を再確認)。GitHub上でPR #280(2026-09-08更新)/#281(2026-09-13T00:01 UTC更新)/#282(2026-09-10更新)は依然オープンかつ未マージ。PR #281は本日もオーナーからCodexへの「@codex address that feedback」要求とCodex側の対応コメントが続いているが、PRの実HEAD SHAは前回確認時と同一の `1a930b83e83786d6ac5dc73ba38add7a265eaacd` のままで、CIも2026-09-10時点のgreenが最新(新規プッシュなし)。Codex側は複数回「ローカルでコミットした」旨を報告しているが、当該環境にGit remoteが設定されておらずPRブランチへは反映されていないことをPRコメント上でオーナー自身が指摘・訂正しており、CLAUDE.mdの「stale or mixed evidence」に該当するためUNVERIFIEDのまま扱う。Issue #255のチェックリストは引き続き1項目も完了(チェック)されておらず、外部前提(JPY入金決済、日本株取引許可、JASDEC登録、Live読み取り専用API疎通)もUNVERIFIED。CLAUDE.md/HANDOFF_MASTER.mdの安全不変条件どおり、現時点でも **NO-GO(実弾`placeOrder`不可)**。
+
+### 前回からの変化点
+コード面(`main`、PR #280/#281/#282のいずれのブランチも)に実質的な変更なし。GitHub上ではPR #281のレビュー往復コメントが増えた(オーナーが5項目の統合fail-closed修正を再要求)のみで、PR実HEADは前回確認時から不変。Issue #255はNO-GO状態を維持し、他の5項目(分析/シグナル/バックテスト/資産推移/リスク管理)はコード変更なしのため判定・根拠とも前回から変化なし。
