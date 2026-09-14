@@ -665,6 +665,42 @@ def send_exactly_one_live_pilot(
                 "emergency stop became active; attempt remains permanently spent",
             )
 
+        # Re-validate freshness/expiry once more, with a freshly sampled clock,
+        # immediately after the stop check succeeds. The stop check itself is a
+        # local filesystem read that can stall; without this, evidence could age
+        # past its window in the gap between "stop confirmed clear" and
+        # transport (TOCTOU). This is the literal last gate before placeOrder.
+        try:
+            post_stop_clock = _utc(_current_clock())
+            _require_fresh_timestamp(
+                readiness_report.get("checked_at"),
+                label="operational readiness",
+                now=post_stop_clock,
+            )
+            _require_fresh_timestamp(
+                same_run_preflight.checked_at,
+                label="same-run preflight",
+                now=post_stop_clock,
+            )
+            _require_not_expired(
+                authorization_expires_at,
+                label="one-shot operator authorization",
+                now=post_stop_clock,
+            )
+        except PermissionError as exc:
+            return LivePilotSendResult(
+                "BLOCKED_STALE_AFTER_STOP_CHECK",
+                False,
+                False,
+                int(order_id),
+                None,
+                endpoint_port,
+                observed_fingerprint,
+                None,
+                True,
+                f"evidence aged past freshness window after final stop check; attempt remains permanently spent: {exc}",
+            )
+
         try:
             client.placeOrder(int(order_id), contract, order)
         except Exception as exc:

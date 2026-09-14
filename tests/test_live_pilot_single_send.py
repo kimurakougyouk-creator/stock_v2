@@ -257,6 +257,27 @@ def test_stop_at_last_possible_point_spends_attempt_without_transport(monkeypatc
     assert events == ["journal", "attempt"]
 
 
+def test_stale_evidence_after_stop_check_blocks_before_transport(monkeypatch):
+    # _current_clock is sampled 4 times before placeOrder on the happy path:
+    # initial validation, post-handshake re-check, pre-stop-check re-check,
+    # and the new post-stop-check re-check. Keep the first three at NOW so
+    # every earlier gate passes, then jump past the freshness window only for
+    # the last sample to prove the new gate is what catches it.
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient()
+    stale = NOW + timedelta(seconds=subject.FINAL_EVIDENCE_MAX_AGE_SECONDS + 1)
+    clock_values = iter([NOW, NOW, NOW, stale])
+    result = _send(monkeypatch, client, clock=lambda: next(clock_values))
+
+    assert result.status == "BLOCKED_STALE_AFTER_STOP_CHECK"
+    assert result.sent is False
+    assert result.acknowledged is False
+    assert result.order_id == 77
+    assert result.recovery_required is True
+    assert client.place_calls == []
+    assert events == ["journal", "attempt"]
+
+
 def test_transport_exception_becomes_unknown_and_never_retries(monkeypatch):
     events = _patch_prereqs(monkeypatch)
     client = FakeClient(place_error=RuntimeError("socket outcome ambiguous"))
