@@ -1,9 +1,16 @@
 """Read-only, fail-closed release-integrity gate for PRs into main.
 
 The workflow runs from trusted base code under ``pull_request_target``. PR
-code is never checked out, imported, or executed. The protected settings path
-is inspected only as Git object metadata at immutable base/head commit SHAs.
-``LIVE_EXECUTION`` is always the fixed literal ``NO-GO``.
+code is never checked out, imported, or executed. The protected settings
+path, its package initialization/import context (``ai_asset_platform`` and
+``ai_asset_platform.core``'s own ``__init__.py``), and known stdlib-shadow
+paths are all inspected only as Git object metadata at immutable base/head
+commit SHAs -- an unchanged settings.py blob alone does not prove head's
+runtime behavior is unchanged, since importing it first runs its package
+initializers, which could import settings.py and then replace its class or
+singleton (or pre-populate ``sys.modules`` with a fake module) without
+touching settings.py's own bytes. ``LIVE_EXECUTION`` is always the fixed
+literal ``NO-GO``.
 """
 from __future__ import annotations
 
@@ -27,6 +34,40 @@ _LIVE_SAFETY_SETTINGS_PATH = "src/ai_asset_platform/core/settings.py"
 _LOOKUP_FOUND = "FOUND"
 _LOOKUP_MISSING = "MISSING"
 _LOOKUP_UNKNOWN = "UNKNOWN"
+
+# Importing ``ai_asset_platform.core.settings`` first runs these package
+# initializers, in this order, before settings.py's own module body ever
+# executes. Either one can import settings.py itself and then replace its
+# ``PlatformSettings`` class or ``SETTINGS`` singleton (or pre-populate
+# ``sys.modules`` with an entirely fake settings module) -- so an unchanged
+# settings.py blob alone does not prove head's runtime behavior is
+# unchanged. Both must be identical to base for that proof to hold.
+_PACKAGE_INIT_CONTEXT_PATHS: tuple[str, ...] = (
+    "src/ai_asset_platform/__init__.py",
+    "src/ai_asset_platform/core/__init__.py",
+)
+
+# Paths where a repo-controlled file would sit on sys.path ahead of the
+# real stdlib module for `from dataclasses import dataclass, field` inside
+# settings.py, given this project's actual invocation
+# (PYTHONPATH=src, `python scripts/live_pilot_release_gate.py` or
+# `pytest`, which both place `src/` on sys.path before the stdlib default
+# paths). `dataclasses` is an ordinary stdlib module -- not part of
+# Python's interpreter bootstrap -- so it is not yet in `sys.modules` when
+# settings.py's import statement runs, and a repo-controlled module at
+# either of these paths would be imported instead of the real one.
+# Confirmed empirically for this project; their *absence* at head is the
+# safety condition, so any appearance at head is rejected outright.
+#
+# `src/os.py` / `src/os/__init__.py` are deliberately NOT included: `os`
+# is unconditionally imported into `sys.modules` during CPython's own
+# interpreter bootstrap (via `site`), before any user script or test runs
+# in this project -- confirmed empirically, not assumed -- so no
+# repo-controlled path anywhere on sys.path can ever shadow it here.
+_FORBIDDEN_STDLIB_SHADOW_PATHS: tuple[str, ...] = (
+    "src/dataclasses.py",
+    "src/dataclasses/__init__.py",
+)
 
 # The complete, closed set of Git tree entry modes with defined meaning for
 # a blob/tree object: 100644 (normal file), 100755 (executable file),
@@ -252,14 +293,17 @@ def fetch_git_tree_entry_at_exact_ref(
     return GitTreeEntryLookup(_LOOKUP_FOUND, mode, object_type, object_sha)
 
 
-def check_settings_file_unchanged_between_exact_refs(
+def check_protected_path_identity_unchanged(
     *,
+    protected_path: str,
     base_sha: str | None,
     head_sha: str | None,
     base_lookup: GitTreeEntryLookup,
     head_lookup: GitTreeEntryLookup,
 ) -> tuple[str, str]:
-    """Compare exact Git identity; missing head covers delete and rename-away.
+    """Compare exact Git identity for one protected path; missing head covers
+
+    delete and rename-away.
 
     ``base_sha``/``head_sha`` are event-payload input and are validated in
     their raw, unnormalized form -- a non-canonical value (whitespace,
@@ -279,35 +323,74 @@ def check_settings_file_unchanged_between_exact_refs(
     base_ref, head_ref = base_sha, head_sha
     if base_lookup.state != _LOOKUP_FOUND or base_lookup.object_type != "blob":
         return UNKNOWN, (
-            f"could not establish {_LIVE_SAFETY_SETTINGS_PATH!r} as a normal Git blob at "
+            f"could not establish {protected_path!r} as a normal Git blob at "
             f"exact base sha {base_ref}"
         )
     if head_lookup.state == _LOOKUP_MISSING:
         return FAIL, (
-            f"{_LIVE_SAFETY_SETTINGS_PATH!r} is missing at exact PR head sha {head_ref}; "
+            f"{protected_path!r} is missing at exact PR head sha {head_ref}; "
             "delete or rename-away is rejected"
         )
     if head_lookup.state != _LOOKUP_FOUND:
         return UNKNOWN, (
-            f"could not establish {_LIVE_SAFETY_SETTINGS_PATH!r} identity at exact PR "
+            f"could not establish {protected_path!r} identity at exact PR "
             f"head sha {head_ref}"
         )
     if head_lookup.object_type != "blob":
         return (
             FAIL,
-            "protected settings path is no longer a normal Git blob at the exact PR head sha",
+            f"{protected_path!r} is no longer a normal Git blob at the exact PR head sha",
         )
 
     base_identity = (base_lookup.mode, base_lookup.object_type, base_lookup.object_sha)
     head_identity = (head_lookup.mode, head_lookup.object_type, head_lookup.object_sha)
     if base_identity != head_identity:
         return FAIL, (
-            f"the PR changes {_LIVE_SAFETY_SETTINGS_PATH!r} between immutable base/head refs; "
+            f"the PR changes {protected_path!r} between immutable base/head refs; "
             f"base_identity={base_identity!r} head_identity={head_identity!r}"
         )
     return PASS, (
-        f"{_LIVE_SAFETY_SETTINGS_PATH!r} has identical mode/type/blob sha at exact "
-        "base/head refs"
+        f"{protected_path!r} has identical mode/type/blob sha at exact base/head refs"
+    )
+
+
+def check_settings_file_unchanged_between_exact_refs(
+    *,
+    base_sha: str | None,
+    head_sha: str | None,
+    base_lookup: GitTreeEntryLookup,
+    head_lookup: GitTreeEntryLookup,
+) -> tuple[str, str]:
+    """Compare exact Git identity for the protected settings.py path."""
+    return check_protected_path_identity_unchanged(
+        protected_path=_LIVE_SAFETY_SETTINGS_PATH,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        base_lookup=base_lookup,
+        head_lookup=head_lookup,
+    )
+
+
+def check_stdlib_shadow_absent_at_head(
+    *, shadow_path: str, head_lookup: GitTreeEntryLookup
+) -> tuple[str, str]:
+    """Fail closed if a repo-controlled stdlib-shadowing path exists at head.
+
+    For these paths, *absence* is the safety condition: their mere presence
+    on sys.path ahead of the real stdlib module would let a repo-controlled
+    file intercept an import inside the protected settings module (see
+    ``_FORBIDDEN_STDLIB_SHADOW_PATHS``). A GitHub API/network failure that
+    prevents even confirming absence is UNKNOWN, never treated as safe.
+    """
+    if head_lookup.state == _LOOKUP_MISSING:
+        return PASS, f"{shadow_path!r} does not exist at the exact PR head sha"
+    if head_lookup.state == _LOOKUP_FOUND:
+        return FAIL, (
+            f"{shadow_path!r} exists at the exact PR head sha; a repo-controlled file at "
+            "this path could shadow the real stdlib module the protected settings.py imports"
+        )
+    return UNKNOWN, (
+        f"could not confirm whether {shadow_path!r} exists at the exact PR head sha"
     )
 
 
@@ -382,11 +465,42 @@ def evaluate_release_gate(
     get_default_settings: Callable[[], object],
     settings_base_lookup: GitTreeEntryLookup,
     settings_head_lookup: GitTreeEntryLookup,
+    package_init_context_lookups: dict[str, tuple[GitTreeEntryLookup, GitTreeEntryLookup]],
+    stdlib_shadow_head_lookups: dict[str, GitTreeEntryLookup],
     unresolved_review_thread_count: int | None,
     issue_255_state: str | None,
 ) -> GateResult:
     reasons: list[str] = []
     statuses: list[str] = []
+
+    _unknown_lookup = GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+    package_init_context_checks = [
+        (
+            f"package-init-context-unchanged[{path}]",
+            check_protected_path_identity_unchanged(
+                protected_path=path,
+                base_sha=expected_base_sha,
+                head_sha=pr_head_sha,
+                base_lookup=package_init_context_lookups.get(
+                    path, (_unknown_lookup, _unknown_lookup)
+                )[0],
+                head_lookup=package_init_context_lookups.get(
+                    path, (_unknown_lookup, _unknown_lookup)
+                )[1],
+            ),
+        )
+        for path in _PACKAGE_INIT_CONTEXT_PATHS
+    ]
+    stdlib_shadow_checks = [
+        (
+            f"no-stdlib-shadow-at-head[{path}]",
+            check_stdlib_shadow_absent_at_head(
+                shadow_path=path,
+                head_lookup=stdlib_shadow_head_lookups.get(path, _unknown_lookup),
+            ),
+        )
+        for path in _FORBIDDEN_STDLIB_SHADOW_PATHS
+    ]
 
     checks = (
         ("pr-head-sha-present", check_pr_head_sha_present(pr_head_sha)),
@@ -405,6 +519,8 @@ def evaluate_release_gate(
                 head_lookup=settings_head_lookup,
             ),
         ),
+        *package_init_context_checks,
+        *stdlib_shadow_checks,
     )
     for label, (status, reason) in checks:
         statuses.append(status)
@@ -495,6 +611,23 @@ def main() -> int:
     settings_head_lookup = fetch_git_tree_entry_at_exact_ref(
         repo=repo, path=_LIVE_SAFETY_SETTINGS_PATH, ref_sha=pr_head_sha, token=token
     )
+    package_init_context_lookups = {
+        path: (
+            fetch_git_tree_entry_at_exact_ref(
+                repo=repo, path=path, ref_sha=expected_base_sha, token=token
+            ),
+            fetch_git_tree_entry_at_exact_ref(
+                repo=repo, path=path, ref_sha=pr_head_sha, token=token
+            ),
+        )
+        for path in _PACKAGE_INIT_CONTEXT_PATHS
+    }
+    stdlib_shadow_head_lookups = {
+        path: fetch_git_tree_entry_at_exact_ref(
+            repo=repo, path=path, ref_sha=pr_head_sha, token=token
+        )
+        for path in _FORBIDDEN_STDLIB_SHADOW_PATHS
+    }
 
     result = evaluate_release_gate(
         checked_out_sha=checked_out_sha,
@@ -504,6 +637,8 @@ def main() -> int:
         get_default_settings=_load_platform_settings,
         settings_base_lookup=settings_base_lookup,
         settings_head_lookup=settings_head_lookup,
+        package_init_context_lookups=package_init_context_lookups,
+        stdlib_shadow_head_lookups=stdlib_shadow_head_lookups,
         unresolved_review_thread_count=unresolved_count,
         issue_255_state=issue_state,
     )

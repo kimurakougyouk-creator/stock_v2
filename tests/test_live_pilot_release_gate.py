@@ -44,6 +44,14 @@ def _unknown():
     return gate.GitTreeEntryLookup(gate._LOOKUP_UNKNOWN)
 
 
+def _clean_package_init_context_lookups():
+    return {path: (_found(), _found()) for path in gate._PACKAGE_INIT_CONTEXT_PATHS}
+
+
+def _clean_stdlib_shadow_head_lookups():
+    return {path: _missing() for path in gate._FORBIDDEN_STDLIB_SHADOW_PATHS}
+
+
 def _evaluate(**overrides):
     params = {
         "checked_out_sha": BASE_SHA,
@@ -53,6 +61,8 @@ def _evaluate(**overrides):
         "get_default_settings": _default_settings,
         "settings_base_lookup": _found(),
         "settings_head_lookup": _found(),
+        "package_init_context_lookups": _clean_package_init_context_lookups(),
+        "stdlib_shadow_head_lookups": _clean_stdlib_shadow_head_lookups(),
         "unresolved_review_thread_count": 0,
         "issue_255_state": "open",
     }
@@ -225,6 +235,174 @@ def test_identity_check_malformed_ref_is_unknown(base_sha, head_sha):
     """
     result = _identity_check(_found(), _found(), base_sha=base_sha, head_sha=head_sha)
     assert result[0] == gate.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Codex P2: "Protect the head package initialization context" -- an
+# unchanged settings.py blob alone does not prove head's runtime behavior
+# is unchanged, since importing it first runs ai_asset_platform's and
+# ai_asset_platform.core's own __init__.py, which could import settings.py
+# and then replace its class/singleton (or plant a fake module in
+# sys.modules) without touching settings.py's own bytes. It also covers
+# repo-controlled files that would shadow a stdlib module (`dataclasses`)
+# that settings.py imports, on this project's actual sys.path.
+# ---------------------------------------------------------------------------
+
+
+def test_check_protected_path_identity_unchanged_is_generic_over_path():
+    """The generalized identity-check function works for any protected
+
+    path, not just settings.py -- used for both __init__.py files below.
+    """
+    status, reason = gate.check_protected_path_identity_unchanged(
+        protected_path="src/ai_asset_platform/core/__init__.py",
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+        base_lookup=_found(),
+        head_lookup=_found(object_sha=OTHER_BLOB_SHA),
+    )
+    assert status == gate.FAIL
+    assert "src/ai_asset_platform/core/__init__.py" in reason
+
+
+@pytest.mark.parametrize("shadow_path", ["src/dataclasses.py", "src/dataclasses/__init__.py"])
+def test_check_stdlib_shadow_absent_at_head_directly(shadow_path):
+    assert (
+        gate.check_stdlib_shadow_absent_at_head(shadow_path=shadow_path, head_lookup=_missing())[
+            0
+        ]
+        == gate.PASS
+    )
+    assert (
+        gate.check_stdlib_shadow_absent_at_head(shadow_path=shadow_path, head_lookup=_found())[0]
+        == gate.FAIL
+    )
+    assert (
+        gate.check_stdlib_shadow_absent_at_head(shadow_path=shadow_path, head_lookup=_unknown())[
+            0
+        ]
+        == gate.UNKNOWN
+    )
+
+
+# A: settings.py unchanged, but src/ai_asset_platform/core/__init__.py
+# changed at head -- must not PASS.
+def test_core_init_changed_blocks_pass_even_with_settings_unchanged():
+    lookups = _clean_package_init_context_lookups()
+    core_init_path = "src/ai_asset_platform/core/__init__.py"
+    lookups[core_init_path] = (_found(), _found(object_sha=OTHER_BLOB_SHA))
+    result = _evaluate(package_init_context_lookups=lookups)
+    assert result.status == gate.FAIL
+    assert any(f"package-init-context-unchanged[{core_init_path}]" in r for r in result.reasons)
+
+
+# B: settings.py unchanged, but src/ai_asset_platform/__init__.py changed
+# at head -- must not PASS. Confirmed reachable: importing
+# ai_asset_platform.core.settings always runs ai_asset_platform/__init__.py
+# first (Python always executes a package's own __init__.py before any of
+# its submodules), so it is genuinely part of the import context.
+def test_root_init_changed_blocks_pass_even_with_settings_unchanged():
+    lookups = _clean_package_init_context_lookups()
+    root_init_path = "src/ai_asset_platform/__init__.py"
+    lookups[root_init_path] = (_found(), _found(object_sha=OTHER_BLOB_SHA))
+    result = _evaluate(package_init_context_lookups=lookups)
+    assert result.status == gate.FAIL
+    assert any(f"package-init-context-unchanged[{root_init_path}]" in r for r in result.reasons)
+
+
+def test_core_init_delete_or_rename_away_fails():
+    lookups = _clean_package_init_context_lookups()
+    core_init_path = "src/ai_asset_platform/core/__init__.py"
+    lookups[core_init_path] = (_found(), _missing())
+    result = _evaluate(package_init_context_lookups=lookups)
+    assert result.status == gate.FAIL
+
+
+# C: a repo-local dataclasses shadow module/package, confirmed reachable on
+# this project's actual import path (PYTHONPATH=src places src/ ahead of
+# the stdlib default paths, and `dataclasses` is not pre-loaded into
+# sys.modules before user code runs -- see the module docstring), must not
+# PASS if newly present at head.
+@pytest.mark.parametrize("shadow_path", sorted(gate._FORBIDDEN_STDLIB_SHADOW_PATHS))
+def test_new_dataclasses_shadow_at_head_blocks_pass(shadow_path):
+    lookups = _clean_stdlib_shadow_head_lookups()
+    lookups[shadow_path] = _found()
+    result = _evaluate(stdlib_shadow_head_lookups=lookups)
+    assert result.status == gate.FAIL
+    assert any(f"no-stdlib-shadow-at-head[{shadow_path}]" in r for r in result.reasons)
+
+
+def test_os_shadow_paths_are_deliberately_not_protected():
+    """`os` is unconditionally imported into sys.modules during CPython's
+
+    own interpreter bootstrap before any user script or test runs in this
+    project (confirmed empirically), so no repo-local os.py/os/__init__.py
+    anywhere on sys.path can ever shadow it here -- this is a deliberate
+    scope decision, not an oversight, and is documented on
+    ``_FORBIDDEN_STDLIB_SHADOW_PATHS``.
+    """
+    assert "src/os.py" not in gate._FORBIDDEN_STDLIB_SHADOW_PATHS
+    assert "src/os/__init__.py" not in gate._FORBIDDEN_STDLIB_SHADOW_PATHS
+
+
+# D: malformed/incomplete Git evidence for the new checks must fail closed
+# to UNKNOWN, never be silently treated as a "PASS because it matches" --
+# including a base/head pair that happens to carry identical malformed
+# evidence.
+def test_package_init_context_unknown_lookup_is_unknown_not_pass():
+    lookups = _clean_package_init_context_lookups()
+    core_init_path = "src/ai_asset_platform/core/__init__.py"
+    lookups[core_init_path] = (_unknown(), _unknown())
+    result = _evaluate(package_init_context_lookups=lookups)
+    assert result.status == gate.UNKNOWN
+
+
+def test_package_init_context_incoherent_type_on_both_sides_is_unknown_not_pass():
+    """Both base and head report the same non-blob type for a protected
+
+    __init__.py path -- must never be treated as a legitimate match just
+    because the two sides agree.
+    """
+    lookups = _clean_package_init_context_lookups()
+    core_init_path = "src/ai_asset_platform/core/__init__.py"
+    weird_lookup = gate.GitTreeEntryLookup(gate._LOOKUP_FOUND, "040000", "tree", TREE_SHA)
+    lookups[core_init_path] = (weird_lookup, weird_lookup)
+    result = _evaluate(package_init_context_lookups=lookups)
+    assert result.status != gate.PASS
+    assert result.status == gate.UNKNOWN
+
+
+def test_stdlib_shadow_unknown_lookup_is_unknown_not_pass():
+    lookups = _clean_stdlib_shadow_head_lookups()
+    lookups["src/dataclasses.py"] = _unknown()
+    result = _evaluate(stdlib_shadow_head_lookups=lookups)
+    assert result.status == gate.UNKNOWN
+
+
+def test_missing_package_init_context_entry_defaults_to_unknown():
+    """If a protected path's lookup is absent from the dict passed to
+
+    evaluate_release_gate entirely, the check must default to UNKNOWN,
+    never silently PASS.
+    """
+    result = _evaluate(package_init_context_lookups={})
+    assert result.status == gate.UNKNOWN
+
+
+def test_missing_stdlib_shadow_entry_defaults_to_unknown():
+    result = _evaluate(stdlib_shadow_head_lookups={})
+    assert result.status == gate.UNKNOWN
+
+
+# E: normal, current base/head evidence must not be blocked by the new
+# checks -- covered by test_clean_evidence_passes (its default fixtures
+# now include clean package-init-context and stdlib-shadow evidence too).
+def test_clean_package_init_context_and_shadow_evidence_still_passes():
+    result = _evaluate(
+        package_init_context_lookups=_clean_package_init_context_lookups(),
+        stdlib_shadow_head_lookups=_clean_stdlib_shadow_head_lookups(),
+    )
+    assert result.status == gate.PASS
 
 
 def test_review_count_and_issue_state_values_are_display_only():
@@ -588,7 +766,24 @@ def test_fetch_helpers_return_none_on_network_failure(monkeypatch):
     assert gate.fetch_issue_state(repo="owner/repo", issue_number=255, token="tok") is None
 
 
-def _configure_main(monkeypatch, *, head_lookup=None, settings_loader=_default_settings):
+def _configure_main(
+    monkeypatch,
+    *,
+    settings_head_lookup=None,
+    package_init_head_lookup=None,
+    shadow_head_lookup=None,
+    settings_loader=_default_settings,
+):
+    """Route the mocked ``fetch_git_tree_entry_at_exact_ref`` by ``path`` and
+
+    ``ref_sha`` (base vs. head), since ``main()`` now makes several distinct
+    lookups (settings.py, two package __init__.py paths, two stdlib-shadow
+    paths) instead of just two. Base-side lookups for real (non-shadow)
+    paths default to a clean ``_found()``; head-side lookups default to a
+    clean ``_found()`` for settings.py/__init__.py paths and a clean
+    ``_missing()`` (absent, safe) for the stdlib-shadow paths, unless
+    overridden.
+    """
     monkeypatch.setattr(
         gate,
         "_load_event_payload",
@@ -603,11 +798,15 @@ def _configure_main(monkeypatch, *, head_lookup=None, settings_loader=_default_s
     monkeypatch.setattr(gate, "_git_head_sha", lambda: BASE_SHA)
     monkeypatch.setattr(gate, "fetch_unresolved_review_thread_count", lambda **kwargs: 0)
     monkeypatch.setattr(gate, "fetch_issue_state", lambda **kwargs: "open")
-    calls = {"n": 0}
 
-    def _tree_lookup(**kwargs):
-        calls["n"] += 1
-        return _found() if calls["n"] == 1 else (head_lookup or _found())
+    def _tree_lookup(*, repo, path, ref_sha, token):
+        if path in gate._FORBIDDEN_STDLIB_SHADOW_PATHS:
+            return shadow_head_lookup if shadow_head_lookup is not None else _missing()
+        if ref_sha == BASE_SHA:
+            return _found()
+        if path == gate._LIVE_SAFETY_SETTINGS_PATH:
+            return settings_head_lookup if settings_head_lookup is not None else _found()
+        return package_init_head_lookup if package_init_head_lookup is not None else _found()
 
     monkeypatch.setattr(gate, "fetch_git_tree_entry_at_exact_ref", _tree_lookup)
     monkeypatch.setattr(gate, "_load_platform_settings", settings_loader)
@@ -624,7 +823,7 @@ def test_main_clean_path_prints_pass_and_fixed_no_go(monkeypatch, capsys):
 
 
 def test_main_rename_away_prints_fail_and_fixed_no_go(monkeypatch, capsys):
-    _configure_main(monkeypatch, head_lookup=_missing())
+    _configure_main(monkeypatch, settings_head_lookup=_missing())
     assert gate.main() != 0
     output = capsys.readouterr().out
     assert "RELEASE_INTEGRITY_GATE=FAIL" in output
@@ -640,4 +839,35 @@ def test_main_settings_import_failure_is_unknown_not_crash(monkeypatch, capsys):
     assert gate.main() != 0
     output = capsys.readouterr().out
     assert "RELEASE_INTEGRITY_GATE=UNKNOWN" in output
+    assert "LIVE_EXECUTION=NO-GO" in output
+
+
+def test_main_core_init_change_prints_fail_and_fixed_no_go(monkeypatch, capsys):
+    """Codex P2 (package init context) regression, exercised through main():
+
+    settings.py is unchanged, but ``ai_asset_platform/core/__init__.py`` (or
+    the top-level ``ai_asset_platform/__init__.py``) changed at head -- the
+    package initialization/import context that runs before settings.py's
+    own module body -- so the gate must not PASS.
+    """
+    _configure_main(monkeypatch, package_init_head_lookup=_found(object_sha=OTHER_BLOB_SHA))
+    assert gate.main() != 0
+    output = capsys.readouterr().out
+    assert "RELEASE_INTEGRITY_GATE=FAIL" in output
+    assert "package-init-context-unchanged" in output
+    assert "LIVE_EXECUTION=NO-GO" in output
+
+
+def test_main_new_dataclasses_shadow_at_head_prints_fail_and_fixed_no_go(monkeypatch, capsys):
+    """Codex P2 (stdlib shadow) regression, exercised through main(): a new
+
+    repo-controlled ``src/dataclasses.py``/``src/dataclasses/__init__.py``
+    appearing at head -- reachable on this project's actual sys.path ahead
+    of the real stdlib module -- must not PASS.
+    """
+    _configure_main(monkeypatch, shadow_head_lookup=_found())
+    assert gate.main() != 0
+    output = capsys.readouterr().out
+    assert "RELEASE_INTEGRITY_GATE=FAIL" in output
+    assert "no-stdlib-shadow-at-head" in output
     assert "LIVE_EXECUTION=NO-GO" in output
