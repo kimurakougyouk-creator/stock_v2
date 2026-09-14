@@ -122,6 +122,11 @@ def _is_exact_zero_int(value: object) -> bool:
     return type(value) is int and value == 0
 
 
+def _is_exact_int_equal(value: object, expected: int) -> bool:
+    """True only for an exact ``int`` equal to ``expected``, never bool/float/string."""
+    return type(value) is int and value == expected
+
+
 def _read_only_clean(
     report: dict | None,
     *,
@@ -131,7 +136,7 @@ def _read_only_clean(
     """Require current schema and every producer-defined transport flag explicitly False."""
     if not isinstance(report, dict):
         return False
-    if report.get("schema_version") != required_schema_version:
+    if not _is_exact_int_equal(report.get("schema_version"), required_schema_version):
         return False
     if report.get("ready") is not True or report.get("connection_mode") != "LIVE_READ_ONLY":
         return False
@@ -149,7 +154,7 @@ def _paper_safe(report: dict | None) -> bool:
     """
     if not isinstance(report, dict):
         return False
-    if report.get("schema_version") != _REQUIRED_PAPER_MONITOR_SCHEMA_VERSION:
+    if not _is_exact_int_equal(report.get("schema_version"), _REQUIRED_PAPER_MONITOR_SCHEMA_VERSION):
         return False
     broker = report.get("broker")
     if not isinstance(broker, dict):

@@ -289,6 +289,26 @@ def test_paper_contract_requires_healthy_complete_schema_current_snapshot():
     assert _evaluate(paper_monitor_report=wrong_schema).operational_pilot_ready is False
 
 
+def test_paper_contract_rejects_non_exact_int_schema_version():
+    for malformed in (1.0, "1", True):
+        report = _paper_monitor(schema_version=malformed)
+        assert _evaluate(paper_monitor_report=report).operational_pilot_ready is False
+
+
+def test_read_only_reports_reject_non_exact_int_schema_version():
+    for malformed in (3.0, "3", True):
+        account = _live_account(schema_version=malformed)
+        assert _evaluate(live_account_report=account).operational_pilot_ready is False
+
+    for malformed in (2.0, "2", True):
+        open_orders = _live_open_orders(schema_version=malformed)
+        assert _evaluate(live_open_orders_report=open_orders).operational_pilot_ready is False
+
+    for malformed in (1.0, "1", True):
+        fx = _live_fx(schema_version=malformed)
+        assert _evaluate(live_fx_report=fx).operational_pilot_ready is False
+
+
 def test_buy_requires_target_live_position_flat():
     result = _evaluate(live_account_report=_live_account(quantity=1))
     assert result.operational_pilot_ready is False

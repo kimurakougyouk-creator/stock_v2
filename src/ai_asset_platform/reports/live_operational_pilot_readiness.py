@@ -172,6 +172,11 @@ def _is_exact_zero_int(value: object) -> bool:
     return type(value) is int and value == 0
 
 
+def _is_exact_int_equal(value: object, expected: int) -> bool:
+    """Accept only an exact ``int`` equal to ``expected``, never bool/float/string coercions."""
+    return type(value) is int and value == expected
+
+
 def _live_endpoint_port(report: dict | None) -> int | None:
     if not isinstance(report, dict):
         return None
@@ -192,7 +197,7 @@ def _read_only_clean(
     if not isinstance(report, dict):
         return False
     return bool(
-        report.get("schema_version") == required_schema_version
+        _is_exact_int_equal(report.get("schema_version"), required_schema_version)
         and report.get("ready") is True
         and report.get("connection_mode") == "LIVE_READ_ONLY"
         and _live_endpoint_port(report) is not None
@@ -260,7 +265,7 @@ def _paper_monitor_safe(report: dict | None) -> bool:
     """Require the complete schema-current Paper safety contract."""
     if not isinstance(report, dict):
         return False
-    if report.get("schema_version") != _REQUIRED_PAPER_MONITOR_SCHEMA_VERSION:
+    if not _is_exact_int_equal(report.get("schema_version"), _REQUIRED_PAPER_MONITOR_SCHEMA_VERSION):
         return False
     broker = report.get("broker")
     if not isinstance(broker, dict):
