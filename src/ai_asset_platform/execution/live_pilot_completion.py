@@ -181,7 +181,7 @@ def _paper_safe(report: dict | None) -> bool:
     """
     if not isinstance(report, dict):
         return False
-    if report.get("schema_version") != _REQUIRED_PAPER_MONITOR_SCHEMA_VERSION:
+    if not _is_exact_int(report.get("schema_version"), _REQUIRED_PAPER_MONITOR_SCHEMA_VERSION):
         return False
     broker = report.get("broker")
     broker = broker if isinstance(broker, dict) else {}
@@ -282,7 +282,7 @@ def _clean_live_report(
     """
     if not isinstance(report, dict):
         return False
-    if report.get("schema_version") != required_schema_version:
+    if not _is_exact_int(report.get("schema_version"), required_schema_version):
         return False
     if report.get("ready") is not True or report.get("connection_mode") != "LIVE_READ_ONLY":
         return False
@@ -349,7 +349,7 @@ def evaluate_live_pilot_completion(
             order_id = perm_id = None
         exec_id = str(send_journal.get("exec_id") or "").strip() or None
         journal_ready = bool(
-            send_journal.get("schema_version") == _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
+            _is_exact_int(send_journal.get("schema_version"), _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION)
             and send_journal.get("state") == "POSTFILL_PROVEN"
             and str(send_journal.get("intent_id") or "").strip() == intent
             and _is_exact_int(send_journal.get("send_attempt_count"), 1)
@@ -380,7 +380,9 @@ def evaluate_live_pilot_completion(
     )
     marker_ready = bool(
         isinstance(send_attempt_marker, dict)
-        and send_attempt_marker.get("schema_version") == _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
+        and _is_exact_int(
+            send_attempt_marker.get("schema_version"), _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
+        )
         and send_attempt_marker.get("state") == "SEND_ATTEMPT_RECORDED"
         and str(send_attempt_marker.get("intent_id") or "").strip() == intent
         and isinstance(send_journal, dict)
@@ -399,8 +401,9 @@ def evaluate_live_pilot_completion(
 
     global_marker_ready = bool(
         isinstance(global_send_attempt_marker, dict)
-        and global_send_attempt_marker.get("schema_version")
-        == _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
+        and _is_exact_int(
+            global_send_attempt_marker.get("schema_version"), _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION
+        )
         and str(global_send_attempt_marker.get("intent_id") or "").strip() == intent
         and global_send_attempt_marker.get("automatic_resend_allowed") is False
     )

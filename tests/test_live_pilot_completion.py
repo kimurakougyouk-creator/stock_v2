@@ -823,6 +823,49 @@ def test_final_account_and_open_orders_schema_version_are_also_validated():
     )
 
 
+def test_schema_version_rejects_non_exact_int_across_all_completion_gates():
+    """Codex P1: ``!=``/``==`` against schema_version lets a same-valued bool
+
+    or float coerce to the required int (``True == 1``, ``1.0 == 1``). Every
+    schema_version comparison in the completion path must require an exact,
+    non-boolean int. Each malformed value below equals its field's own
+    required schema version under ``==`` while having the wrong type, so a
+    plain ``!=``/``==`` comparison would wrongly accept it.
+    """
+    for malformed in (float(subject._REQUIRED_PAPER_MONITOR_SCHEMA_VERSION), True):
+        result = _evaluate(paper_monitor_report=_paper(schema_version=malformed))
+        assert result.complete is False
+
+    postfill_bad = float(subject._REQUIRED_POSTFILL_SCHEMA_VERSION)
+    account_bad = float(subject._REQUIRED_ACCOUNT_SCHEMA_VERSION)
+    open_orders_bad = float(subject._REQUIRED_OPEN_ORDERS_SCHEMA_VERSION)
+    journal_bad = float(subject._REQUIRED_SEND_JOURNAL_SCHEMA_VERSION)
+
+    for malformed in (postfill_bad, True):
+        postfill = _evaluate(postfill_report=_postfill(schema_version=malformed))
+        assert postfill.complete is False
+
+    for malformed in (account_bad, True):
+        account = _evaluate(final_account_report=_account(schema_version=malformed))
+        assert account.complete is False
+
+    for malformed in (open_orders_bad, True):
+        open_orders = _evaluate(final_open_orders_report=_open_orders(schema_version=malformed))
+        assert open_orders.complete is False
+
+    for malformed in (journal_bad, True):
+        journal = _evaluate(send_journal=_journal(schema_version=malformed))
+        assert journal.complete is False
+
+        marker = _evaluate(send_attempt_marker=_attempt_marker(schema_version=malformed))
+        assert marker.complete is False
+
+        global_marker = _evaluate(
+            global_send_attempt_marker=_global_attempt_marker(schema_version=malformed)
+        )
+        assert global_marker.complete is False
+
+
 def test_clean_live_report_requires_exact_false_transport_flags():
     """Codex P1 (round 2): a merely falsy transport flag (None, 0, missing)
 
