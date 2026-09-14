@@ -32,6 +32,9 @@ from ai_asset_platform.brokers.ibkr_live_readonly_account import (
     _account_fingerprint,
 )
 from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_safely
+from ai_asset_platform.execution.live_pilot_same_run_preflight import (
+    _INSTRUMENT_CURRENCY,
+)
 
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_postfill_evidence_latest.json")
 REPORT_SCHEMA_VERSION = 2
@@ -381,6 +384,16 @@ def match_live_postfill(
             blockers.append(f"commission aggregate is non-finite at exec_id {execution.exec_id}")
             continue
         matched_commissions.append(commission)
+
+    normalized_ticker = str(ticker).strip().upper()
+    expected_instrument_currency = _INSTRUMENT_CURRENCY.get(normalized_ticker)
+    if expected_instrument_currency is None:
+        blockers.append(f"no bounded instrument-currency mapping for ticker {ticker!r}")
+    elif execution_currency is not None and execution_currency != expected_instrument_currency:
+        blockers.append(
+            "execution currency does not match the ticker's expected instrument currency: "
+            f"{execution_currency} != {expected_instrument_currency}"
+        )
 
     filled_quantity = _finite_float_from_decimal(total_quantity) if matches else None
     try:

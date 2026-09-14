@@ -265,6 +265,47 @@ def test_commission_currency_mismatch_fails_closed():
     assert result.native_cash_effect is None
 
 
+def test_execution_currency_must_match_ticker_expected_instrument_currency():
+    """AAPL is a bounded USD instrument; a JPY-labeled execution/commission pair
+
+    must not be accepted even though execution and commission currencies agree
+    with each other.
+    """
+    result = match_live_postfill(
+        _snapshot(
+            executions=(_execution(currency="JPY"),),
+            commissions=(_commission(currency="JPY"),),
+        ),
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any(
+        "execution currency does not match the ticker's expected instrument currency" in item
+        for item in result.blockers
+    )
+
+
+def test_unbounded_ticker_has_no_instrument_currency_mapping():
+    result = match_live_postfill(
+        _snapshot(executions=(_execution(symbol="TSLA"),)),
+        expected_account_fingerprint=FP,
+        ticker="TSLA",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+    )
+    assert result.ready is False
+    assert any(
+        "no bounded instrument-currency mapping for ticker" in item for item in result.blockers
+    )
+
+
 def test_persisted_report_has_no_raw_account_id(tmp_path: Path):
     path = tmp_path / "postfill.json"
     persist_live_postfill_snapshot(_snapshot(), report_path=path)
