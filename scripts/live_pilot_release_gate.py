@@ -274,16 +274,16 @@ def _next_page_url(link_header: str | None) -> str | None:
     return None
 
 
-def _fetch_pr_changed_files_count(
-    *, repo: str, pr_number: int, token: str | None
-) -> int | None:
-    """Best-effort read-only lookup of the PR's own ``changed_files`` count.
+def _fetch_pr_metadata(*, repo: str, pr_number: int, token: str | None) -> tuple[int, str] | None:
+    """Best-effort read-only lookup of the PR's ``changed_files`` and ``head.sha``.
 
-    This is the PR metadata endpoint's own tally, independent of the
-    paginated files listing below. It is the only way to prove that listing
-    is complete, so any doubt about this count -- a failed request,
-    malformed JSON, a missing key, or a value that is not a non-negative,
-    non-boolean int -- must return ``None`` rather than a guessed value.
+    This is the PR metadata endpoint's own tally/identity, independent of
+    the paginated files listing below. It is the only way to prove that
+    listing is both complete and about the exact commit this run cares
+    about, so any doubt here -- a failed request, malformed JSON, a missing
+    key, a ``changed_files`` that is not a non-negative non-boolean int, or
+    a ``head.sha`` that is not a well-formed 40-character hex commit sha --
+    must return ``None`` rather than a guessed value.
     """
     owner, _, name = str(repo or "").partition("/")
     if not owner or not name or not pr_number or not token:
@@ -305,40 +305,58 @@ def _fetch_pr_changed_files_count(
     count = body.get("changed_files")
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
         return None
-    return count
+    head = body.get("head")
+    head_sha = head.get("sha") if isinstance(head, dict) else None
+    if not isinstance(head_sha, str) or not _is_well_formed_git_sha(head_sha.strip().lower()):
+        return None
+    return count, head_sha.strip().lower()
 
 
 def fetch_pr_changed_file_paths(
-    *, repo: str, pr_number: int, token: str | None
+    *, repo: str, pr_number: int, token: str | None, expected_pr_head_sha: str | None
 ) -> list[str] | None:
     """Best-effort read-only lookup of every file path changed by the PR.
 
     Returns ``None`` -- never a partial, truncated, or otherwise doubtful
     list -- unless completeness can actually be proven:
 
-    - the PR's own reported ``changed_files`` count must itself be
-      established (see ``_fetch_pr_changed_files_count``) and must not
-      exceed the files API's hard 3000-file ceiling (beyond that, no amount
-      of pagination can prove completeness);
+    - PR metadata (``changed_files`` and ``head.sha``) must be established
+      both before and after the paginated files fetch (see
+      ``_fetch_pr_metadata``);
+    - both metadata reads' ``head.sha`` must exactly equal
+      ``expected_pr_head_sha`` (the ``pull_request_target`` event payload's
+      own head sha) -- this binds the fetched file list to the exact commit
+      this run is evaluating, so a PR pushed to mid-run cannot have its
+      files inspected under a stale identity;
+    - both metadata reads' ``changed_files`` must agree with each other, and
+      must not exceed the files API's hard 3000-file ceiling (beyond that,
+      no amount of pagination can prove completeness);
     - every page of the paginated files listing must be fetched within the
       page budget implied by that ceiling;
     - every entry on every page must be a dict with a non-empty string
       ``filename`` -- a single malformed entry invalidates the whole
       listing rather than being silently skipped;
     - the collected filenames must contain no duplicates; and
-    - the final count of collected filenames must exactly equal the PR's
-      own reported ``changed_files`` count.
+    - the final count of collected filenames must exactly equal the
+      reported ``changed_files`` count.
 
-    Any of these failing means completeness cannot be proven, so the whole
-    result is ``None`` -- never a partial list a caller might mistake for
-    complete.
+    Any of these failing means completeness (or head-sha identity) cannot
+    be proven, so the whole result is ``None`` -- never a partial list, and
+    never a list about a different commit than the caller asked about.
     """
     owner, _, name = str(repo or "").partition("/")
     if not owner or not name or not pr_number or not token:
         return None
 
-    expected_count = _fetch_pr_changed_files_count(repo=repo, pr_number=pr_number, token=token)
-    if expected_count is None:
+    expected_head_sha = str(expected_pr_head_sha or "").strip().lower()
+    if not expected_head_sha:
+        return None
+
+    before = _fetch_pr_metadata(repo=repo, pr_number=pr_number, token=token)
+    if before is None:
+        return None
+    expected_count, head_sha_before = before
+    if head_sha_before != expected_head_sha:
         return None
     if expected_count > _MAX_FILES_PER_PR:
         return None
@@ -375,6 +393,17 @@ def fetch_pr_changed_file_paths(
             paths.append(filename)
         pages_fetched += 1
         url = _next_page_url(link_header)
+
+    after = _fetch_pr_metadata(repo=repo, pr_number=pr_number, token=token)
+    if after is None:
+        return None
+    count_after, head_sha_after = after
+    if head_sha_after != expected_head_sha:
+        return None
+    if head_sha_after != head_sha_before:
+        return None
+    if count_after != expected_count:
+        return None
 
     if len(set(paths)) != len(paths):
         return None
@@ -523,7 +552,12 @@ def main() -> int:
     )
     issue_state = fetch_issue_state(repo=repo, issue_number=_ISSUE_255_NUMBER, token=token)
     changed_file_paths = (
-        fetch_pr_changed_file_paths(repo=repo, pr_number=pr_number, token=token)
+        fetch_pr_changed_file_paths(
+            repo=repo,
+            pr_number=pr_number,
+            token=token,
+            expected_pr_head_sha=pr_head_sha,
+        )
         if isinstance(pr_number, int)
         else None
     )

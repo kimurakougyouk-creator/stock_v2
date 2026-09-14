@@ -378,17 +378,37 @@ def test_fetch_pr_changed_file_paths_returns_none_on_network_failure(monkeypatch
 
     assert (
         gate.fetch_pr_changed_file_paths(
-            repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+            repo="kimurakougyouk-creator/stock_v2",
+            pr_number=281,
+            token="tok",
+            expected_pr_head_sha=HEAD_SHA,
         )
         is None
     )
 
 
 def test_fetch_pr_changed_file_paths_returns_none_without_token_or_repo():
-    assert gate.fetch_pr_changed_file_paths(repo="", pr_number=281, token="tok") is None
     assert (
         gate.fetch_pr_changed_file_paths(
-            repo="kimurakougyouk-creator/stock_v2", pr_number=281, token=None
+            repo="", pr_number=281, token="tok", expected_pr_head_sha=HEAD_SHA
+        )
+        is None
+    )
+    assert (
+        gate.fetch_pr_changed_file_paths(
+            repo="kimurakougyouk-creator/stock_v2",
+            pr_number=281,
+            token=None,
+            expected_pr_head_sha=HEAD_SHA,
+        )
+        is None
+    )
+    assert (
+        gate.fetch_pr_changed_file_paths(
+            repo="kimurakougyouk-creator/stock_v2",
+            pr_number=281,
+            token="tok",
+            expected_pr_head_sha=None,
         )
         is None
     )
@@ -409,213 +429,215 @@ class _FakeResponse:
         return False
 
 
-def _dispatching_urlopen(*, metadata_body, file_pages):
-    """Route by URL: the bare .../pulls/{n} metadata call vs. .../files pages.
+def _meta(changed_files, head_sha=HEAD_SHA):
+    return {"changed_files": changed_files, "head": {"sha": head_sha}}
 
-    ``file_pages`` is consumed in order on every call to the ``.../files``
-    URL (the first page's URL, then whatever ``Link: rel="next"`` URLs it
-    yields) -- one response per call, regardless of the URL's query string.
+
+def _dispatching_urlopen(*, metadata_bodies, file_pages):
+    """Route by URL: sequential .../pulls/{n} metadata calls vs. .../files pages.
+
+    ``metadata_bodies`` is consumed in call order for the bare metadata
+    endpoint -- one entry per call (the "before" fetch, then the "after"
+    fetch). ``file_pages`` is consumed in order on every call to the
+    ``.../files`` URL (the first page's URL, then whatever
+    ``Link: rel="next"`` URLs it yields).
     """
+    remaining_metadata = list(metadata_bodies)
     remaining_pages = list(file_pages)
 
     def _fake_urlopen(request, timeout=None):
         url = request.full_url if hasattr(request, "full_url") else request
         if isinstance(url, str) and url.rstrip("/").endswith("/pulls/281"):
-            return _FakeResponse(metadata_body)
+            return _FakeResponse(remaining_metadata.pop(0))
         return remaining_pages.pop(0)
 
     return _fake_urlopen
 
 
-def test_fetch_pr_changed_file_paths_follows_pagination_when_count_matches(monkeypatch):
-    page_1 = [{"filename": "a.py"}, {"filename": "b.py"}]
-    page_2 = [{"filename": "c.py"}]
+def _fetch(monkeypatch, *, metadata_bodies, file_pages, expected_pr_head_sha=HEAD_SHA):
     monkeypatch.setattr(
         gate.urllib.request,
         "urlopen",
-        _dispatching_urlopen(
-            metadata_body={"changed_files": 3},
-            file_pages=[
-                _FakeResponse(page_1, link_header='<https://api.github.com/next-page>; rel="next"'),
-                _FakeResponse(page_2),
-            ],
-        ),
+        _dispatching_urlopen(metadata_bodies=metadata_bodies, file_pages=file_pages),
+    )
+    return gate.fetch_pr_changed_file_paths(
+        repo="kimurakougyouk-creator/stock_v2",
+        pr_number=281,
+        token="tok",
+        expected_pr_head_sha=expected_pr_head_sha,
     )
 
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+
+def test_fetch_pr_changed_file_paths_follows_pagination_when_count_matches(monkeypatch):
+    page_1 = [{"filename": "a.py"}, {"filename": "b.py"}]
+    page_2 = [{"filename": "c.py"}]
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(3), _meta(3)],
+        file_pages=[
+            _FakeResponse(page_1, link_header='<https://api.github.com/next-page>; rel="next"'),
+            _FakeResponse(page_2),
+        ],
     )
     assert result == ["a.py", "b.py", "c.py"]
 
 
+def test_fetch_pr_changed_file_paths_succeeds_when_head_sha_matches_expected(monkeypatch):
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(1, HEAD_SHA), _meta(1, HEAD_SHA)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}])],
+        expected_pr_head_sha=HEAD_SHA,
+    )
+    assert result == ["a.py"]
+
+
+def test_fetch_pr_changed_file_paths_none_when_head_sha_mismatches_expected(monkeypatch):
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(1, "b" * 40), _meta(1, "b" * 40)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}])],
+        expected_pr_head_sha=HEAD_SHA,
+    )
+    assert result is None
+
+
+def test_fetch_pr_changed_file_paths_none_when_head_sha_missing_or_malformed(monkeypatch):
+    for malformed_head in ({}, {"sha": None}, {"sha": "a" * 39}, {"sha": "g" * 40}, {"sha": 12345}):
+        result = _fetch(
+            monkeypatch,
+            metadata_bodies=[
+                {"changed_files": 1, "head": malformed_head},
+                {"changed_files": 1, "head": malformed_head},
+            ],
+            file_pages=[_FakeResponse([{"filename": "a.py"}])],
+        )
+        assert result is None, malformed_head
+
+
+def test_fetch_pr_changed_file_paths_none_when_head_sha_changes_between_fetches(monkeypatch):
+    # Simulates the PR being pushed to mid-run: the "before" fetch matches
+    # the expected head, but the "after" fetch (post-pagination) does not.
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(1, HEAD_SHA), _meta(1, "b" * 40)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}])],
+        expected_pr_head_sha=HEAD_SHA,
+    )
+    assert result is None
+
+
+def test_fetch_pr_changed_file_paths_none_when_changed_files_changes_between_fetches(monkeypatch):
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(1, HEAD_SHA), _meta(2, HEAD_SHA)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}])],
+        expected_pr_head_sha=HEAD_SHA,
+    )
+    assert result is None
+
+
 def test_fetch_pr_changed_file_paths_none_when_actual_count_is_less_than_reported(monkeypatch):
     page_1 = [{"filename": "a.py"}, {"filename": "b.py"}, {"filename": "c.py"}]
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(
-            metadata_body={"changed_files": 4},
-            file_pages=[_FakeResponse(page_1)],
-        ),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(4), _meta(4)],
+        file_pages=[_FakeResponse(page_1)],
     )
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_none_when_changed_files_exceeds_3000(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(metadata_body={"changed_files": 3001}, file_pages=[]),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(3001), _meta(3001)],
+        file_pages=[],
     )
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_none_when_changed_files_is_bool(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(metadata_body={"changed_files": True}, file_pages=[]),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
-    )
+    result = _fetch(monkeypatch, metadata_bodies=[_meta(True), _meta(True)], file_pages=[])
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_none_when_changed_files_is_negative(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(metadata_body={"changed_files": -1}, file_pages=[]),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
-    )
+    result = _fetch(monkeypatch, metadata_bodies=[_meta(-1), _meta(-1)], file_pages=[])
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_none_when_changed_files_is_missing_or_wrong_type(monkeypatch):
-    for malformed_metadata in ({}, {"changed_files": "3"}, {"changed_files": 3.0}, {"changed_files": None}):
-        monkeypatch.setattr(
-            gate.urllib.request,
-            "urlopen",
-            _dispatching_urlopen(metadata_body=malformed_metadata, file_pages=[]),
-        )
-        result = gate.fetch_pr_changed_file_paths(
-            repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    for malformed_metadata in (
+        {"head": {"sha": HEAD_SHA}},
+        {"changed_files": "3", "head": {"sha": HEAD_SHA}},
+        {"changed_files": 3.0, "head": {"sha": HEAD_SHA}},
+        {"changed_files": None, "head": {"sha": HEAD_SHA}},
+    ):
+        result = _fetch(
+            monkeypatch,
+            metadata_bodies=[malformed_metadata, malformed_metadata],
+            file_pages=[],
         )
         assert result is None, malformed_metadata
 
 
 def test_fetch_pr_changed_file_paths_none_when_an_entry_is_missing_filename(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(
-            metadata_body={"changed_files": 2},
-            file_pages=[_FakeResponse([{"filename": "a.py"}, {"status": "modified"}])],
-        ),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(2), _meta(2)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}, {"status": "modified"}])],
     )
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_none_when_an_entry_filename_is_empty(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(
-            metadata_body={"changed_files": 2},
-            file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": ""}])],
-        ),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(2), _meta(2)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": ""}])],
     )
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_none_when_an_entry_filename_has_wrong_type(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(
-            metadata_body={"changed_files": 2},
-            file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": 123}])],
-        ),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(2), _meta(2)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": 123}])],
     )
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_none_when_an_entry_is_not_a_dict(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(
-            metadata_body={"changed_files": 2},
-            file_pages=[_FakeResponse([{"filename": "a.py"}, "not-a-dict"])],
-        ),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(2), _meta(2)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}, "not-a-dict"])],
     )
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_none_on_duplicate_filenames(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(
-            metadata_body={"changed_files": 2},
-            file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": "a.py"}])],
-        ),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(2), _meta(2)],
+        file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": "a.py"}])],
     )
     assert result is None
 
 
 def test_fetch_pr_changed_file_paths_includes_settings_py_when_present(monkeypatch):
-    monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        _dispatching_urlopen(
-            metadata_body={"changed_files": 2},
-            file_pages=[
-                _FakeResponse(
-                    [
-                        {"filename": "README.md"},
-                        {"filename": "src/ai_asset_platform/core/settings.py"},
-                    ]
-                )
-            ],
-        ),
-    )
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    result = _fetch(
+        monkeypatch,
+        metadata_bodies=[_meta(2), _meta(2)],
+        file_pages=[
+            _FakeResponse(
+                [
+                    {"filename": "README.md"},
+                    {"filename": "src/ai_asset_platform/core/settings.py"},
+                ]
+            )
+        ],
     )
     assert result == ["README.md", "src/ai_asset_platform/core/settings.py"]
 
@@ -627,7 +649,7 @@ def test_fetch_pr_changed_file_paths_gives_up_as_none_if_pages_exceed_cap(monkey
     def _fake_urlopen(request, timeout=None):
         url = request.full_url if hasattr(request, "full_url") else request
         if isinstance(url, str) and url.rstrip("/").endswith("/pulls/281"):
-            return _FakeResponse({"changed_files": gate._MAX_FILES_PER_PR})
+            return _FakeResponse(_meta(gate._MAX_FILES_PER_PR))
         return _FakeResponse(
             [{"filename": "a.py"}],
             link_header='<https://api.github.com/next-page>; rel="next"',
@@ -636,7 +658,10 @@ def test_fetch_pr_changed_file_paths_gives_up_as_none_if_pages_exceed_cap(monkey
     monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
 
     result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+        repo="kimurakougyouk-creator/stock_v2",
+        pr_number=281,
+        token="tok",
+        expected_pr_head_sha=HEAD_SHA,
     )
     assert result is None
 
@@ -647,26 +672,65 @@ def test_fetch_pr_changed_file_paths_none_when_files_page_fetch_fails_after_meta
     def _fake_urlopen(request, timeout=None):
         url = request.full_url if hasattr(request, "full_url") else request
         if isinstance(url, str) and url.rstrip("/").endswith("/pulls/281"):
-            return _FakeResponse({"changed_files": 1})
+            return _FakeResponse(_meta(1))
         raise OSError("simulated network failure fetching files page")
 
     monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
 
     result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+        repo="kimurakougyouk-creator/stock_v2",
+        pr_number=281,
+        token="tok",
+        expected_pr_head_sha=HEAD_SHA,
     )
     assert result is None
 
 
-def test_fetch_pr_changed_files_count_returns_none_on_network_failure(monkeypatch):
+def test_fetch_pr_changed_file_paths_none_when_second_metadata_fetch_fails(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake_urlopen(request, timeout=None):
+        url = request.full_url if hasattr(request, "full_url") else request
+        if isinstance(url, str) and url.rstrip("/").endswith("/pulls/281"):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeResponse(_meta(1))
+            raise OSError("simulated network failure on the post-pagination metadata re-check")
+        return _FakeResponse([{"filename": "a.py"}])
+
+    monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
+
+    result = gate.fetch_pr_changed_file_paths(
+        repo="kimurakougyouk-creator/stock_v2",
+        pr_number=281,
+        token="tok",
+        expected_pr_head_sha=HEAD_SHA,
+    )
+    assert result is None
+
+
+def test_fetch_pr_metadata_returns_none_on_network_failure(monkeypatch):
     def _raise_urlopen(*args, **kwargs):
         raise OSError("simulated network failure")
 
     monkeypatch.setattr(gate.urllib.request, "urlopen", _raise_urlopen)
 
     assert (
-        gate._fetch_pr_changed_files_count(
+        gate._fetch_pr_metadata(
             repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
         )
         is None
     )
+
+
+def test_fetch_pr_metadata_returns_count_and_head_sha_on_success(monkeypatch):
+    monkeypatch.setattr(
+        gate.urllib.request,
+        "urlopen",
+        lambda request, timeout=None: _FakeResponse(_meta(5, HEAD_SHA)),
+    )
+
+    result = gate._fetch_pr_metadata(
+        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    )
+    assert result == (5, HEAD_SHA)
