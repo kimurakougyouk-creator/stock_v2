@@ -15,7 +15,7 @@ base (main), never the PR's own branch/commits -- so a PR cannot modify this
 gate's own behavior (this script, the workflow file, or the settings module
 it reads) and have that modified version run against itself. Accordingly:
 
-It checks four things that actually determine PASS/FAIL/UNKNOWN:
+It checks five things that actually determine PASS/FAIL/UNKNOWN:
 
 1. The PR's head sha was recognized: the event payload gave us a non-empty,
    well-formed 40-character hex commit sha to identify the PR commit by.
@@ -27,6 +27,10 @@ It checks four things that actually determine PASS/FAIL/UNKNOWN:
    trusted base checkout, never from the PR -- still disables Live trading
    out of the box (``enable_live_trading is False`` and
    ``run_mode != "LIVE"``, i.e. ``live_trading_unlocked is False``).
+5. The PR does not modify ``src/ai_asset_platform/core/settings.py`` at all.
+   This is a blunt, content-blind rejection (scoped to this one file for
+   now): a PR that touches the file defining the Live-safety defaults is
+   never inspected for whether the change looks safe, it is simply rejected.
 
 Two more facts are looked up and printed for a human to read, but neither
 one -- regardless of its value -- is ever allowed to change PASS/FAIL/UNKNOWN
@@ -62,6 +66,13 @@ LIVE_EXECUTION_VALUE = "NO-GO"
 
 _GITHUB_API_TIMEOUT_SECONDS = 10
 _ISSUE_255_NUMBER = 255
+
+# The single file this gate currently protects against unreviewed PR edits.
+# Scope is deliberately limited to this one file for now; extending this to
+# the gate's own workflow/script (or other protected paths) is a separate,
+# later change.
+_LIVE_SAFETY_SETTINGS_PATH = "src/ai_asset_platform/core/settings.py"
+_MAX_PR_FILES_PAGES = 50  # 50 * 100 = 5000 files; well past any realistic PR here.
 
 
 @dataclass(frozen=True)
@@ -146,6 +157,33 @@ def check_live_disabled_by_default(get_default_settings: Callable[[], object]) -
     )
 
 
+def check_settings_file_not_modified_by_pr(
+    *, changed_file_paths: list[str] | None
+) -> tuple[str, str]:
+    """Fail closed if the PR touches the Live-safety defaults file.
+
+    ``src/ai_asset_platform/core/settings.py`` defines the repository-wide
+    default that keeps Live trading disabled out of the box
+    (``enable_live_trading``, ``run_mode``, ``live_trading_unlocked``, and
+    the derived ``live_trading_unlocked`` property). This check does not
+    inspect *what* changed in that file -- any change at all is rejected
+    without content review, because even an apparently benign edit could
+    flip a default this gate (and the rest of the Live-pilot safety chain)
+    relies on.
+    """
+    if changed_file_paths is None:
+        return UNKNOWN, "the PR's changed-file list could not be retrieved from the GitHub API"
+    if _LIVE_SAFETY_SETTINGS_PATH in changed_file_paths:
+        return FAIL, (
+            f"the PR modifies {_LIVE_SAFETY_SETTINGS_PATH!r}, which defines the Live-safety "
+            "defaults this gate checks, so this gate rejects it without inspecting the "
+            "content of the change. To pass this check, split the PR so it does not touch "
+            "this file, or route the change through an explicit safety-review path for this "
+            "file -- no such path exists yet as of this gate's current scope"
+        )
+    return PASS, f"the PR does not modify {_LIVE_SAFETY_SETTINGS_PATH!r}"
+
+
 def fetch_unresolved_review_thread_count(
     *, repo: str, pr_number: int, token: str | None
 ) -> int | None:
@@ -213,6 +251,64 @@ def fetch_issue_state(*, repo: str, issue_number: int, token: str | None) -> str
     return state if isinstance(state, str) else None
 
 
+def _next_page_url(link_header: str | None) -> str | None:
+    """Extract the ``rel="next"`` URL from a GitHub API ``Link`` response header."""
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        segment = part.strip()
+        if 'rel="next"' not in segment:
+            continue
+        start = segment.find("<")
+        end = segment.find(">", start + 1)
+        if start != -1 and end != -1:
+            return segment[start + 1 : end]
+    return None
+
+
+def fetch_pr_changed_file_paths(
+    *, repo: str, pr_number: int, token: str | None
+) -> list[str] | None:
+    """Best-effort read-only lookup of every file path changed by the PR.
+
+    Returns ``None`` -- never a partial/truncated list -- if the complete
+    set of changed files cannot be established. A truncated list could
+    silently hide that a later, unfetched page changed a protected file, so
+    an incomplete fetch must be treated the same as a failed one.
+    """
+    owner, _, name = str(repo or "").partition("/")
+    if not owner or not name or not pr_number or not token:
+        return None
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "live-pilot-release-gate",
+    }
+    paths: list[str] = []
+    url: str | None = (
+        f"https://api.github.com/repos/{owner}/{name}/pulls/{pr_number}/files?per_page=100"
+    )
+    pages_fetched = 0
+    while url:
+        if pages_fetched >= _MAX_PR_FILES_PAGES:
+            return None
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=_GITHUB_API_TIMEOUT_SECONDS) as response:
+                body = json.loads(response.read().decode("utf-8"))
+                link_header = response.headers.get("Link")
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            return None
+        if not isinstance(body, list):
+            return None
+        for entry in body:
+            if isinstance(entry, dict) and isinstance(entry.get("filename"), str):
+                paths.append(entry["filename"])
+        pages_fetched += 1
+        url = _next_page_url(link_header)
+    return paths
+
+
 def evaluate_release_gate(
     *,
     checked_out_sha: str,
@@ -220,6 +316,7 @@ def evaluate_release_gate(
     base_ref: str | None,
     expected_base_sha: str | None,
     get_default_settings: Callable[[], object],
+    changed_file_paths: list[str] | None,
     unresolved_review_thread_count: int | None,
     issue_255_state: str | None,
 ) -> GateResult:
@@ -248,6 +345,10 @@ def evaluate_release_gate(
     status, reason = check_live_disabled_by_default(get_default_settings)
     statuses.append(status)
     reasons.append(f"live-disabled-by-default: {reason}")
+
+    status, reason = check_settings_file_not_modified_by_pr(changed_file_paths=changed_file_paths)
+    statuses.append(status)
+    reasons.append(f"settings-file-not-modified: {reason}")
 
     if unresolved_review_thread_count is None:
         statuses.append(UNKNOWN)
@@ -347,6 +448,11 @@ def main() -> int:
         else None
     )
     issue_state = fetch_issue_state(repo=repo, issue_number=_ISSUE_255_NUMBER, token=token)
+    changed_file_paths = (
+        fetch_pr_changed_file_paths(repo=repo, pr_number=pr_number, token=token)
+        if isinstance(pr_number, int)
+        else None
+    )
 
     result = evaluate_release_gate(
         checked_out_sha=checked_out_sha,
@@ -354,6 +460,7 @@ def main() -> int:
         base_ref=base_ref,
         expected_base_sha=expected_base_sha,
         get_default_settings=_load_platform_settings,
+        changed_file_paths=changed_file_paths,
         unresolved_review_thread_count=unresolved_count,
         issue_255_state=issue_state,
     )

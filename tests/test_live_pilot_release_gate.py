@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ def _evaluate(**overrides):
         "base_ref": "main",
         "expected_base_sha": HEAD_SHA,
         "get_default_settings": _default_settings,
+        "changed_file_paths": [],
         "unresolved_review_thread_count": 0,
         "issue_255_state": "open",
     }
@@ -145,6 +147,47 @@ def test_settings_with_unexpected_shape_is_unknown():
     assert result.status == gate.UNKNOWN
 
 
+def test_pr_modifying_settings_file_fails_closed():
+    result = _evaluate(
+        changed_file_paths=[
+            "README.md",
+            "src/ai_asset_platform/core/settings.py",
+        ]
+    )
+    assert result.status == gate.FAIL
+    assert any(
+        "settings-file-not-modified" in reason and "settings.py" in reason
+        for reason in result.reasons
+    )
+
+
+def test_pr_not_modifying_settings_file_passes():
+    result = _evaluate(changed_file_paths=["README.md", "tests/test_foo.py"])
+    assert result.status == gate.PASS
+
+
+def test_missing_changed_file_paths_is_unknown_not_ignored():
+    result = _evaluate(changed_file_paths=None)
+    assert result.status == gate.UNKNOWN
+    assert any(
+        "settings-file-not-modified" in reason and "could not be retrieved" in reason
+        for reason in result.reasons
+    )
+
+
+def test_check_settings_file_not_modified_by_pr_directly():
+    status, _ = gate.check_settings_file_not_modified_by_pr(changed_file_paths=None)
+    assert status == gate.UNKNOWN
+
+    status, _ = gate.check_settings_file_not_modified_by_pr(
+        changed_file_paths=["src/ai_asset_platform/core/settings.py"]
+    )
+    assert status == gate.FAIL
+
+    status, _ = gate.check_settings_file_not_modified_by_pr(changed_file_paths=["README.md"])
+    assert status == gate.PASS
+
+
 def test_review_thread_fetch_failure_is_unknown_not_ignored():
     result = _evaluate(unresolved_review_thread_count=None)
     assert result.status == gate.UNKNOWN
@@ -208,6 +251,7 @@ def test_main_always_prints_fixed_no_go_regardless_of_gate_outcome(monkeypatch, 
         gate, "fetch_unresolved_review_thread_count", lambda **kwargs: 3
     )
     monkeypatch.setattr(gate, "fetch_issue_state", lambda **kwargs: "open")
+    monkeypatch.setattr(gate, "fetch_pr_changed_file_paths", lambda **kwargs: ["README.md"])
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
     monkeypatch.setenv("GITHUB_REPOSITORY", "kimurakougyouk-creator/stock_v2")
 
@@ -248,6 +292,7 @@ def test_main_survives_settings_import_failure_as_unknown_not_a_crash(monkeypatc
     monkeypatch.setattr(gate, "_git_head_sha", lambda: HEAD_SHA)
     monkeypatch.setattr(gate, "fetch_unresolved_review_thread_count", lambda **kwargs: 0)
     monkeypatch.setattr(gate, "fetch_issue_state", lambda **kwargs: "open")
+    monkeypatch.setattr(gate, "fetch_pr_changed_file_paths", lambda **kwargs: ["README.md"])
 
     def _raise_module_not_found():
         raise ModuleNotFoundError("No module named 'ai_asset_platform'")
@@ -323,3 +368,76 @@ def test_fetch_helpers_return_none_without_token_or_repo():
         is None
     )
     assert gate.fetch_issue_state(repo="", issue_number=255, token="tok") is None
+
+
+def test_fetch_pr_changed_file_paths_returns_none_on_network_failure(monkeypatch):
+    def _raise_urlopen(*args, **kwargs):
+        raise OSError("simulated network failure")
+
+    monkeypatch.setattr(gate.urllib.request, "urlopen", _raise_urlopen)
+
+    assert (
+        gate.fetch_pr_changed_file_paths(
+            repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+        )
+        is None
+    )
+
+
+def test_fetch_pr_changed_file_paths_returns_none_without_token_or_repo():
+    assert gate.fetch_pr_changed_file_paths(repo="", pr_number=281, token="tok") is None
+    assert (
+        gate.fetch_pr_changed_file_paths(
+            repo="kimurakougyouk-creator/stock_v2", pr_number=281, token=None
+        )
+        is None
+    )
+
+
+class _FakeResponse:
+    def __init__(self, body, link_header=None):
+        self._body = json.dumps(body).encode("utf-8")
+        self.headers = {"Link": link_header} if link_header else {}
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def test_fetch_pr_changed_file_paths_follows_pagination(monkeypatch):
+    page_1 = [{"filename": "a.py"}, {"filename": "b.py"}]
+    page_2 = [{"filename": "c.py"}]
+    responses = [
+        _FakeResponse(page_1, link_header='<https://api.github.com/next-page>; rel="next"'),
+        _FakeResponse(page_2),
+    ]
+
+    def _fake_urlopen(request, timeout=None):
+        return responses.pop(0)
+
+    monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
+
+    result = gate.fetch_pr_changed_file_paths(
+        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    )
+    assert result == ["a.py", "b.py", "c.py"]
+
+
+def test_fetch_pr_changed_file_paths_gives_up_as_none_if_pages_exceed_cap(monkeypatch):
+    def _fake_urlopen(request, timeout=None):
+        return _FakeResponse(
+            [{"filename": "a.py"}],
+            link_header='<https://api.github.com/next-page>; rel="next"',
+        )
+
+    monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
+
+    result = gate.fetch_pr_changed_file_paths(
+        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+    )
+    assert result is None
