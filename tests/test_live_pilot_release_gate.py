@@ -205,8 +205,8 @@ class _FakeResponse:
         return False
 
 
-def _commit_body(tree_sha=TREE_SHA):
-    return {"tree": {"sha": tree_sha}}
+def _commit_body(tree_sha=TREE_SHA, *, commit_sha=HEAD_SHA):
+    return {"sha": commit_sha, "tree": {"sha": tree_sha}}
 
 
 def _tree_body(entries, *, truncated=False):
@@ -259,8 +259,14 @@ def test_tree_lookup_missing_path_is_missing(monkeypatch):
     [
         [OSError("network")],
         [urllib.error.HTTPError("https://api.github.com", 404, "missing", {}, None)],
+        [_FakeResponse({"tree": {"sha": TREE_SHA}})],
+        [_FakeResponse(_commit_body(commit_sha=BASE_SHA))],
         [_FakeResponse(_commit_body(tree_sha="short"))],
+        [_FakeResponse(_commit_body()), _FakeResponse({"truncated": False, "tree": []})],
         [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([], truncated=True))],
+        [_FakeResponse(_commit_body()), _FakeResponse({"sha": TREE_SHA, "tree": []})],
+        [_FakeResponse(_commit_body()), _FakeResponse({"sha": TREE_SHA, "truncated": "false", "tree": []})],
+        [_FakeResponse(_commit_body()), _FakeResponse({"sha": HEAD_SHA, "truncated": False, "tree": []})],
         [_FakeResponse(_commit_body()), _FakeResponse(_tree_body(None))],
         [_FakeResponse(_commit_body()), _FakeResponse(_tree_body(["bad"]))],
         [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([{"path": 123}]))],

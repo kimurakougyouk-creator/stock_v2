@@ -146,6 +146,12 @@ def fetch_git_tree_entry_at_exact_ref(
     if state != _LOOKUP_FOUND or not isinstance(body, dict):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
 
+    returned_commit_sha = body.get("sha")
+    if not isinstance(returned_commit_sha, str):
+        return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+    if returned_commit_sha.strip().lower() != ref:
+        return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+
     tree = body.get("tree")
     tree_sha = tree.get("sha") if isinstance(tree, dict) else None
     if not isinstance(tree_sha, str):
@@ -156,7 +162,15 @@ def fetch_git_tree_entry_at_exact_ref(
 
     tree_url = f"https://api.github.com/repos/{owner}/{name}/git/trees/{tree_sha}?recursive=1"
     state, body = _github_get_json(tree_url, token=token)
-    if state != _LOOKUP_FOUND or not isinstance(body, dict) or body.get("truncated") is True:
+    if state != _LOOKUP_FOUND or not isinstance(body, dict):
+        return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+
+    returned_tree_sha = body.get("sha")
+    if not isinstance(returned_tree_sha, str):
+        return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+    if returned_tree_sha.strip().lower() != tree_sha:
+        return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+    if body.get("truncated") is not False:
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
 
     entries = body.get("tree")
