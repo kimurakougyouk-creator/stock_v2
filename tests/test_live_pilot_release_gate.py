@@ -69,8 +69,29 @@ def test_missing_or_malformed_pr_head_sha_fails(value):
     assert _evaluate(pr_head_sha=value).status == gate.FAIL
 
 
-def test_uppercase_pr_head_sha_is_accepted():
-    assert _evaluate(pr_head_sha=HEAD_SHA.upper()).status == gate.PASS
+def test_canonical_lowercase_pr_head_sha_passes():
+    assert _evaluate(pr_head_sha=HEAD_SHA).status == gate.PASS
+
+
+def test_uppercase_pr_head_sha_now_fails_closed():
+    """Codex P2 regression: event-payload SHAs are validated in their raw
+
+    form. An uppercase head sha must FAIL, never be normalized into a
+    canonical value and accepted (this replaces the prior "uppercase is
+    accepted" behavior).
+    """
+    assert _evaluate(pr_head_sha=HEAD_SHA.upper()).status == gate.FAIL
+
+
+@pytest.mark.parametrize(
+    "value", [f" {HEAD_SHA}", f"{HEAD_SHA} ", f"{HEAD_SHA}\n", f"\t{HEAD_SHA}"]
+)
+def test_whitespace_padded_pr_head_sha_fails(value):
+    """Codex P2 regression: leading/trailing whitespace on the event
+
+    payload's head sha must FAIL, never be stripped and accepted.
+    """
+    assert _evaluate(pr_head_sha=value).status == gate.FAIL
 
 
 def test_checked_out_sha_mismatch_fails():
@@ -79,6 +100,29 @@ def test_checked_out_sha_mismatch_fails():
 
 @pytest.mark.parametrize("value", [None, "a" * 39, "g" * 40])
 def test_missing_or_malformed_expected_base_sha_is_unknown(value):
+    assert _evaluate(expected_base_sha=value).status == gate.UNKNOWN
+
+
+def test_canonical_lowercase_expected_base_sha_passes():
+    assert _evaluate(expected_base_sha=BASE_SHA).status == gate.PASS
+
+
+def test_uppercase_expected_base_sha_is_unknown():
+    """Codex P2 regression: an uppercase event-payload base sha must be
+
+    UNKNOWN, never normalized into a canonical value and accepted.
+    """
+    assert _evaluate(expected_base_sha=BASE_SHA.upper()).status == gate.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "value", [f" {BASE_SHA}", f"{BASE_SHA} ", f"{BASE_SHA}\n", f"\t{BASE_SHA}"]
+)
+def test_whitespace_padded_expected_base_sha_is_unknown(value):
+    """Codex P2 regression: leading/trailing whitespace on the event
+
+    payload's base sha must be UNKNOWN, never stripped and accepted.
+    """
     assert _evaluate(expected_base_sha=value).status == gate.UNKNOWN
 
 
@@ -163,9 +207,22 @@ def test_unverifiable_head_identity_is_unknown():
 
 @pytest.mark.parametrize(
     ("base_sha", "head_sha"),
-    [("a" * 39, HEAD_SHA), (BASE_SHA, "g" * 40), (None, HEAD_SHA)],
+    [
+        ("a" * 39, HEAD_SHA),
+        (BASE_SHA, "g" * 40),
+        (None, HEAD_SHA),
+        (BASE_SHA.upper(), HEAD_SHA),
+        (BASE_SHA, HEAD_SHA.upper()),
+        (f" {BASE_SHA}", HEAD_SHA),
+        (BASE_SHA, f"{HEAD_SHA} "),
+    ],
 )
 def test_identity_check_malformed_ref_is_unknown(base_sha, head_sha):
+    """Codex P2 regression: base/head sha here is event-payload input and
+
+    must already be raw canonical; whitespace or uppercase must be UNKNOWN,
+    never normalized and accepted.
+    """
     result = _identity_check(_found(), _found(), base_sha=base_sha, head_sha=head_sha)
     assert result[0] == gate.UNKNOWN
 
@@ -334,6 +391,10 @@ def test_tree_lookup_rejects_non_canonical_returned_shas(monkeypatch, responses)
         ("owner/repo", SETTINGS_PATH, HEAD_SHA, None),
         ("owner/repo", SETTINGS_PATH, "a" * 39, "tok"),
         ("owner/repo", SETTINGS_PATH, "g" * 40, "tok"),
+        ("owner/repo", SETTINGS_PATH, HEAD_SHA.upper(), "tok"),
+        ("owner/repo", SETTINGS_PATH, f" {HEAD_SHA}", "tok"),
+        ("owner/repo", SETTINGS_PATH, f"{HEAD_SHA} ", "tok"),
+        ("owner/repo", SETTINGS_PATH, None, "tok"),
     ],
 )
 def test_tree_lookup_requires_complete_valid_inputs(repo, path, ref_sha, token):
@@ -341,6 +402,39 @@ def test_tree_lookup_requires_complete_valid_inputs(repo, path, ref_sha, token):
         repo=repo, path=path, ref_sha=ref_sha, token=token
     )
     assert result.state == gate._LOOKUP_UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "ref_sha", [HEAD_SHA.upper(), f" {HEAD_SHA}", f"{HEAD_SHA} ", f"{HEAD_SHA}\n"]
+)
+def test_tree_lookup_rejects_non_canonical_event_ref_sha_without_any_api_call(
+    monkeypatch, ref_sha
+):
+    """Codex P2 regression: ``ref_sha`` is event-payload input (the PR's
+
+    base or head sha) and must already be raw canonical. A non-canonical
+    ``ref_sha`` must resolve to UNKNOWN without ever calling the GitHub
+    API -- never normalized and then used to make a request.
+    """
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("must not call the GitHub API for a non-canonical ref_sha")
+
+    monkeypatch.setattr(gate.urllib.request, "urlopen", _fail_if_called)
+    result = gate.fetch_git_tree_entry_at_exact_ref(
+        repo="owner/repo", path=SETTINGS_PATH, ref_sha=ref_sha, token="tok"
+    )
+    assert result.state == gate._LOOKUP_UNKNOWN
+
+
+def test_tree_lookup_accepts_canonical_lowercase_ref_sha(monkeypatch):
+    """A raw, already-canonical lowercase ref_sha still works as before."""
+    result, seen = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([_settings_entry()]))],
+    )
+    assert result == _found()
+    assert f"/git/commits/{HEAD_SHA}" in seen[0]
 
 
 def test_fetch_helpers_return_none_on_network_failure(monkeypatch):

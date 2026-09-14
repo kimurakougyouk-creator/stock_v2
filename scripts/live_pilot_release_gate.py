@@ -52,30 +52,53 @@ def _is_well_formed_git_sha(value: str) -> bool:
 
 
 def check_pr_head_sha_present(pr_head_sha: str | None) -> tuple[str, str]:
-    candidate = _normalized_sha(pr_head_sha)
-    if not candidate:
+    """Verify the event payload's own (unnormalized) head sha is canonical.
+
+    The raw value from ``pull_request.head.sha`` must already be a str of
+    exactly 40 lowercase hex characters -- never stripped or lowercased
+    before this check, so a non-canonical event sha (surrounding
+    whitespace, uppercase A-F) is rejected rather than silently converted
+    into an accepted canonical one.
+    """
+    if not isinstance(pr_head_sha, str) or not pr_head_sha:
         return FAIL, "PR head sha is missing from the event payload"
-    if not _is_well_formed_git_sha(candidate):
+    if not _is_well_formed_git_sha(pr_head_sha):
         return (
             FAIL,
-            f"PR head sha {str(pr_head_sha)!r} is not a well-formed 40-character "
-            "hex commit sha",
+            (
+                f"PR head sha {pr_head_sha!r} is not a canonical 40-character lowercase "
+                "hex commit sha"
+            ),
         )
-    return PASS, f"PR head sha is present and well-formed ({candidate})"
+    return PASS, f"PR head sha is present and well-formed ({pr_head_sha})"
 
 
 def check_checked_out_matches_expected_base(
     checked_out_sha: str, expected_base_sha: str | None
 ) -> tuple[str, str]:
-    expected = _normalized_sha(expected_base_sha)
-    checked = _normalized_sha(checked_out_sha)
-    if not expected:
+    """Verify the checked-out commit matches the event payload's raw base sha.
+
+    ``expected_base_sha`` (``pull_request.base.sha``) is event-payload
+    input and is validated in its raw, unnormalized form -- a non-canonical
+    value there (whitespace, uppercase) fails closed to UNKNOWN rather than
+    being normalized into a canonical value and accepted.
+    ``checked_out_sha`` is trusted local ``git rev-parse HEAD`` output, not
+    event-payload input, so it is still normalized for robustness.
+    """
+    if not isinstance(expected_base_sha, str) or not expected_base_sha:
         return UNKNOWN, "expected base sha (event payload's pull_request.base.sha) is missing"
-    if not _is_well_formed_git_sha(expected):
-        return UNKNOWN, "expected base sha is not a well-formed 40-character hex commit sha"
-    if checked and checked == expected:
+    if not _is_well_formed_git_sha(expected_base_sha):
+        return UNKNOWN, (
+            f"expected base sha {expected_base_sha!r} is not a canonical 40-character "
+            "lowercase hex commit sha"
+        )
+    checked = _normalized_sha(checked_out_sha)
+    if checked and checked == expected_base_sha:
         return PASS, f"checked-out sha matches the expected base sha exactly ({checked})"
-    return FAIL, f"checked-out sha {checked!r} does not match expected base sha {expected!r}"
+    return FAIL, (
+        f"checked-out sha {checked!r} does not match expected base sha "
+        f"{expected_base_sha!r}"
+    )
 
 
 def check_base_branch(base_ref: str | None) -> tuple[str, str]:
@@ -127,9 +150,14 @@ def _github_get_json(url: str, *, token: str | None) -> tuple[str, object | None
 def fetch_git_tree_entry_at_exact_ref(
     *, repo: str, path: str, ref_sha: str | None, token: str | None
 ) -> GitTreeEntryLookup:
-    """Locate one path in one immutable commit tree, never via mutable PR APIs."""
+    """Locate one path in one immutable commit tree, never via mutable PR APIs.
+
+    ``ref_sha`` is event-payload input (the PR's base or head sha) and must
+    already be a raw, canonical 40-character lowercase hex string -- it is
+    never stripped or lowercased before this check. A non-canonical
+    ``ref_sha`` is rejected as UNKNOWN before any GitHub API call is made.
+    """
     owner, separator, name = str(repo or "").partition("/")
-    ref = _normalized_sha(ref_sha)
     path = str(path or "").strip("/")
     if (
         not owner
@@ -137,9 +165,11 @@ def fetch_git_tree_entry_at_exact_ref(
         or not name
         or not path
         or not token
-        or not _is_well_formed_git_sha(ref)
+        or not isinstance(ref_sha, str)
+        or not _is_well_formed_git_sha(ref_sha)
     ):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+    ref = ref_sha
 
     commit_url = f"https://api.github.com/repos/{owner}/{name}/git/commits/{ref}"
     state, body = _github_get_json(commit_url, token=token)
@@ -204,13 +234,24 @@ def check_settings_file_unchanged_between_exact_refs(
     base_lookup: GitTreeEntryLookup,
     head_lookup: GitTreeEntryLookup,
 ) -> tuple[str, str]:
-    """Compare exact Git identity; missing head covers delete and rename-away."""
-    base_ref, head_ref = _normalized_sha(base_sha), _normalized_sha(head_sha)
-    if not _is_well_formed_git_sha(base_ref) or not _is_well_formed_git_sha(head_ref):
+    """Compare exact Git identity; missing head covers delete and rename-away.
+
+    ``base_sha``/``head_sha`` are event-payload input and are validated in
+    their raw, unnormalized form -- a non-canonical value (whitespace,
+    uppercase) fails closed to UNKNOWN rather than being normalized into a
+    canonical value and accepted.
+    """
+    if (
+        not isinstance(base_sha, str)
+        or not _is_well_formed_git_sha(base_sha)
+        or not isinstance(head_sha, str)
+        or not _is_well_formed_git_sha(head_sha)
+    ):
         return (
             UNKNOWN,
-            "base/head sha is missing or malformed; protected-file identity is unverified",
+            "base/head sha is missing or non-canonical; protected-file identity is unverified",
         )
+    base_ref, head_ref = base_sha, head_sha
     if base_lookup.state != _LOOKUP_FOUND or base_lookup.object_type != "blob":
         return UNKNOWN, (
             f"could not establish {_LIVE_SAFETY_SETTINGS_PATH!r} as a normal Git blob at "
