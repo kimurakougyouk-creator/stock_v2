@@ -119,28 +119,23 @@ def _port(report: dict | None) -> int | None:
 
 def _is_exact_zero_int(value: object) -> bool:
     """True only for the exact ``int`` zero, not ``0.0``, ``"0"``, or ``False``."""
-    return isinstance(value, int) and not isinstance(value, bool) and value == 0
+    return type(value) is int and value == 0
 
 
-def _read_only_clean(report: dict | None, *, required_schema_version: int) -> bool:
-    """Require an exact-current-schema, exact-``False``-flagged clean report.
-
-    ``cancel_sent`` is required to be exactly ``False`` only when present,
-    since not every producer's schema defines it; a report that does define
-    it and sets it to anything other than ``False`` fails closed rather than
-    being silently ignored.
-    """
+def _read_only_clean(
+    report: dict | None,
+    *,
+    required_schema_version: int,
+    required_false_flags: tuple[str, ...] = ("order_sent", "live_order_sent"),
+) -> bool:
+    """Require current schema and every producer-defined transport flag explicitly False."""
     if not isinstance(report, dict):
         return False
     if report.get("schema_version") != required_schema_version:
         return False
     if report.get("ready") is not True or report.get("connection_mode") != "LIVE_READ_ONLY":
         return False
-    if report.get("order_sent") is not False or report.get("live_order_sent") is not False:
-        return False
-    if "cancel_sent" in report and report.get("cancel_sent") is not False:
-        return False
-    return True
+    return all(report.get(flag) is False for flag in required_false_flags)
 
 
 def _paper_safe(report: dict | None) -> bool:
@@ -288,8 +283,8 @@ def evaluate_live_pilot_same_run_preflight(
         and readiness_report.get("operational_pilot_ready") is True
         and readiness_report.get("status") == "READY_FOR_ONE_OPERATIONAL_PILOT"
         and str(readiness_report.get("ticker") or "").strip().upper() == normalized_ticker
-        and not readiness_report.get("order_sent")
-        and not readiness_report.get("live_order_sent")
+        and readiness_report.get("order_sent") is False
+        and readiness_report.get("live_order_sent") is False
     )
     if not readiness_ready:
         blockers.append("operational Live pilot readiness is not ready for this ticker")
@@ -298,7 +293,9 @@ def evaluate_live_pilot_same_run_preflight(
         live_account_report, required_schema_version=_ACCOUNT_SCHEMA_VERSION
     )
     open_orders_clean = _read_only_clean(
-        live_open_orders_report, required_schema_version=_OPEN_ORDERS_SCHEMA_VERSION
+        live_open_orders_report,
+        required_schema_version=_OPEN_ORDERS_SCHEMA_VERSION,
+        required_false_flags=("order_sent", "cancel_sent", "live_order_sent"),
     )
     if not account_clean:
         blockers.append("same-run Live account evidence is not clean read-only evidence")
