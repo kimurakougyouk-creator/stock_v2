@@ -283,6 +283,50 @@ def test_tree_lookup_uncertain_or_malformed_evidence_is_unknown(monkeypatch, res
 
 
 @pytest.mark.parametrize(
+    "responses",
+    [
+        # Git commit API's own "sha" field: well-formed 40-hex only after
+        # stripping whitespace / lowercasing -- must be rejected outright,
+        # never normalized then accepted.
+        [_FakeResponse(_commit_body(commit_sha=f" {HEAD_SHA}"))],
+        [_FakeResponse(_commit_body(commit_sha=f"{HEAD_SHA} "))],
+        [_FakeResponse(_commit_body(commit_sha=HEAD_SHA.upper()))],
+        # Commit body's own "tree.sha" field, same non-canonical variants.
+        [_FakeResponse(_commit_body(tree_sha=f" {TREE_SHA}"))],
+        [_FakeResponse(_commit_body(tree_sha=TREE_SHA.upper()))],
+        # Git tree API's own "sha" field, same non-canonical variants.
+        [
+            _FakeResponse(_commit_body()),
+            _FakeResponse({"sha": f"{TREE_SHA} ", "truncated": False, "tree": []}),
+        ],
+        [
+            _FakeResponse(_commit_body()),
+            _FakeResponse({"sha": TREE_SHA.upper(), "truncated": False, "tree": []}),
+        ],
+        # Matched tree entry's blob "sha" field, same non-canonical variants.
+        [
+            _FakeResponse(_commit_body()),
+            _FakeResponse(_tree_body([_settings_entry(sha=f"{BLOB_SHA} ")])),
+        ],
+        [
+            _FakeResponse(_commit_body()),
+            _FakeResponse(_tree_body([_settings_entry(sha=BLOB_SHA.upper())])),
+        ],
+    ],
+)
+def test_tree_lookup_rejects_non_canonical_returned_shas(monkeypatch, responses):
+    """Codex P2 regression: a SHA returned by the Git commit/tree API must
+
+    already be canonical (lowercase, no surrounding whitespace) 40-hex.
+    Before this fix, such returned values were ``.strip().lower()``'d
+    before being validated/compared, so a non-canonical value from the API
+    would be silently normalized and accepted instead of failing closed.
+    """
+    result, _ = _lookup(monkeypatch, responses)
+    assert result.state == gate._LOOKUP_UNKNOWN
+
+
+@pytest.mark.parametrize(
     ("repo", "path", "ref_sha", "token"),
     [
         ("", SETTINGS_PATH, HEAD_SHA, "tok"),

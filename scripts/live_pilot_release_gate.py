@@ -147,17 +147,16 @@ def fetch_git_tree_entry_at_exact_ref(
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
 
     returned_commit_sha = body.get("sha")
-    if not isinstance(returned_commit_sha, str):
+    if not isinstance(returned_commit_sha, str) or not _is_well_formed_git_sha(
+        returned_commit_sha
+    ):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
-    if returned_commit_sha.strip().lower() != ref:
+    if returned_commit_sha != ref:
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
 
     tree = body.get("tree")
     tree_sha = tree.get("sha") if isinstance(tree, dict) else None
-    if not isinstance(tree_sha, str):
-        return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
-    tree_sha = tree_sha.strip().lower()
-    if not _is_well_formed_git_sha(tree_sha):
+    if not isinstance(tree_sha, str) or not _is_well_formed_git_sha(tree_sha):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
 
     tree_url = f"https://api.github.com/repos/{owner}/{name}/git/trees/{tree_sha}?recursive=1"
@@ -166,9 +165,9 @@ def fetch_git_tree_entry_at_exact_ref(
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
 
     returned_tree_sha = body.get("sha")
-    if not isinstance(returned_tree_sha, str):
+    if not isinstance(returned_tree_sha, str) or not _is_well_formed_git_sha(returned_tree_sha):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
-    if returned_tree_sha.strip().lower() != tree_sha:
+    if returned_tree_sha != tree_sha:
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
     if body.get("truncated") is not False:
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
@@ -193,7 +192,6 @@ def fetch_git_tree_entry_at_exact_ref(
     mode, object_type, object_sha = entry.get("mode"), entry.get("type"), entry.get("sha")
     if not all(isinstance(value, str) for value in (mode, object_type, object_sha)):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
-    object_sha = object_sha.strip().lower()
     if not _is_well_formed_git_sha(object_sha):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
     return GitTreeEntryLookup(_LOOKUP_FOUND, mode, object_type, object_sha)
