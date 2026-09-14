@@ -258,6 +258,20 @@ def _load_event_payload() -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _load_platform_settings() -> object:
+    """Import and construct the repository's default ``PlatformSettings``.
+
+    Kept as a lazy loader (rather than importing at module scope) so an
+    import failure -- ``ModuleNotFoundError``/``ImportError`` included --
+    surfaces through ``check_live_disabled_by_default``'s own
+    ``except Exception`` as UNKNOWN, instead of crashing the whole script
+    with an unhandled traceback before the gate can print its verdict.
+    """
+    from ai_asset_platform.core.settings import PlatformSettings
+
+    return PlatformSettings()
+
+
 def main() -> int:
     event = _load_event_payload()
     pull_request = event.get("pull_request")
@@ -287,13 +301,11 @@ def main() -> int:
     )
     issue_state = fetch_issue_state(repo=repo, issue_number=_ISSUE_255_NUMBER, token=token)
 
-    from ai_asset_platform.core.settings import PlatformSettings
-
     result = evaluate_release_gate(
         checked_out_sha=checked_out_sha,
         pr_head_sha=pr_head_sha,
         base_ref=base_ref,
-        get_default_settings=PlatformSettings,
+        get_default_settings=_load_platform_settings,
         unresolved_review_thread_count=unresolved_count,
         issue_255_state=issue_state,
     )

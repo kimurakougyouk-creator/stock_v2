@@ -182,6 +182,42 @@ def test_main_always_prints_fixed_no_go_regardless_of_gate_outcome(monkeypatch, 
     assert "RELEASE_INTEGRITY_GATE=FAIL" in output
 
 
+def test_main_survives_settings_import_failure_as_unknown_not_a_crash(monkeypatch, capsys):
+    """If ``ai_asset_platform.core.settings`` cannot be imported at all (e.g.
+
+    PYTHONPATH is wrong, or the module was moved/renamed), main() must still
+    print both required lines and exit non-zero as UNKNOWN -- never crash
+    with an unhandled traceback, and never silently treat the failure as
+    PASS.
+    """
+    monkeypatch.setattr(
+        gate,
+        "_load_event_payload",
+        lambda: {
+            "pull_request": {
+                "number": 281,
+                "head": {"sha": HEAD_SHA},
+                "base": {"ref": "main"},
+            }
+        },
+    )
+    monkeypatch.setattr(gate, "_git_head_sha", lambda: HEAD_SHA)
+    monkeypatch.setattr(gate, "fetch_unresolved_review_thread_count", lambda **kwargs: 0)
+    monkeypatch.setattr(gate, "fetch_issue_state", lambda **kwargs: "open")
+
+    def _raise_module_not_found():
+        raise ModuleNotFoundError("No module named 'ai_asset_platform'")
+
+    monkeypatch.setattr(gate, "_load_platform_settings", _raise_module_not_found)
+
+    exit_code = gate.main()  # must not raise
+
+    output = capsys.readouterr().out
+    assert "RELEASE_INTEGRITY_GATE=UNKNOWN" in output
+    assert "LIVE_EXECUTION=NO-GO" in output
+    assert exit_code != 0
+
+
 def test_check_exact_head_is_case_insensitive_but_still_exact():
     status, _ = gate.check_exact_head(HEAD_SHA.upper(), HEAD_SHA)
     assert status == gate.PASS

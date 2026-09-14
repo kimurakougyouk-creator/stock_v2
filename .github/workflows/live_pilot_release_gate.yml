@@ -31,4 +31,5 @@ jobs:
       - name: Run release-integrity gate (read-only, advisory)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: src
         run: python scripts/live_pilot_release_gate.py
