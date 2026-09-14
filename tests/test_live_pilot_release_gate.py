@@ -48,8 +48,8 @@ def _clean_package_init_context_lookups():
     return {path: (_found(), _found()) for path in gate._PACKAGE_INIT_CONTEXT_PATHS}
 
 
-def _clean_stdlib_shadow_head_lookups():
-    return {path: _missing() for path in gate._FORBIDDEN_STDLIB_SHADOW_PATHS}
+def _clean_forbidden_path_head_lookups():
+    return {path: _missing() for path in gate._FORBIDDEN_HEAD_ONLY_PATHS}
 
 
 def _evaluate(**overrides):
@@ -62,7 +62,7 @@ def _evaluate(**overrides):
         "settings_base_lookup": _found(),
         "settings_head_lookup": _found(),
         "package_init_context_lookups": _clean_package_init_context_lookups(),
-        "stdlib_shadow_head_lookups": _clean_stdlib_shadow_head_lookups(),
+        "forbidden_path_head_lookups": _clean_forbidden_path_head_lookups(),
         "unresolved_review_thread_count": 0,
         "issue_255_state": "open",
     }
@@ -265,22 +265,24 @@ def test_check_protected_path_identity_unchanged_is_generic_over_path():
     assert "src/ai_asset_platform/core/__init__.py" in reason
 
 
-@pytest.mark.parametrize("shadow_path", ["src/dataclasses.py", "src/dataclasses/__init__.py"])
-def test_check_stdlib_shadow_absent_at_head_directly(shadow_path):
+@pytest.mark.parametrize("forbidden_path", sorted(gate._FORBIDDEN_HEAD_ONLY_PATHS))
+def test_check_forbidden_path_absent_at_head_directly(forbidden_path):
     assert (
-        gate.check_stdlib_shadow_absent_at_head(shadow_path=shadow_path, head_lookup=_missing())[
-            0
-        ]
+        gate.check_forbidden_path_absent_at_head(
+            forbidden_path=forbidden_path, head_lookup=_missing()
+        )[0]
         == gate.PASS
     )
     assert (
-        gate.check_stdlib_shadow_absent_at_head(shadow_path=shadow_path, head_lookup=_found())[0]
+        gate.check_forbidden_path_absent_at_head(
+            forbidden_path=forbidden_path, head_lookup=_found()
+        )[0]
         == gate.FAIL
     )
     assert (
-        gate.check_stdlib_shadow_absent_at_head(shadow_path=shadow_path, head_lookup=_unknown())[
-            0
-        ]
+        gate.check_forbidden_path_absent_at_head(
+            forbidden_path=forbidden_path, head_lookup=_unknown()
+        )[0]
         == gate.UNKNOWN
     )
 
@@ -325,11 +327,11 @@ def test_core_init_delete_or_rename_away_fails():
 # PASS if newly present at head.
 @pytest.mark.parametrize("shadow_path", sorted(gate._FORBIDDEN_STDLIB_SHADOW_PATHS))
 def test_new_dataclasses_shadow_at_head_blocks_pass(shadow_path):
-    lookups = _clean_stdlib_shadow_head_lookups()
+    lookups = _clean_forbidden_path_head_lookups()
     lookups[shadow_path] = _found()
-    result = _evaluate(stdlib_shadow_head_lookups=lookups)
+    result = _evaluate(forbidden_path_head_lookups=lookups)
     assert result.status == gate.FAIL
-    assert any(f"no-stdlib-shadow-at-head[{shadow_path}]" in r for r in result.reasons)
+    assert any(f"no-forbidden-path-at-head[{shadow_path}]" in r for r in result.reasons)
 
 
 def test_os_shadow_paths_are_deliberately_not_protected():
@@ -339,10 +341,50 @@ def test_os_shadow_paths_are_deliberately_not_protected():
     project (confirmed empirically), so no repo-local os.py/os/__init__.py
     anywhere on sys.path can ever shadow it here -- this is a deliberate
     scope decision, not an oversight, and is documented on
-    ``_FORBIDDEN_STDLIB_SHADOW_PATHS``.
+    ``_FORBIDDEN_STDLIB_SHADOW_PATHS`` / ``_FORBIDDEN_HEAD_ONLY_PATHS``.
     """
-    assert "src/os.py" not in gate._FORBIDDEN_STDLIB_SHADOW_PATHS
-    assert "src/os/__init__.py" not in gate._FORBIDDEN_STDLIB_SHADOW_PATHS
+    assert "src/os.py" not in gate._FORBIDDEN_HEAD_ONLY_PATHS
+    assert "src/os/__init__.py" not in gate._FORBIDDEN_HEAD_ONLY_PATHS
+
+
+# Codex P2-1 "Reject repo-local Python startup hooks": sitecustomize/
+# usercustomize (module or package form) are imported automatically by
+# CPython's own site initialization before this project's own code runs,
+# and with PYTHONPATH=src, src/ is on sys.path at that point -- confirmed
+# reachable the same way as the stdlib-shadow paths. Must not PASS if
+# newly present at head.
+@pytest.mark.parametrize("hook_path", sorted(gate._FORBIDDEN_STARTUP_HOOK_PATHS))
+def test_new_startup_hook_at_head_blocks_pass(hook_path):
+    lookups = _clean_forbidden_path_head_lookups()
+    lookups[hook_path] = _found()
+    result = _evaluate(forbidden_path_head_lookups=lookups)
+    assert result.status == gate.FAIL
+    assert any(f"no-forbidden-path-at-head[{hook_path}]" in r for r in result.reasons)
+
+
+# Codex P2-2 "Reject a package that shadows the settings module": Python
+# resolves a package ahead of a sibling module of the same name, so
+# src/ai_asset_platform/core/settings/__init__.py would be imported instead
+# of the sibling settings.py for `ai_asset_platform.core.settings`,
+# regardless of whether settings.py itself is unchanged. Must not PASS if
+# newly present at head.
+@pytest.mark.parametrize(
+    "shadow_package_path", sorted(gate._FORBIDDEN_SETTINGS_PACKAGE_SHADOW_PATHS)
+)
+def test_new_settings_package_shadow_at_head_blocks_pass(shadow_package_path):
+    lookups = _clean_forbidden_path_head_lookups()
+    lookups[shadow_package_path] = _found()
+    result = _evaluate(forbidden_path_head_lookups=lookups)
+    assert result.status == gate.FAIL
+    assert any(
+        f"no-forbidden-path-at-head[{shadow_package_path}]" in r for r in result.reasons
+    )
+
+
+def test_settings_package_shadow_path_is_the_expected_sibling_of_settings_py():
+    assert gate._FORBIDDEN_SETTINGS_PACKAGE_SHADOW_PATHS == (
+        "src/ai_asset_platform/core/settings/__init__.py",
+    )
 
 
 # D: malformed/incomplete Git evidence for the new checks must fail closed
@@ -372,10 +414,11 @@ def test_package_init_context_incoherent_type_on_both_sides_is_unknown_not_pass(
     assert result.status == gate.UNKNOWN
 
 
-def test_stdlib_shadow_unknown_lookup_is_unknown_not_pass():
-    lookups = _clean_stdlib_shadow_head_lookups()
-    lookups["src/dataclasses.py"] = _unknown()
-    result = _evaluate(stdlib_shadow_head_lookups=lookups)
+@pytest.mark.parametrize("forbidden_path", sorted(gate._FORBIDDEN_HEAD_ONLY_PATHS))
+def test_forbidden_path_unknown_lookup_is_unknown_not_pass(forbidden_path):
+    lookups = _clean_forbidden_path_head_lookups()
+    lookups[forbidden_path] = _unknown()
+    result = _evaluate(forbidden_path_head_lookups=lookups)
     assert result.status == gate.UNKNOWN
 
 
@@ -389,18 +432,18 @@ def test_missing_package_init_context_entry_defaults_to_unknown():
     assert result.status == gate.UNKNOWN
 
 
-def test_missing_stdlib_shadow_entry_defaults_to_unknown():
-    result = _evaluate(stdlib_shadow_head_lookups={})
+def test_missing_forbidden_path_entry_defaults_to_unknown():
+    result = _evaluate(forbidden_path_head_lookups={})
     assert result.status == gate.UNKNOWN
 
 
 # E: normal, current base/head evidence must not be blocked by the new
 # checks -- covered by test_clean_evidence_passes (its default fixtures
-# now include clean package-init-context and stdlib-shadow evidence too).
-def test_clean_package_init_context_and_shadow_evidence_still_passes():
+# now include clean package-init-context and forbidden-path evidence too).
+def test_clean_package_init_context_and_forbidden_path_evidence_still_passes():
     result = _evaluate(
         package_init_context_lookups=_clean_package_init_context_lookups(),
-        stdlib_shadow_head_lookups=_clean_stdlib_shadow_head_lookups(),
+        forbidden_path_head_lookups=_clean_forbidden_path_head_lookups(),
     )
     assert result.status == gate.PASS
 
@@ -771,18 +814,18 @@ def _configure_main(
     *,
     settings_head_lookup=None,
     package_init_head_lookup=None,
-    shadow_head_lookup=None,
+    forbidden_path_head_lookup=None,
     settings_loader=_default_settings,
 ):
     """Route the mocked ``fetch_git_tree_entry_at_exact_ref`` by ``path`` and
 
     ``ref_sha`` (base vs. head), since ``main()`` now makes several distinct
-    lookups (settings.py, two package __init__.py paths, two stdlib-shadow
-    paths) instead of just two. Base-side lookups for real (non-shadow)
-    paths default to a clean ``_found()``; head-side lookups default to a
-    clean ``_found()`` for settings.py/__init__.py paths and a clean
-    ``_missing()`` (absent, safe) for the stdlib-shadow paths, unless
-    overridden.
+    lookups (settings.py, two package __init__.py paths, and every path in
+    ``_FORBIDDEN_HEAD_ONLY_PATHS``) instead of just two. Base-side lookups
+    for real (non-forbidden) paths default to a clean ``_found()``;
+    head-side lookups default to a clean ``_found()`` for
+    settings.py/__init__.py paths and a clean ``_missing()`` (absent, safe)
+    for every forbidden path, unless overridden.
     """
     monkeypatch.setattr(
         gate,
@@ -800,8 +843,12 @@ def _configure_main(
     monkeypatch.setattr(gate, "fetch_issue_state", lambda **kwargs: "open")
 
     def _tree_lookup(*, repo, path, ref_sha, token):
-        if path in gate._FORBIDDEN_STDLIB_SHADOW_PATHS:
-            return shadow_head_lookup if shadow_head_lookup is not None else _missing()
+        if path in gate._FORBIDDEN_HEAD_ONLY_PATHS:
+            return (
+                forbidden_path_head_lookup
+                if forbidden_path_head_lookup is not None
+                else _missing()
+            )
         if ref_sha == BASE_SHA:
             return _found()
         if path == gate._LIVE_SAFETY_SETTINGS_PATH:
@@ -865,9 +912,46 @@ def test_main_new_dataclasses_shadow_at_head_prints_fail_and_fixed_no_go(monkeyp
     appearing at head -- reachable on this project's actual sys.path ahead
     of the real stdlib module -- must not PASS.
     """
-    _configure_main(monkeypatch, shadow_head_lookup=_found())
+    _configure_main(monkeypatch, forbidden_path_head_lookup=_found())
     assert gate.main() != 0
     output = capsys.readouterr().out
     assert "RELEASE_INTEGRITY_GATE=FAIL" in output
-    assert "no-stdlib-shadow-at-head" in output
+    assert "no-forbidden-path-at-head" in output
+    assert "LIVE_EXECUTION=NO-GO" in output
+
+
+def test_main_new_startup_hook_at_head_prints_fail_and_fixed_no_go(monkeypatch, capsys):
+    """Codex P2-1 regression, exercised through main(): a new repo-controlled
+
+    ``src/sitecustomize.py``/``src/usercustomize.py`` (or package form)
+    appearing at head -- imported automatically by CPython's own site
+    initialization before this project's own code runs -- must not PASS.
+    """
+    _configure_main(monkeypatch, forbidden_path_head_lookup=_found())
+    assert gate.main() != 0
+    output = capsys.readouterr().out
+    assert "RELEASE_INTEGRITY_GATE=FAIL" in output
+    assert any(
+        f"no-forbidden-path-at-head[{path}]" in output
+        for path in gate._FORBIDDEN_STARTUP_HOOK_PATHS
+    )
+    assert "LIVE_EXECUTION=NO-GO" in output
+
+
+def test_main_new_settings_package_shadow_at_head_prints_fail_and_fixed_no_go(
+    monkeypatch, capsys
+):
+    """Codex P2-2 regression, exercised through main(): a new repo-controlled
+
+    ``src/ai_asset_platform/core/settings/__init__.py`` appearing at head --
+    Python resolves this package ahead of the sibling settings.py module --
+    must not PASS, even though settings.py itself is unchanged.
+    """
+    _configure_main(monkeypatch, forbidden_path_head_lookup=_found())
+    assert gate.main() != 0
+    output = capsys.readouterr().out
+    assert "RELEASE_INTEGRITY_GATE=FAIL" in output
+    assert (
+        "no-forbidden-path-at-head[src/ai_asset_platform/core/settings/__init__.py]" in output
+    )
     assert "LIVE_EXECUTION=NO-GO" in output

@@ -3,14 +3,18 @@
 The workflow runs from trusted base code under ``pull_request_target``. PR
 code is never checked out, imported, or executed. The protected settings
 path, its package initialization/import context (``ai_asset_platform`` and
-``ai_asset_platform.core``'s own ``__init__.py``), and known stdlib-shadow
-paths are all inspected only as Git object metadata at immutable base/head
-commit SHAs -- an unchanged settings.py blob alone does not prove head's
-runtime behavior is unchanged, since importing it first runs its package
-initializers, which could import settings.py and then replace its class or
-singleton (or pre-populate ``sys.modules`` with a fake module) without
-touching settings.py's own bytes. ``LIVE_EXECUTION`` is always the fixed
-literal ``NO-GO``.
+``ai_asset_platform.core``'s own ``__init__.py``), and every path in
+``_FORBIDDEN_HEAD_ONLY_PATHS`` (stdlib-shadow modules, Python startup
+hooks, and a settings-module-shadowing package) are all inspected only as
+Git object metadata at immutable base/head commit SHAs -- an unchanged
+settings.py blob alone does not prove head's runtime behavior is
+unchanged, since importing it can be preceded or intercepted by any of
+these without touching settings.py's own bytes: a package initializer that
+imports settings.py and then replaces its class or singleton (or
+pre-populates ``sys.modules`` with a fake module), a Python startup hook
+that runs before this project's own code, or a same-named package that
+Python resolves ahead of the settings module itself. ``LIVE_EXECUTION`` is
+always the fixed literal ``NO-GO``.
 """
 from __future__ import annotations
 
@@ -67,6 +71,42 @@ _PACKAGE_INIT_CONTEXT_PATHS: tuple[str, ...] = (
 _FORBIDDEN_STDLIB_SHADOW_PATHS: tuple[str, ...] = (
     "src/dataclasses.py",
     "src/dataclasses/__init__.py",
+)
+
+# ``sitecustomize``/``usercustomize`` are Python's own site-initialization
+# hooks: if either is importable, the interpreter imports it automatically
+# very early on startup, before this project's own code (including this
+# gate script and settings.py) ever runs. With PYTHONPATH=src, `src/` is on
+# sys.path at that point, so a repo-controlled hook here could install an
+# import hook or pre-populate `sys.modules["ai_asset_platform.core.settings"]`
+# with a fake module before the real one is ever imported -- reachable via
+# this project's actual startup method, confirmed the same way as the
+# stdlib-shadow paths above (not assumed).
+_FORBIDDEN_STARTUP_HOOK_PATHS: tuple[str, ...] = (
+    "src/sitecustomize.py",
+    "src/sitecustomize/__init__.py",
+    "src/usercustomize.py",
+    "src/usercustomize/__init__.py",
+)
+
+# Python resolves a package (a directory with __init__.py) ahead of a
+# sibling module of the same name in the same parent package. A newly
+# added ``src/ai_asset_platform/core/settings/__init__.py`` would therefore
+# be imported instead of the sibling ``src/ai_asset_platform/core/settings.py``
+# for `ai_asset_platform.core.settings`, regardless of whether settings.py
+# itself is unchanged -- its initializer can define an arbitrary
+# ``PlatformSettings``/``SETTINGS``.
+_FORBIDDEN_SETTINGS_PACKAGE_SHADOW_PATHS: tuple[str, ...] = (
+    "src/ai_asset_platform/core/settings/__init__.py",
+)
+
+# Every path above shares the same safety semantics: it must not exist at
+# all at the PR's head commit, regardless of base. Combined here so the
+# same generic fetch/check wiring covers all of them.
+_FORBIDDEN_HEAD_ONLY_PATHS: tuple[str, ...] = (
+    *_FORBIDDEN_STDLIB_SHADOW_PATHS,
+    *_FORBIDDEN_STARTUP_HOOK_PATHS,
+    *_FORBIDDEN_SETTINGS_PACKAGE_SHADOW_PATHS,
 )
 
 # The complete, closed set of Git tree entry modes with defined meaning for
@@ -371,26 +411,27 @@ def check_settings_file_unchanged_between_exact_refs(
     )
 
 
-def check_stdlib_shadow_absent_at_head(
-    *, shadow_path: str, head_lookup: GitTreeEntryLookup
+def check_forbidden_path_absent_at_head(
+    *, forbidden_path: str, head_lookup: GitTreeEntryLookup
 ) -> tuple[str, str]:
-    """Fail closed if a repo-controlled stdlib-shadowing path exists at head.
+    """Fail closed if a path from ``_FORBIDDEN_HEAD_ONLY_PATHS`` exists at head.
 
-    For these paths, *absence* is the safety condition: their mere presence
-    on sys.path ahead of the real stdlib module would let a repo-controlled
-    file intercept an import inside the protected settings module (see
-    ``_FORBIDDEN_STDLIB_SHADOW_PATHS``). A GitHub API/network failure that
-    prevents even confirming absence is UNKNOWN, never treated as safe.
+    For these paths, *absence* is the safety condition -- their mere
+    presence lets a repo-controlled file intercept an import (a stdlib
+    module settings.py imports, a Python startup hook, or the settings
+    module's own package resolution slot) before settings.py's real
+    behavior is ever reached. A GitHub API/network failure that prevents
+    even confirming absence is UNKNOWN, never treated as safe.
     """
     if head_lookup.state == _LOOKUP_MISSING:
-        return PASS, f"{shadow_path!r} does not exist at the exact PR head sha"
+        return PASS, f"{forbidden_path!r} does not exist at the exact PR head sha"
     if head_lookup.state == _LOOKUP_FOUND:
         return FAIL, (
-            f"{shadow_path!r} exists at the exact PR head sha; a repo-controlled file at "
-            "this path could shadow the real stdlib module the protected settings.py imports"
+            f"{forbidden_path!r} exists at the exact PR head sha; a repo-controlled file "
+            "at this path could intercept or replace the protected settings import"
         )
     return UNKNOWN, (
-        f"could not confirm whether {shadow_path!r} exists at the exact PR head sha"
+        f"could not confirm whether {forbidden_path!r} exists at the exact PR head sha"
     )
 
 
@@ -466,7 +507,7 @@ def evaluate_release_gate(
     settings_base_lookup: GitTreeEntryLookup,
     settings_head_lookup: GitTreeEntryLookup,
     package_init_context_lookups: dict[str, tuple[GitTreeEntryLookup, GitTreeEntryLookup]],
-    stdlib_shadow_head_lookups: dict[str, GitTreeEntryLookup],
+    forbidden_path_head_lookups: dict[str, GitTreeEntryLookup],
     unresolved_review_thread_count: int | None,
     issue_255_state: str | None,
 ) -> GateResult:
@@ -491,15 +532,15 @@ def evaluate_release_gate(
         )
         for path in _PACKAGE_INIT_CONTEXT_PATHS
     ]
-    stdlib_shadow_checks = [
+    forbidden_path_checks = [
         (
-            f"no-stdlib-shadow-at-head[{path}]",
-            check_stdlib_shadow_absent_at_head(
-                shadow_path=path,
-                head_lookup=stdlib_shadow_head_lookups.get(path, _unknown_lookup),
+            f"no-forbidden-path-at-head[{path}]",
+            check_forbidden_path_absent_at_head(
+                forbidden_path=path,
+                head_lookup=forbidden_path_head_lookups.get(path, _unknown_lookup),
             ),
         )
-        for path in _FORBIDDEN_STDLIB_SHADOW_PATHS
+        for path in _FORBIDDEN_HEAD_ONLY_PATHS
     ]
 
     checks = (
@@ -520,7 +561,7 @@ def evaluate_release_gate(
             ),
         ),
         *package_init_context_checks,
-        *stdlib_shadow_checks,
+        *forbidden_path_checks,
     )
     for label, (status, reason) in checks:
         statuses.append(status)
@@ -622,11 +663,11 @@ def main() -> int:
         )
         for path in _PACKAGE_INIT_CONTEXT_PATHS
     }
-    stdlib_shadow_head_lookups = {
+    forbidden_path_head_lookups = {
         path: fetch_git_tree_entry_at_exact_ref(
             repo=repo, path=path, ref_sha=pr_head_sha, token=token
         )
-        for path in _FORBIDDEN_STDLIB_SHADOW_PATHS
+        for path in _FORBIDDEN_HEAD_ONLY_PATHS
     }
 
     result = evaluate_release_gate(
@@ -638,7 +679,7 @@ def main() -> int:
         settings_base_lookup=settings_base_lookup,
         settings_head_lookup=settings_head_lookup,
         package_init_context_lookups=package_init_context_lookups,
-        stdlib_shadow_head_lookups=stdlib_shadow_head_lookups,
+        forbidden_path_head_lookups=forbidden_path_head_lookups,
         unresolved_review_thread_count=unresolved_count,
         issue_255_state=issue_state,
     )
