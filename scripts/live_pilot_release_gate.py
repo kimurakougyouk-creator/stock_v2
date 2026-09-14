@@ -36,6 +36,19 @@ _LOOKUP_UNKNOWN = "UNKNOWN"
 # sides of a base/head comparison happen to match.
 _KNOWN_GIT_TREE_MODES = frozenset({"100644", "100755", "120000", "160000", "040000"})
 
+# Each known mode has exactly one coherent Git object type. A mode being
+# individually allowlisted is not sufficient on its own: e.g. mode="040000"
+# (subtree) paired with type="blob", or mode="160000" (submodule) paired
+# with type="blob", is malformed/incoherent Git-object evidence and must
+# never be treated as FOUND just because the mode alone is known-good.
+_GIT_TREE_MODE_TO_TYPE: dict[str, str] = {
+    "100644": "blob",
+    "100755": "blob",
+    "120000": "blob",
+    "160000": "commit",
+    "040000": "tree",
+}
+
 
 @dataclass(frozen=True)
 class GateResult:
@@ -231,6 +244,8 @@ def fetch_git_tree_entry_at_exact_ref(
     if not all(isinstance(value, str) for value in (mode, object_type, object_sha)):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
     if mode not in _KNOWN_GIT_TREE_MODES:
+        return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+    if _GIT_TREE_MODE_TO_TYPE.get(mode) != object_type:
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
     if not _is_well_formed_git_sha(object_sha):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)

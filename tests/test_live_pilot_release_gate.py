@@ -344,18 +344,88 @@ def test_tree_lookup_uncertain_or_malformed_evidence_is_unknown(monkeypatch, res
 
 
 @pytest.mark.parametrize("mode", sorted(gate._KNOWN_GIT_TREE_MODES))
-def test_tree_lookup_accepts_every_known_git_mode(monkeypatch, mode):
+def test_tree_lookup_accepts_every_known_git_mode_with_its_coherent_type(monkeypatch, mode):
     """Codex P2 regression: each mode in the allowlist (normal file,
 
-    executable, symlink, submodule, subtree) is accepted as a legitimate
-    Git tree entry mode.
+    executable, symlink, submodule, subtree), paired with the one Git
+    object type it is actually defined to point at, is accepted.
     """
+    coherent_type = gate._GIT_TREE_MODE_TO_TYPE[mode]
     result, _ = _lookup(
         monkeypatch,
-        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([_settings_entry(mode=mode)]))],
+        [
+            _FakeResponse(_commit_body()),
+            _FakeResponse(
+                _tree_body([_settings_entry(mode=mode, object_type=coherent_type)])
+            ),
+        ],
     )
     assert result.state == gate._LOOKUP_FOUND
     assert result.mode == mode
+    assert result.object_type == coherent_type
+
+
+@pytest.mark.parametrize(
+    ("mode", "object_type"),
+    [
+        ("040000", "blob"),
+        ("160000", "blob"),
+        ("100644", "tree"),
+        ("100755", "commit"),
+        ("120000", "tree"),
+    ],
+)
+def test_tree_lookup_rejects_incompatible_mode_type_pairs(monkeypatch, mode, object_type):
+    """Codex P2 regression: an individually allowlisted mode paired with an
+
+    incoherent Git object type (e.g. mode="040000" subtree with
+    type="blob", or mode="160000" submodule with type="blob") must resolve
+    to UNKNOWN, never FOUND -- the mode/type combination is validated as a
+    pair, not mode and type independently.
+    """
+    result, _ = _lookup(
+        monkeypatch,
+        [
+            _FakeResponse(_commit_body()),
+            _FakeResponse(
+                _tree_body([_settings_entry(mode=mode, object_type=object_type)])
+            ),
+        ],
+    )
+    assert result.state == gate._LOOKUP_UNKNOWN
+
+
+def test_matching_incompatible_mode_type_pair_never_passes_identity_check(monkeypatch):
+    """Codex P2 regression: base and head both reporting the *same*
+
+    individually-allowlisted-but-incoherent mode/type pair (e.g.
+    mode="040000" with type="blob" on both sides) must never be treated as
+    a legitimate match. The fetch layer rejects the incoherent pair
+    outright (UNKNOWN, not FOUND) on both sides, so the identity
+    comparison can never see it as "PASS because base == head".
+    """
+    bad_pair_entry = _settings_entry(mode="040000", object_type="blob")
+
+    base_result, _ = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([bad_pair_entry]))],
+    )
+    assert base_result.state == gate._LOOKUP_UNKNOWN
+
+    head_result, _ = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([bad_pair_entry]))],
+    )
+    assert head_result.state == gate._LOOKUP_UNKNOWN
+
+    status, _ = gate.check_settings_file_unchanged_between_exact_refs(
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+        base_lookup=base_result,
+        head_lookup=head_result,
+    )
+    assert status != gate.PASS
+    assert status == gate.UNKNOWN
 
 
 @pytest.mark.parametrize(
