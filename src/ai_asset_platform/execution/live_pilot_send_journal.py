@@ -16,12 +16,27 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 
 
 DEFAULT_JOURNAL_DIR = Path("results/live_pilot_send_journal")
 REPORT_SCHEMA_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+_GLOBAL_ATTEMPT_FILENAME = "GLOBAL_SEND_ATTEMPT.lock"
+_MACHINE_STATE_SUBDIR = (
+    Path(".local") / "state" / "ai_asset_platform" / "live_pilot"
+)
+
+
+def _is_exact_int(value: object, expected: int) -> bool:
+    """True only for the exact ``int`` value, not ``0.0``, ``"0"``, or ``False``.
+
+    ``int(value)`` silently coerces all of those (and ``bool`` is itself an
+    ``int`` subclass), which would let a malformed persisted
+    ``send_attempt_count`` pass a state-transition gate.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value == expected
 
 
 def _now(value: datetime | None) -> str:
@@ -50,21 +65,106 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.attempted.json"
 
 
+def _resolve_machine_state_root() -> Path:
+    """Resolve checkout-independent durable operator state for the campaign marker."""
+    try:
+        effective_uid = os.geteuid()
+        passwd_home = pwd.getpwuid(effective_uid).pw_dir
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise OSError("durable operator identity cannot be resolved") from exc
+    if not isinstance(passwd_home, str) or not passwd_home.strip():
+        raise OSError("durable operator home must be non-empty")
+    try:
+        home = Path(passwd_home)
+    except (OSError, TypeError, ValueError) as exc:
+        raise OSError("durable operator home is invalid") from exc
+    if not home.is_absolute():
+        raise OSError("durable operator home must be an absolute path")
+    return home / _MACHINE_STATE_SUBDIR
+
+
+def _canonical_journal_root() -> Path:
+    """Return the one true machine/operator-state location for the campaign marker."""
+    return _resolve_machine_state_root()
+
+
+def _global_attempt_path(directory: Path) -> Path:
+    # Deliberately ignores caller storage, cwd, checkout path, and intent_id.
+    del directory
+    root = _canonical_journal_root()
+    _mkdir_durable(root)
+    return root / _GLOBAL_ATTEMPT_FILENAME
+
+
+def _fsync_parent_dir(path: Path) -> None:
+    """Fsync the containing directory so a new/removed entry survives a crash.
+
+    A file's own fsync only guarantees its content is durable; the directory
+    entry that makes the file (dis)appear needs a separate fsync on most
+    POSIX filesystems, otherwise a power loss right after creation can boot
+    back up without the entry and silently permit a second send attempt.
+    """
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _mkdir_durable(directory: Path) -> None:
+    """Create ``directory`` and any missing parents, durably.
+
+    ``Path.mkdir(parents=True)`` alone does not guarantee the new directory
+    entries survive a crash immediately after this call returns; each newly
+    created directory's own parent must be fsynced too. Without this, a
+    power loss right after the very first pilot run creates
+    ``results/live_pilot_send_journal/`` could lose the entire new
+    directory, including a marker written into it moments later.
+    """
+    to_create: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        to_create.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(to_create):
+        _fsync_parent_dir(created)
+
+
+def _write_full(descriptor: int, data: bytes) -> None:
+    """Write every byte of ``data``, since ``os.write`` may write fewer.
+
+    POSIX permits a short write (e.g. an interrupted syscall); persisting
+    without looping could fsync and publish a truncated marker/journal as if
+    it were the complete, valid evidence it claims to be.
+    """
+    written = 0
+    while written < len(data):
+        count = os.write(descriptor, data[written:])
+        if count <= 0:
+            raise OSError("write() made no progress while persisting durable evidence")
+        written += count
+
+
 def _atomic_new(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         encoded = (
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        os.write(descriptor, encoded)
+        _write_full(descriptor, encoded)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_parent_dir(path)
 
 
 def _atomic_replace(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     temporary = path.with_suffix(path.suffix + ".tmp")
     descriptor = os.open(
         temporary,
@@ -75,7 +175,7 @@ def _atomic_replace(path: Path, payload: dict) -> None:
         encoded = (
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        os.write(descriptor, encoded)
+        _write_full(descriptor, encoded)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -103,6 +203,51 @@ def send_attempt_recorded(
 ) -> bool:
     """Return True when the irreversible single-send marker already exists."""
     return _attempt_path(intent_id, directory).exists()
+
+
+def load_send_attempt_marker(
+    intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    """Load the irreversible per-intent SEND_ATTEMPT marker, if it exists.
+
+    This is the exclusive-create marker written by ``record_send_attempt``
+    before any broker transport call, not the mutable summary journal. A
+    completion judge must load and validate this marker directly rather than
+    trusting the summary journal's ``state`` field alone.
+    """
+    path = _attempt_path(intent_id, directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="send attempt marker")
+
+
+def global_send_attempt_recorded(*, directory: Path = DEFAULT_JOURNAL_DIR) -> bool:
+    """Return True when any Live pilot send attempt has ever been recorded.
+
+    This marker has one fixed filename shared by every intent_id in the
+    directory. It is what actually enforces "at most one transmission ever"
+    for the whole pilot campaign: an intent-scoped marker alone would let a
+    new or restarted caller choose a fresh intent_id and create a second,
+    otherwise-unblocked attempt marker.
+    """
+    return _global_attempt_path(directory).exists()
+
+
+def load_global_send_attempt_marker(
+    *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    """Load the campaign-wide GLOBAL_SEND_ATTEMPT marker, if it exists.
+
+    A completion judge must validate this in addition to the per-intent
+    marker: an intent's own ``.attempted.json`` can exist and look valid
+    even if the global marker was lost or now belongs to a different
+    intent, which would otherwise let completion be reported for one intent
+    without proving the campaign-wide one-send guarantee actually held.
+    """
+    path = _global_attempt_path(directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="global send attempt marker")
 
 
 def create_consumed_authorization_journal(
@@ -162,8 +307,12 @@ def record_send_attempt(
 ) -> dict:
     """Irreversibly spend the sole allowed send attempt before broker transport.
 
-    The exclusive attempt marker is created first.  If the process crashes or
-    the summary update fails afterwards, that marker survives and every later
+    The exclusive global campaign marker is created first, before any
+    per-intent marker. Its filename is fixed (not derived from intent_id), so
+    switching to a new intent_id or restarting the process after a crash can
+    never create a second reachable attempt. The per-intent attempt marker is
+    then created for this intent's own bookkeeping. If the process crashes or
+    the summary update fails afterwards, both markers survive and every later
     call still fails closed.
     """
     intent = _safe(intent_id, "intent_id")
@@ -172,9 +321,22 @@ def record_send_attempt(
         raise PermissionError("send journal is missing")
     if (
         payload.get("state") != "AUTHORIZATION_CONSUMED"
-        or int(payload.get("send_attempt_count", 0)) != 0
+        or not _is_exact_int(payload.get("send_attempt_count"), 0)
     ):
         raise PermissionError("a Live send attempt is no longer permitted for this intent")
+
+    global_marker = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "intent_id": intent,
+        "recorded_at": _now(now),
+        "automatic_resend_allowed": False,
+    }
+    try:
+        _atomic_new(_global_attempt_path(directory), global_marker)
+    except FileExistsError as exc:
+        raise PermissionError(
+            "a Live send attempt has already been recorded for this pilot campaign"
+        ) from exc
 
     marker = {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -247,7 +409,7 @@ def mark_unknown(
 ) -> dict:
     _require_attempt_marker(intent_id, directory)
     payload = load_send_journal(intent_id, directory=directory)
-    if payload is None or int(payload.get("send_attempt_count", 0)) != 1:
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("UNKNOWN is only valid after the single send attempt")
     if payload.get("state") in {"POSTFILL_PROVEN", "COMPLETE"}:
         raise PermissionError("completed evidence cannot be changed to UNKNOWN")
@@ -280,7 +442,7 @@ def mark_postfill_proven(
 ) -> dict:
     _require_attempt_marker(intent_id, directory)
     payload = load_send_journal(intent_id, directory=directory)
-    if payload is None or int(payload.get("send_attempt_count", 0)) != 1:
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("post-fill proof requires the single recorded send attempt")
     if payload.get("state") not in {"ORDER_ACKNOWLEDGED", "UNKNOWN"}:
         raise PermissionError("post-fill proof is not valid in the current state")
@@ -314,15 +476,17 @@ def mark_postfill_proven(
 def send_attempt_permitted(
     intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
 ) -> bool:
-    """Fail closed if either the summary or irreversible marker says spent."""
+    """Fail closed if the summary, per-intent marker, or global marker says spent."""
     try:
+        if global_send_attempt_recorded(directory=directory):
+            return False
         if send_attempt_recorded(intent_id, directory=directory):
             return False
         payload = load_send_journal(intent_id, directory=directory)
         return bool(
             payload
             and payload.get("state") == "AUTHORIZATION_CONSUMED"
-            and int(payload.get("send_attempt_count", 0)) == 0
+            and _is_exact_int(payload.get("send_attempt_count"), 0)
         )
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return False

@@ -82,16 +82,71 @@ def _consumed_path(directory: Path, nonce: str) -> Path:
     return _authorization_path(directory, nonce).with_suffix(".consumed.json")
 
 
+def _fsync_parent_dir(path: Path) -> None:
+    """Fsync the containing directory so a new/removed entry survives a crash.
+
+    A file's own fsync only guarantees its content is durable; the directory
+    entry that makes the file (dis)appear needs a separate fsync on most
+    POSIX filesystems, otherwise a power loss right after this call can boot
+    back up without the entry and silently permit consuming the same
+    authorization (or reusing an authorization file) a second time.
+    """
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _mkdir_durable(directory: Path) -> None:
+    """Create ``directory`` and any missing parents, durably.
+
+    ``Path.mkdir(parents=True)`` alone does not guarantee the new directory
+    entries survive a crash immediately after this call returns; each newly
+    created directory's own parent must be fsynced too, or a power loss
+    right after the first authorization is issued could lose the entire new
+    ``results/live_pilot_authorizations/`` directory.
+    """
+    to_create: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        to_create.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(to_create):
+        _fsync_parent_dir(created)
+
+
+def _write_full(descriptor: int, data: bytes) -> None:
+    """Write every byte of ``data``, since ``os.write`` may write fewer.
+
+    POSIX permits a short write (e.g. an interrupted syscall); persisting
+    without looping could fsync and publish a truncated authorization/
+    consumed-marker record as if it were the complete, valid evidence it
+    claims to be.
+    """
+    written = 0
+    while written < len(data):
+        count = os.write(descriptor, data[written:])
+        if count <= 0:
+            raise OSError("write() made no progress while persisting durable evidence")
+        written += count
+
+
 def _exclusive_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     descriptor = os.open(path, flags, 0o600)
     try:
         encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        os.write(descriptor, encoded)
+        _write_full(descriptor, encoded)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_parent_dir(path)
 
 
 def issue_live_pilot_authorization(
@@ -238,6 +293,11 @@ def consume_live_pilot_authorization(
         "nonce": str(nonce),
         "intent_id": expected["intent_id"],
         "consumed_at": current.isoformat(timespec="seconds"),
+        # Preserved so a caller can re-validate expiry after this call, e.g.
+        # if durable writes between consumption and transport stall long
+        # enough for the original TTL to elapse even though this check
+        # already passed.
+        "expires_at": payload.get("expires_at"),
         "order_sent": False,
         "live_order_sent": False,
     }
@@ -252,6 +312,7 @@ def consume_live_pilot_authorization(
         # Another actor changing the authorization after the exclusive marker is
         # an unknown state; preserve the consumed marker and fail closed.
         raise PermissionError("authorization state changed during consumption")
+    _fsync_parent_dir(auth_path)
     return consumed_record
 
 

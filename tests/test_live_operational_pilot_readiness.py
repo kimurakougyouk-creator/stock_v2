@@ -16,7 +16,7 @@ def _stamp(value: datetime = NOW) -> str:
     return value.isoformat(timespec="seconds")
 
 
-def _live_account(*, quantity: float = 0.0, checked_at: str | None = None) -> dict:
+def _live_account(*, quantity: float = 0.0, checked_at: str | None = None, **overrides) -> dict:
     positions = []
     if quantity != 0:
         positions.append(
@@ -27,28 +27,44 @@ def _live_account(*, quantity: float = 0.0, checked_at: str | None = None) -> di
                 "quantity": quantity,
             }
         )
-    return {
+    data = {
+        "schema_version": 3,
         "ready": True,
         "checked_at": checked_at or _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
         "account_fingerprint": FINGERPRINT,
         "base_currency": "JPY",
         "positions": positions,
         "order_sent": False,
         "live_order_sent": False,
     }
+    data.update(overrides)
+    return data
 
 
-def _live_open_orders(count: int = 0, *, checked_at: str | None = None) -> dict:
-    return {
+def _live_open_orders(
+    count: object = 0,
+    *,
+    checked_at: str | None = None,
+    orders: object = None,
+    **overrides,
+) -> dict:
+    data = {
+        "schema_version": 2,
         "ready": True,
         "checked_at": checked_at or _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
         "open_order_count": count,
+        "orders": [] if orders is None else orders,
         "order_sent": False,
         "cancel_sent": False,
         "live_order_sent": False,
     }
+    data.update(overrides)
+    return data
 
 
 def _live_fx(
@@ -59,8 +75,10 @@ def _live_fx(
     quote_currency: str = "JPY",
     endpoint_port: int = 4001,
     ready: bool = True,
+    **overrides,
 ) -> dict:
-    return {
+    data = {
+        "schema_version": 1,
         "ready": ready,
         "checked_at": checked_at or _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
@@ -72,21 +90,32 @@ def _live_fx(
         "order_sent": False,
         "live_order_sent": False,
     }
+    data.update(overrides)
+    return data
 
 
-def _paper_monitor(*, checked_at: str | None = None) -> dict:
-    return {
-        "status": "WARNING",
+def _paper_monitor(*, checked_at: str | None = None, **overrides) -> dict:
+    data = {
+        "schema_version": 1,
+        "status": "HEALTHY",
         "checked_at": checked_at or _stamp(),
         "accounting_safe": True,
         "risk_safe": True,
         "monitor_order_sent": False,
         "live_order_sent": False,
         "broker": {
+            "account_ready": True,
+            "execution_snapshot_ready": True,
+            "all_open_orders_ready": True,
+            "endpoint_port": 4002,
+            "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
             "reconciliation_blocker_count": 0,
             "open_order_count": 0,
+            "open_orders": [],
         },
     }
+    data.update(overrides)
+    return data
 
 
 def _open_session(*, local_timestamp: str | None = None):
@@ -202,9 +231,82 @@ def test_jpy_pilot_derives_notional_without_fx_report():
 
 
 def test_unexpected_live_open_order_blocks_pilot():
-    result = _evaluate(live_open_orders_report=_live_open_orders(1))
+    result = _evaluate(live_open_orders_report=_live_open_orders(1, orders=[{"order_id": 1}]))
     assert result.operational_pilot_ready is False
-    assert "unexpected open Live orders exist" in result.blockers
+    assert "Live open-order evidence is not exactly an empty order set" in result.blockers
+
+
+def test_open_order_representation_must_be_exact_zero_int_and_empty_list():
+    malformed = [
+        _live_open_orders(0.0),
+        _live_open_orders("0"),
+        _live_open_orders(False),
+        _live_open_orders(None),
+        _live_open_orders(0, orders=[{"order_id": 1}]),
+        _live_open_orders(0, orders="not-a-list"),
+    ]
+    for report in malformed:
+        result = _evaluate(live_open_orders_report=report)
+        assert result.operational_pilot_ready is False
+        assert "Live open-order evidence is not exactly an empty order set" in result.blockers
+
+
+def test_open_orders_fingerprint_must_match_pinned_account():
+    result = _evaluate(
+        live_open_orders_report=_live_open_orders(account_fingerprint="b" * 64),
+    )
+    assert result.operational_pilot_ready is False
+    assert "Live account/open-order fingerprints are not pinned/matched" in result.blockers
+
+
+def test_open_orders_transport_flags_must_exist_and_be_exact_false():
+    for key, value in (
+        ("order_sent", None),
+        ("cancel_sent", 0),
+        ("live_order_sent", ""),
+    ):
+        report = _live_open_orders(**{key: value})
+        result = _evaluate(live_open_orders_report=report)
+        assert result.operational_pilot_ready is False
+        assert "Live all-open-orders preflight is not ready" in result.blockers
+
+    missing = _live_open_orders()
+    missing.pop("cancel_sent")
+    result = _evaluate(live_open_orders_report=missing)
+    assert result.operational_pilot_ready is False
+    assert "Live all-open-orders preflight is not ready" in result.blockers
+
+
+def test_paper_contract_requires_healthy_complete_schema_current_snapshot():
+    warning = _paper_monitor(status="WARNING")
+    assert _evaluate(paper_monitor_report=warning).operational_pilot_ready is False
+
+    incomplete = _paper_monitor()
+    incomplete["broker"] = {"reconciliation_blocker_count": 0, "open_order_count": 0}
+    assert _evaluate(paper_monitor_report=incomplete).operational_pilot_ready is False
+
+    wrong_schema = _paper_monitor(schema_version=0)
+    assert _evaluate(paper_monitor_report=wrong_schema).operational_pilot_ready is False
+
+
+def test_paper_contract_rejects_non_exact_int_schema_version():
+    for malformed in (1.0, "1", True):
+        report = _paper_monitor(schema_version=malformed)
+        assert _evaluate(paper_monitor_report=report).operational_pilot_ready is False
+
+
+def test_read_only_reports_reject_non_exact_int_schema_version():
+    for malformed in (3.0, "3", True):
+        account = _live_account(schema_version=malformed)
+        assert _evaluate(live_account_report=account).operational_pilot_ready is False
+
+    for malformed in (2.0, "2", True):
+        open_orders = _live_open_orders(schema_version=malformed)
+        assert _evaluate(live_open_orders_report=open_orders).operational_pilot_ready is False
+
+    for malformed in (1.0, "1", True):
+        fx = _live_fx(schema_version=malformed)
+        assert _evaluate(live_fx_report=fx).operational_pilot_ready is False
 
 
 def test_buy_requires_target_live_position_flat():
@@ -216,7 +318,7 @@ def test_buy_requires_target_live_position_flat():
 def test_fingerprint_mismatch_blocks_wrong_live_account():
     result = _evaluate(expected_account_fingerprint="b" * 64)
     assert result.operational_pilot_ready is False
-    assert "Live account fingerprint is not pinned/matched" in result.blockers
+    assert "Live account/open-order fingerprints are not pinned/matched" in result.blockers
 
 
 def test_market_closed_blocks_pilot_without_broker_action():

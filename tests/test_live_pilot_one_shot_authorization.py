@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import ai_asset_platform.execution.live_pilot_one_shot_authorization as subject
 from ai_asset_platform.execution.live_pilot_one_shot_authorization import (
     OPERATOR_CONFIRMATION_VALUE,
     authorization_consumed,
@@ -118,6 +119,61 @@ def test_ttl_is_short_and_bounded(tmp_path: Path):
 def test_invalid_live_endpoint_is_rejected_at_issue_time(tmp_path: Path):
     with pytest.raises(ValueError, match="audited Live endpoint"):
         _issue(tmp_path, endpoint_port=4002)
+
+
+def test_consumption_fsyncs_directory_entries(tmp_path: Path, monkeypatch):
+    """Codex P1: the consumed marker's directory entry (and the removal of the
+
+    authorization file's entry) must be fsynced so a power loss right after
+    consumption cannot silently permit consuming it again.
+    """
+    calls = []
+    original = subject._fsync_parent_dir
+
+    def spy(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(subject, "_fsync_parent_dir", spy)
+    authorization = _issue(tmp_path)
+    calls.clear()
+    _consume(tmp_path, authorization.nonce)
+    assert len(calls) >= 2
+    assert all(call.parent == tmp_path for call in calls)
+
+
+def test_write_full_loops_over_short_writes_and_rejects_no_progress(tmp_path: Path, monkeypatch):
+    """Codex P1 (round 4): a short ``os.write`` must not silently persist a
+
+    truncated authorization/consumed-marker record; the helper must loop
+    until every byte is written and fail rather than fsync/rename on
+    no-progress writes.
+    """
+    import os
+
+    data = b"z" * 100
+    target = tmp_path / "short_write_target.bin"
+    original_write = os.write
+
+    def short_write(fd, chunk):
+        return original_write(fd, chunk[:7])
+
+    monkeypatch.setattr(os, "write", short_write)
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        subject._write_full(descriptor, data)
+    finally:
+        os.close(descriptor)
+    assert target.read_bytes() == data
+
+    zero_progress_target = tmp_path / "zero_progress.bin"
+    monkeypatch.setattr(os, "write", lambda fd, chunk: 0)
+    descriptor = os.open(zero_progress_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with pytest.raises(OSError, match="no progress"):
+            subject._write_full(descriptor, data)
+    finally:
+        os.close(descriptor)
 
 
 def test_module_contains_no_broker_order_transport():

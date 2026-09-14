@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 
 from ai_asset_platform.brokers.ibkr_all_open_orders_snapshot import (
     IbkrOpenOrderEvidence,
@@ -23,6 +23,7 @@ from ai_asset_platform.brokers.ibkr_live_readonly_account import (
     CONFIRMATION_VALUE,
     LIVE_GATEWAY_PORT,
     LIVE_TWS_PORT,
+    _account_fingerprint,
 )
 from ai_asset_platform.brokers.ibkr_thread_runner import (
     run_ibapi_message_loop_safely,
@@ -30,7 +31,28 @@ from ai_asset_platform.brokers.ibkr_thread_runner import (
 
 
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_all_open_orders_latest.json")
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
+
+
+class _LiveAllOpenOrdersProbe(_AllOpenOrdersProbe):
+    """Adds same-connection managed-account identity to the shared probe.
+
+    The base probe (shared with the Paper all-open-orders snapshot) never
+    requests account identity. A Live open-order report is otherwise
+    endpoint-bound only, so a completion judge cannot tell it apart from a
+    zero-order snapshot collected from a different Live account on the same
+    port. The raw account id is never persisted; only its SHA-256 fingerprint
+    is exposed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.accounts_ready = Event()
+        self.accounts: list[str] = []
+
+    def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
+        self.accounts = [item.strip() for item in str(accountsList).split(",") if item.strip()]
+        self.accounts_ready.set()
 
 
 @dataclass(frozen=True)
@@ -39,6 +61,7 @@ class IbkrLiveAllOpenOrdersSnapshot:
     connected: bool
     ready: bool
     endpoint_port: int | None
+    account_fingerprint: str | None = None
     orders: tuple[IbkrOpenOrderEvidence, ...] = ()
     blocked_reason: str | None = None
     errors: tuple[str, ...] = field(default_factory=tuple)
@@ -53,6 +76,7 @@ def _blocked(reason: str) -> IbkrLiveAllOpenOrdersSnapshot:
         connected=False,
         ready=False,
         endpoint_port=None,
+        account_fingerprint=None,
         orders=(),
         blocked_reason=reason,
         errors=(),
@@ -78,7 +102,7 @@ def preview_ibkr_live_all_open_orders(
 
     collected: list[str] = []
     for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
-        probe = _AllOpenOrdersProbe()
+        probe = _LiveAllOpenOrdersProbe()
         try:
             try:
                 probe.connect("127.0.0.1", port, 470 + index)
@@ -93,6 +117,14 @@ def preview_ibkr_live_all_open_orders(
             if not probe.connected_ready.wait(timeout) or probe.fatal:
                 collected.extend(probe.errors)
                 continue
+            probe.reqManagedAccts()
+            if not probe.accounts_ready.wait(timeout) or len(probe.accounts) != 1:
+                collected.extend(probe.errors)
+                collected.append(
+                    f"{port}: expected exactly one managed Live account; got {len(probe.accounts)}"
+                )
+                continue
+            account_fingerprint = _account_fingerprint(probe.accounts[0])
             probe.reqAllOpenOrders()
             if not probe.orders_ready.wait(timeout) or probe.fatal:
                 collected.extend(probe.errors)
@@ -102,6 +134,7 @@ def preview_ibkr_live_all_open_orders(
                 connected=True,
                 ready=True,
                 endpoint_port=port,
+                account_fingerprint=account_fingerprint,
                 orders=tuple(probe.orders),
                 blocked_reason=None,
                 errors=tuple(collected + probe.errors),
@@ -118,6 +151,7 @@ def preview_ibkr_live_all_open_orders(
         connected=False,
         ready=False,
         endpoint_port=None,
+        account_fingerprint=None,
         orders=(),
         blocked_reason="no Live endpoint produced a complete open-order snapshot",
         errors=tuple(collected),
@@ -139,6 +173,8 @@ def persist_live_all_open_orders(
         "connected": snapshot.connected,
         "ready": snapshot.ready,
         "endpoint_port": snapshot.endpoint_port,
+        "account_fingerprint": snapshot.account_fingerprint,
+        "raw_account_id_persisted": False,
         "open_order_count": len(snapshot.orders),
         "orders": [asdict(order) for order in snapshot.orders],
         "blocked_reason": snapshot.blocked_reason,
