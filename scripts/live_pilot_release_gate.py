@@ -28,6 +28,14 @@ _LOOKUP_FOUND = "FOUND"
 _LOOKUP_MISSING = "MISSING"
 _LOOKUP_UNKNOWN = "UNKNOWN"
 
+# The complete, closed set of Git tree entry modes with defined meaning for
+# a blob/tree object: 100644 (normal file), 100755 (executable file),
+# 120000 (symbolic link), 160000 (submodule/gitlink), 040000 (subtree). Any
+# other string is not a Git mode this gate can reason about, so it must
+# never be treated as equal to another arbitrary string just because both
+# sides of a base/head comparison happen to match.
+_KNOWN_GIT_TREE_MODES = frozenset({"100644", "100755", "120000", "160000", "040000"})
+
 
 @dataclass(frozen=True)
 class GateResult:
@@ -221,6 +229,8 @@ def fetch_git_tree_entry_at_exact_ref(
     entry = matches[0]
     mode, object_type, object_sha = entry.get("mode"), entry.get("type"), entry.get("sha")
     if not all(isinstance(value, str) for value in (mode, object_type, object_sha)):
+        return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
+    if mode not in _KNOWN_GIT_TREE_MODES:
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)
     if not _is_well_formed_git_sha(object_sha):
         return GitTreeEntryLookup(_LOOKUP_UNKNOWN)

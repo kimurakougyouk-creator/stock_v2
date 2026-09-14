@@ -332,11 +332,77 @@ def test_tree_lookup_missing_path_is_missing(monkeypatch):
             _FakeResponse(_commit_body()),
             _FakeResponse(_tree_body([_settings_entry(), _settings_entry()])),
         ],
+        [
+            _FakeResponse(_commit_body()),
+            _FakeResponse(_tree_body([_settings_entry(mode="not-a-git-mode")])),
+        ],
     ],
 )
 def test_tree_lookup_uncertain_or_malformed_evidence_is_unknown(monkeypatch, responses):
     result, _ = _lookup(monkeypatch, responses)
     assert result.state == gate._LOOKUP_UNKNOWN
+
+
+@pytest.mark.parametrize("mode", sorted(gate._KNOWN_GIT_TREE_MODES))
+def test_tree_lookup_accepts_every_known_git_mode(monkeypatch, mode):
+    """Codex P2 regression: each mode in the allowlist (normal file,
+
+    executable, symlink, submodule, subtree) is accepted as a legitimate
+    Git tree entry mode.
+    """
+    result, _ = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([_settings_entry(mode=mode)]))],
+    )
+    assert result.state == gate._LOOKUP_FOUND
+    assert result.mode == mode
+
+
+@pytest.mark.parametrize(
+    "mode", ["not-a-git-mode", "", "100644 ", " 100644", "100644\n", "0100644", "644"]
+)
+def test_tree_lookup_rejects_non_allowlisted_mode_strings(monkeypatch, mode):
+    """Codex P2 regression: a mode string that is not one of the known,
+
+    meaningful Git tree modes must resolve to UNKNOWN -- never FOUND, no
+    matter how plausible it looks.
+    """
+    result, _ = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([_settings_entry(mode=mode)]))],
+    )
+    assert result.state == gate._LOOKUP_UNKNOWN
+
+
+def test_matching_but_non_allowlisted_mode_never_passes_identity_check(monkeypatch):
+    """Codex P2 regression: base and head reporting the *same* non-allowlisted
+
+    mode string must never be treated as a legitimate match. The fetch layer
+    rejects the bad mode outright (UNKNOWN, not FOUND) on both sides, so the
+    identity comparison can never see it as "PASS because base == head".
+    """
+    bad_mode_entry = _settings_entry(mode="not-a-git-mode")
+
+    base_result, _ = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([bad_mode_entry]))],
+    )
+    assert base_result.state == gate._LOOKUP_UNKNOWN
+
+    head_result, _ = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([bad_mode_entry]))],
+    )
+    assert head_result.state == gate._LOOKUP_UNKNOWN
+
+    status, _ = gate.check_settings_file_unchanged_between_exact_refs(
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+        base_lookup=base_result,
+        head_lookup=head_result,
+    )
+    assert status != gate.PASS
+    assert status == gate.UNKNOWN
 
 
 @pytest.mark.parametrize(
