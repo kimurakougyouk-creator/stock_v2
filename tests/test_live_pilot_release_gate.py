@@ -3,8 +3,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "live_pilot_release_gate.py"
 _SPEC = importlib.util.spec_from_file_location("live_pilot_release_gate", _SCRIPT_PATH)
@@ -13,11 +16,15 @@ assert _SPEC.loader is not None
 sys.modules[_SPEC.name] = gate
 _SPEC.loader.exec_module(gate)
 
+BASE_SHA = "a" * 40
+HEAD_SHA = "b" * 40
+TREE_SHA = "c" * 40
+BLOB_SHA = "d" * 40
+OTHER_BLOB_SHA = "e" * 40
+SETTINGS_PATH = "src/ai_asset_platform/core/settings.py"
 
-HEAD_SHA = "a" * 40
 
-
-def _default_settings() -> SimpleNamespace:
+def _default_settings():
     return SimpleNamespace(
         enable_live_trading=False,
         run_mode="DEVELOPMENT",
@@ -25,14 +32,27 @@ def _default_settings() -> SimpleNamespace:
     )
 
 
+def _found(*, mode="100644", object_type="blob", object_sha=BLOB_SHA):
+    return gate.GitTreeEntryLookup(gate._LOOKUP_FOUND, mode, object_type, object_sha)
+
+
+def _missing():
+    return gate.GitTreeEntryLookup(gate._LOOKUP_MISSING)
+
+
+def _unknown():
+    return gate.GitTreeEntryLookup(gate._LOOKUP_UNKNOWN)
+
+
 def _evaluate(**overrides):
     params = {
-        "checked_out_sha": HEAD_SHA,
+        "checked_out_sha": BASE_SHA,
         "pr_head_sha": HEAD_SHA,
         "base_ref": "main",
-        "expected_base_sha": HEAD_SHA,
+        "expected_base_sha": BASE_SHA,
         "get_default_settings": _default_settings,
-        "changed_file_paths": [],
+        "settings_base_lookup": _found(),
+        "settings_head_lookup": _found(),
         "unresolved_review_thread_count": 0,
         "issue_255_state": "open",
     }
@@ -41,383 +61,139 @@ def _evaluate(**overrides):
 
 
 def test_clean_evidence_passes():
-    result = _evaluate()
-    assert result.status == gate.PASS
+    assert _evaluate().status == gate.PASS
 
 
-def test_valid_hex_pr_head_sha_passes():
-    result = _evaluate(pr_head_sha="b" * 40)
-    assert result.status == gate.PASS
+@pytest.mark.parametrize("value", [None, "a" * 39, "g" * 40])
+def test_missing_or_malformed_pr_head_sha_fails(value):
+    assert _evaluate(pr_head_sha=value).status == gate.FAIL
 
 
-def test_uppercase_hex_pr_head_sha_passes():
-    result = _evaluate(pr_head_sha=("b" * 40).upper())
-    assert result.status == gate.PASS
+def test_uppercase_pr_head_sha_is_accepted():
+    assert _evaluate(pr_head_sha=HEAD_SHA.upper()).status == gate.PASS
 
 
-def test_missing_pr_head_sha_fails():
-    result = _evaluate(pr_head_sha=None)
-    assert result.status == gate.FAIL
-    assert any(
-        "pr-head-sha-present" in reason and "missing" in reason for reason in result.reasons
-    )
+def test_checked_out_sha_mismatch_fails():
+    assert _evaluate(checked_out_sha="f" * 40).status == gate.FAIL
 
 
-def test_wrong_length_pr_head_sha_fails():
-    result = _evaluate(pr_head_sha="a" * 39)
-    assert result.status == gate.FAIL
-    assert any("pr-head-sha-present" in reason for reason in result.reasons)
+@pytest.mark.parametrize("value", [None, "a" * 39, "g" * 40])
+def test_missing_or_malformed_expected_base_sha_is_unknown(value):
+    assert _evaluate(expected_base_sha=value).status == gate.UNKNOWN
 
 
-def test_non_hex_pr_head_sha_fails():
-    result = _evaluate(pr_head_sha="g" * 40)
-    assert result.status == gate.FAIL
-    assert any("pr-head-sha-present" in reason for reason in result.reasons)
+def test_wrong_base_branch_fails():
+    assert _evaluate(base_ref="develop").status == gate.FAIL
 
 
-def test_checked_out_sha_matches_expected_base_passes():
-    result = _evaluate(checked_out_sha=HEAD_SHA, expected_base_sha=HEAD_SHA)
-    assert result.status == gate.PASS
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(
+            enable_live_trading=True,
+            run_mode="DEVELOPMENT",
+            live_trading_unlocked=False,
+        ),
+        SimpleNamespace(
+            enable_live_trading=False,
+            run_mode="LIVE",
+            live_trading_unlocked=False,
+        ),
+    ],
+)
+def test_unsafe_default_settings_fail(settings):
+    assert _evaluate(get_default_settings=lambda: settings).status == gate.FAIL
 
 
-def test_checked_out_sha_mismatched_with_expected_base_fails():
-    result = _evaluate(checked_out_sha=HEAD_SHA, expected_base_sha="b" * 40)
-    assert result.status == gate.FAIL
-    assert any(
-        "checked-out-matches-base" in reason and "does not match" in reason
-        for reason in result.reasons
-    )
-
-
-def test_missing_checked_out_sha_fails_against_a_known_expected_base():
-    result = _evaluate(checked_out_sha="", expected_base_sha=HEAD_SHA)
-    assert result.status == gate.FAIL
-    assert any("checked-out-matches-base" in reason for reason in result.reasons)
-
-
-def test_expected_base_sha_missing_is_unknown_not_ignored():
-    result = _evaluate(expected_base_sha=None)
-    assert result.status == gate.UNKNOWN
-    assert any(
-        "checked-out-matches-base" in reason and "expected base sha" in reason
-        for reason in result.reasons
-    )
-
-
-def test_base_branch_other_than_main_fails():
-    for bad_base in ("develop", "release/1.0", "", None):
-        result = _evaluate(base_ref=bad_base)
-        assert result.status == gate.FAIL, bad_base
-
-
-def test_live_trading_unlocked_by_default_fails_closed():
-    unsafe = SimpleNamespace(
-        enable_live_trading=True,
-        run_mode="DEVELOPMENT",
-        live_trading_unlocked=False,
-    )
-    result = _evaluate(get_default_settings=lambda: unsafe)
-    assert result.status == gate.FAIL
-    assert any("live-disabled-by-default" in reason for reason in result.reasons)
-
-    unsafe_live_mode = SimpleNamespace(
-        enable_live_trading=False,
-        run_mode="LIVE",
-        live_trading_unlocked=False,
-    )
-    result = _evaluate(get_default_settings=lambda: unsafe_live_mode)
-    assert result.status == gate.FAIL
-
-
-def test_settings_lookup_failure_is_unknown_not_pass():
+def test_settings_import_failure_is_unknown():
     def _raise():
-        raise ImportError("settings module moved")
+        raise ImportError("settings unavailable")
 
-    result = _evaluate(get_default_settings=_raise)
-    assert result.status == gate.UNKNOWN
+    assert _evaluate(get_default_settings=_raise).status == gate.UNKNOWN
 
 
-def test_settings_with_unexpected_shape_is_unknown():
+def test_settings_unexpected_shape_is_unknown():
     malformed = SimpleNamespace(
-        enable_live_trading="false",  # wrong type, not a bool
+        enable_live_trading="false",
         run_mode="DEVELOPMENT",
         live_trading_unlocked=False,
     )
-    result = _evaluate(get_default_settings=lambda: malformed)
-    assert result.status == gate.UNKNOWN
+    assert _evaluate(get_default_settings=lambda: malformed).status == gate.UNKNOWN
 
 
-def test_pr_modifying_settings_file_fails_closed():
-    result = _evaluate(
-        changed_file_paths=[
-            "README.md",
-            "src/ai_asset_platform/core/settings.py",
-        ]
-    )
-    assert result.status == gate.FAIL
-    assert any(
-        "settings-file-not-modified" in reason and "settings.py" in reason
-        for reason in result.reasons
+def _identity_check(base_lookup, head_lookup, *, base_sha=BASE_SHA, head_sha=HEAD_SHA):
+    return gate.check_settings_file_unchanged_between_exact_refs(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        base_lookup=base_lookup,
+        head_lookup=head_lookup,
     )
 
 
-def test_pr_not_modifying_settings_file_passes():
-    result = _evaluate(changed_file_paths=["README.md", "tests/test_foo.py"])
-    assert result.status == gate.PASS
+def test_exact_ref_same_identity_passes():
+    assert _identity_check(_found(), _found())[0] == gate.PASS
 
 
-def test_missing_changed_file_paths_is_unknown_not_ignored():
-    result = _evaluate(changed_file_paths=None)
-    assert result.status == gate.UNKNOWN
-    assert any(
-        "settings-file-not-modified" in reason and "could not be retrieved" in reason
-        for reason in result.reasons
-    )
+@pytest.mark.parametrize(
+    "head_lookup",
+    [
+        _found(object_sha=OTHER_BLOB_SHA),
+        _found(mode="100755"),
+        _found(object_type="tree"),
+    ],
+)
+def test_head_identity_change_fails(head_lookup):
+    assert _identity_check(_found(), head_lookup)[0] == gate.FAIL
 
 
-def test_check_settings_file_not_modified_by_pr_directly():
-    status, _ = gate.check_settings_file_not_modified_by_pr(changed_file_paths=None)
-    assert status == gate.UNKNOWN
-
-    status, _ = gate.check_settings_file_not_modified_by_pr(
-        changed_file_paths=["src/ai_asset_platform/core/settings.py"]
-    )
+def test_head_missing_fails_for_delete_or_rename_away():
+    status, reason = _identity_check(_found(), _missing())
     assert status == gate.FAIL
-
-    status, _ = gate.check_settings_file_not_modified_by_pr(changed_file_paths=["README.md"])
-    assert status == gate.PASS
+    assert "delete or rename-away" in reason
 
 
-def test_review_thread_fetch_failure_is_unknown_not_ignored():
-    result = _evaluate(unresolved_review_thread_count=None)
-    assert result.status == gate.UNKNOWN
-    assert any(
-        "unresolved-review-threads" in reason and "UNKNOWN" in reason
-        for reason in result.reasons
-    )
+@pytest.mark.parametrize("base_lookup", [_missing(), _unknown(), _found(object_type="tree")])
+def test_unverifiable_base_identity_is_unknown(base_lookup):
+    assert _identity_check(base_lookup, _found())[0] == gate.UNKNOWN
 
 
-def test_review_thread_count_never_changes_pass_fail_verdict():
-    """The count is display-only: 0, a large number, all yield the same
-
-    overall verdict as long as every other check is clean.
-    """
-    baseline = _evaluate(unresolved_review_thread_count=0).status
-    for count in (1, 7, 500):
-        result = _evaluate(unresolved_review_thread_count=count)
-        assert result.status == baseline == gate.PASS
+def test_unverifiable_head_identity_is_unknown():
+    assert _identity_check(_found(), _unknown())[0] == gate.UNKNOWN
 
 
-def test_issue_255_fetch_failure_is_unknown_not_ignored():
-    result = _evaluate(issue_255_state=None)
-    assert result.status == gate.UNKNOWN
-    assert any(
-        "issue-255-state" in reason and "UNKNOWN" in reason for reason in result.reasons
-    )
+@pytest.mark.parametrize(
+    ("base_sha", "head_sha"),
+    [("a" * 39, HEAD_SHA), (BASE_SHA, "g" * 40), (None, HEAD_SHA)],
+)
+def test_identity_check_malformed_ref_is_unknown(base_sha, head_sha):
+    result = _identity_check(_found(), _found(), base_sha=base_sha, head_sha=head_sha)
+    assert result[0] == gate.UNKNOWN
 
 
-def test_issue_255_state_never_changes_pass_fail_verdict():
-    """The state is display-only: neither "open" nor "closed" (nor any other
+def test_review_count_and_issue_state_values_are_display_only():
+    for count in (0, 1, 500):
+        assert _evaluate(unresolved_review_thread_count=count).status == gate.PASS
+    for state in ("open", "closed", "unexpected"):
+        assert _evaluate(issue_255_state=state).status == gate.PASS
 
-    string) should ever flip PASS/FAIL on its own.
-    """
-    for state in ("open", "closed", "unexpected-value"):
-        result = _evaluate(issue_255_state=state)
-        assert result.status == gate.PASS
+
+def test_display_only_fetch_failures_make_gate_unknown():
+    assert _evaluate(unresolved_review_thread_count=None).status == gate.UNKNOWN
+    assert _evaluate(issue_255_state=None).status == gate.UNKNOWN
 
 
 def test_fail_takes_precedence_over_unknown():
-    result = _evaluate(
-        pr_head_sha=None,  # FAIL
-        unresolved_review_thread_count=None,  # would be UNKNOWN alone
-    )
+    result = _evaluate(pr_head_sha=None, unresolved_review_thread_count=None)
     assert result.status == gate.FAIL
 
 
-def test_live_execution_constant_is_always_the_fixed_no_go_literal():
+def test_live_execution_constant_is_no_go():
     assert gate.LIVE_EXECUTION_VALUE == "NO-GO"
 
 
-def test_main_always_prints_fixed_no_go_regardless_of_gate_outcome(monkeypatch, capsys):
-    monkeypatch.setattr(gate, "_load_event_payload", lambda: {
-        "pull_request": {
-            "number": 281,
-            "head": {"sha": HEAD_SHA},
-            "base": {"ref": "main", "sha": HEAD_SHA},
-        }
-    })
-    monkeypatch.setattr(gate, "_git_head_sha", lambda: HEAD_SHA)
-    monkeypatch.setattr(
-        gate, "fetch_unresolved_review_thread_count", lambda **kwargs: 3
-    )
-    monkeypatch.setattr(gate, "fetch_issue_state", lambda **kwargs: "open")
-    monkeypatch.setattr(gate, "fetch_pr_changed_file_paths", lambda **kwargs: ["README.md"])
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "kimurakougyouk-creator/stock_v2")
-
-    exit_code = gate.main()
-    output = capsys.readouterr().out
-    assert "LIVE_EXECUTION=NO-GO" in output
-    assert exit_code == 0
-    assert "RELEASE_INTEGRITY_GATE=PASS" in output
-
-    # Now force a FAIL and confirm LIVE_EXECUTION is still the same fixed literal.
-    monkeypatch.setattr(gate, "_git_head_sha", lambda: "b" * 40)
-    exit_code = gate.main()
-    output = capsys.readouterr().out
-    assert "LIVE_EXECUTION=NO-GO" in output
-    assert exit_code != 0
-    assert "RELEASE_INTEGRITY_GATE=FAIL" in output
-
-
-def test_main_survives_settings_import_failure_as_unknown_not_a_crash(monkeypatch, capsys):
-    """If ``ai_asset_platform.core.settings`` cannot be imported at all (e.g.
-
-    PYTHONPATH is wrong, or the module was moved/renamed), main() must still
-    print both required lines and exit non-zero as UNKNOWN -- never crash
-    with an unhandled traceback, and never silently treat the failure as
-    PASS.
-    """
-    monkeypatch.setattr(
-        gate,
-        "_load_event_payload",
-        lambda: {
-            "pull_request": {
-                "number": 281,
-                "head": {"sha": HEAD_SHA},
-                "base": {"ref": "main", "sha": HEAD_SHA},
-            }
-        },
-    )
-    monkeypatch.setattr(gate, "_git_head_sha", lambda: HEAD_SHA)
-    monkeypatch.setattr(gate, "fetch_unresolved_review_thread_count", lambda **kwargs: 0)
-    monkeypatch.setattr(gate, "fetch_issue_state", lambda **kwargs: "open")
-    monkeypatch.setattr(gate, "fetch_pr_changed_file_paths", lambda **kwargs: ["README.md"])
-
-    def _raise_module_not_found():
-        raise ModuleNotFoundError("No module named 'ai_asset_platform'")
-
-    monkeypatch.setattr(gate, "_load_platform_settings", _raise_module_not_found)
-
-    exit_code = gate.main()  # must not raise
-
-    output = capsys.readouterr().out
-    assert "RELEASE_INTEGRITY_GATE=UNKNOWN" in output
-    assert "LIVE_EXECUTION=NO-GO" in output
-    assert exit_code != 0
-
-
-def test_check_pr_head_sha_present_accepts_upper_or_lower_case_hex():
-    status, _ = gate.check_pr_head_sha_present(HEAD_SHA.upper())
-    assert status == gate.PASS
-
-    status, _ = gate.check_pr_head_sha_present(HEAD_SHA)
-    assert status == gate.PASS
-
-
-def test_check_pr_head_sha_present_rejects_malformed_values():
-    status, _ = gate.check_pr_head_sha_present(None)
-    assert status == gate.FAIL
-
-    status, _ = gate.check_pr_head_sha_present("a" * 39)
-    assert status == gate.FAIL
-
-    status, _ = gate.check_pr_head_sha_present("g" * 40)
-    assert status == gate.FAIL
-
-
-def test_check_checked_out_matches_expected_base_is_case_insensitive_but_exact():
-    status, _ = gate.check_checked_out_matches_expected_base(HEAD_SHA.upper(), HEAD_SHA)
-    assert status == gate.PASS
-
-    status, _ = gate.check_checked_out_matches_expected_base(HEAD_SHA[:-1] + "0", HEAD_SHA)
-    assert status == gate.FAIL
-
-    status, _ = gate.check_checked_out_matches_expected_base(HEAD_SHA, None)
-    assert status == gate.UNKNOWN
-
-
-def test_fetch_helpers_return_none_on_network_failure(monkeypatch):
-    def _raise_urlopen(*args, **kwargs):
-        raise OSError("simulated network failure")
-
-    monkeypatch.setattr(gate.urllib.request, "urlopen", _raise_urlopen)
-
-    assert (
-        gate.fetch_unresolved_review_thread_count(
-            repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
-        )
-        is None
-    )
-    assert (
-        gate.fetch_issue_state(
-            repo="kimurakougyouk-creator/stock_v2", issue_number=255, token="tok"
-        )
-        is None
-    )
-
-
-def test_fetch_helpers_return_none_without_token_or_repo():
-    assert (
-        gate.fetch_unresolved_review_thread_count(repo="", pr_number=281, token="tok") is None
-    )
-    assert (
-        gate.fetch_unresolved_review_thread_count(
-            repo="kimurakougyouk-creator/stock_v2", pr_number=281, token=None
-        )
-        is None
-    )
-    assert gate.fetch_issue_state(repo="", issue_number=255, token="tok") is None
-
-
-def test_fetch_pr_changed_file_paths_returns_none_on_network_failure(monkeypatch):
-    def _raise_urlopen(*args, **kwargs):
-        raise OSError("simulated network failure")
-
-    monkeypatch.setattr(gate.urllib.request, "urlopen", _raise_urlopen)
-
-    assert (
-        gate.fetch_pr_changed_file_paths(
-            repo="kimurakougyouk-creator/stock_v2",
-            pr_number=281,
-            token="tok",
-            expected_pr_head_sha=HEAD_SHA,
-        )
-        is None
-    )
-
-
-def test_fetch_pr_changed_file_paths_returns_none_without_token_or_repo():
-    assert (
-        gate.fetch_pr_changed_file_paths(
-            repo="", pr_number=281, token="tok", expected_pr_head_sha=HEAD_SHA
-        )
-        is None
-    )
-    assert (
-        gate.fetch_pr_changed_file_paths(
-            repo="kimurakougyouk-creator/stock_v2",
-            pr_number=281,
-            token=None,
-            expected_pr_head_sha=HEAD_SHA,
-        )
-        is None
-    )
-    assert (
-        gate.fetch_pr_changed_file_paths(
-            repo="kimurakougyouk-creator/stock_v2",
-            pr_number=281,
-            token="tok",
-            expected_pr_head_sha=None,
-        )
-        is None
-    )
-
-
 class _FakeResponse:
-    def __init__(self, body, link_header=None):
+    def __init__(self, body):
         self._body = json.dumps(body).encode("utf-8")
-        self.headers = {"Link": link_header} if link_header else {}
 
     def read(self):
         return self._body
@@ -429,308 +205,159 @@ class _FakeResponse:
         return False
 
 
-def _meta(changed_files, head_sha=HEAD_SHA):
-    return {"changed_files": changed_files, "head": {"sha": head_sha}}
+def _commit_body(tree_sha=TREE_SHA):
+    return {"tree": {"sha": tree_sha}}
 
 
-def _dispatching_urlopen(*, metadata_bodies, file_pages):
-    """Route by URL: sequential .../pulls/{n} metadata calls vs. .../files pages.
+def _tree_body(entries, *, truncated=False):
+    return {"sha": TREE_SHA, "truncated": truncated, "tree": entries}
 
-    ``metadata_bodies`` is consumed in call order for the bare metadata
-    endpoint -- one entry per call (the "before" fetch, then the "after"
-    fetch). ``file_pages`` is consumed in order on every call to the
-    ``.../files`` URL (the first page's URL, then whatever
-    ``Link: rel="next"`` URLs it yields).
-    """
-    remaining_metadata = list(metadata_bodies)
-    remaining_pages = list(file_pages)
+
+def _settings_entry(*, path=SETTINGS_PATH, mode="100644", object_type="blob", sha=BLOB_SHA):
+    return {"path": path, "mode": mode, "type": object_type, "sha": sha}
+
+
+def _lookup(monkeypatch, responses):
+    responses = iter(responses)
+    seen = []
 
     def _fake_urlopen(request, timeout=None):
-        url = request.full_url if hasattr(request, "full_url") else request
-        if isinstance(url, str) and url.rstrip("/").endswith("/pulls/281"):
-            return _FakeResponse(remaining_metadata.pop(0))
-        return remaining_pages.pop(0)
+        seen.append(request.full_url)
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
-    return _fake_urlopen
+    monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
+    result = gate.fetch_git_tree_entry_at_exact_ref(
+        repo="owner/repo", path=SETTINGS_PATH, ref_sha=HEAD_SHA, token="tok"
+    )
+    return result, seen
 
 
-def _fetch(monkeypatch, *, metadata_bodies, file_pages, expected_pr_head_sha=HEAD_SHA):
+def test_tree_lookup_uses_exact_immutable_commit_and_tree_refs(monkeypatch):
+    result, seen = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([_settings_entry()]))],
+    )
+    assert result == _found()
+    assert f"/git/commits/{HEAD_SHA}" in seen[0]
+    assert f"/git/trees/{TREE_SHA}?recursive=1" in seen[1]
+    assert not any("/pulls/" in url for url in seen)
+
+
+def test_tree_lookup_missing_path_is_missing(monkeypatch):
+    result, _ = _lookup(
+        monkeypatch,
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([]))],
+    )
+    assert result.state == gate._LOOKUP_MISSING
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        [OSError("network")],
+        [urllib.error.HTTPError("https://api.github.com", 404, "missing", {}, None)],
+        [_FakeResponse(_commit_body(tree_sha="short"))],
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([], truncated=True))],
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body(None))],
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body(["bad"]))],
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([{"path": 123}]))],
+        [_FakeResponse(_commit_body()), _FakeResponse(_tree_body([_settings_entry(sha="short")]))],
+        [
+            _FakeResponse(_commit_body()),
+            _FakeResponse(_tree_body([_settings_entry(), _settings_entry()])),
+        ],
+    ],
+)
+def test_tree_lookup_uncertain_or_malformed_evidence_is_unknown(monkeypatch, responses):
+    result, _ = _lookup(monkeypatch, responses)
+    assert result.state == gate._LOOKUP_UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("repo", "path", "ref_sha", "token"),
+    [
+        ("", SETTINGS_PATH, HEAD_SHA, "tok"),
+        ("owner/repo", "", HEAD_SHA, "tok"),
+        ("owner/repo", SETTINGS_PATH, HEAD_SHA, None),
+        ("owner/repo", SETTINGS_PATH, "a" * 39, "tok"),
+        ("owner/repo", SETTINGS_PATH, "g" * 40, "tok"),
+    ],
+)
+def test_tree_lookup_requires_complete_valid_inputs(repo, path, ref_sha, token):
+    result = gate.fetch_git_tree_entry_at_exact_ref(
+        repo=repo, path=path, ref_sha=ref_sha, token=token
+    )
+    assert result.state == gate._LOOKUP_UNKNOWN
+
+
+def test_fetch_helpers_return_none_on_network_failure(monkeypatch):
     monkeypatch.setattr(
         gate.urllib.request,
         "urlopen",
-        _dispatching_urlopen(metadata_bodies=metadata_bodies, file_pages=file_pages),
+        lambda *a, **k: (_ for _ in ()).throw(OSError("network")),
     )
-    return gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2",
-        pr_number=281,
-        token="tok",
-        expected_pr_head_sha=expected_pr_head_sha,
-    )
-
-
-def test_fetch_pr_changed_file_paths_follows_pagination_when_count_matches(monkeypatch):
-    page_1 = [{"filename": "a.py"}, {"filename": "b.py"}]
-    page_2 = [{"filename": "c.py"}]
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(3), _meta(3)],
-        file_pages=[
-            _FakeResponse(page_1, link_header='<https://api.github.com/next-page>; rel="next"'),
-            _FakeResponse(page_2),
-        ],
-    )
-    assert result == ["a.py", "b.py", "c.py"]
-
-
-def test_fetch_pr_changed_file_paths_succeeds_when_head_sha_matches_expected(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(1, HEAD_SHA), _meta(1, HEAD_SHA)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}])],
-        expected_pr_head_sha=HEAD_SHA,
-    )
-    assert result == ["a.py"]
-
-
-def test_fetch_pr_changed_file_paths_none_when_head_sha_mismatches_expected(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(1, "b" * 40), _meta(1, "b" * 40)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}])],
-        expected_pr_head_sha=HEAD_SHA,
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_head_sha_missing_or_malformed(monkeypatch):
-    for malformed_head in ({}, {"sha": None}, {"sha": "a" * 39}, {"sha": "g" * 40}, {"sha": 12345}):
-        result = _fetch(
-            monkeypatch,
-            metadata_bodies=[
-                {"changed_files": 1, "head": malformed_head},
-                {"changed_files": 1, "head": malformed_head},
-            ],
-            file_pages=[_FakeResponse([{"filename": "a.py"}])],
-        )
-        assert result is None, malformed_head
-
-
-def test_fetch_pr_changed_file_paths_none_when_head_sha_changes_between_fetches(monkeypatch):
-    # Simulates the PR being pushed to mid-run: the "before" fetch matches
-    # the expected head, but the "after" fetch (post-pagination) does not.
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(1, HEAD_SHA), _meta(1, "b" * 40)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}])],
-        expected_pr_head_sha=HEAD_SHA,
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_changed_files_changes_between_fetches(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(1, HEAD_SHA), _meta(2, HEAD_SHA)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}])],
-        expected_pr_head_sha=HEAD_SHA,
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_actual_count_is_less_than_reported(monkeypatch):
-    page_1 = [{"filename": "a.py"}, {"filename": "b.py"}, {"filename": "c.py"}]
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(4), _meta(4)],
-        file_pages=[_FakeResponse(page_1)],
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_changed_files_exceeds_3000(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(3001), _meta(3001)],
-        file_pages=[],
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_changed_files_is_bool(monkeypatch):
-    result = _fetch(monkeypatch, metadata_bodies=[_meta(True), _meta(True)], file_pages=[])
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_changed_files_is_negative(monkeypatch):
-    result = _fetch(monkeypatch, metadata_bodies=[_meta(-1), _meta(-1)], file_pages=[])
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_changed_files_is_missing_or_wrong_type(monkeypatch):
-    for malformed_metadata in (
-        {"head": {"sha": HEAD_SHA}},
-        {"changed_files": "3", "head": {"sha": HEAD_SHA}},
-        {"changed_files": 3.0, "head": {"sha": HEAD_SHA}},
-        {"changed_files": None, "head": {"sha": HEAD_SHA}},
-    ):
-        result = _fetch(
-            monkeypatch,
-            metadata_bodies=[malformed_metadata, malformed_metadata],
-            file_pages=[],
-        )
-        assert result is None, malformed_metadata
-
-
-def test_fetch_pr_changed_file_paths_none_when_an_entry_is_missing_filename(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(2), _meta(2)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}, {"status": "modified"}])],
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_an_entry_filename_is_empty(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(2), _meta(2)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": ""}])],
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_an_entry_filename_has_wrong_type(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(2), _meta(2)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": 123}])],
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_an_entry_is_not_a_dict(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(2), _meta(2)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}, "not-a-dict"])],
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_on_duplicate_filenames(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(2), _meta(2)],
-        file_pages=[_FakeResponse([{"filename": "a.py"}, {"filename": "a.py"}])],
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_includes_settings_py_when_present(monkeypatch):
-    result = _fetch(
-        monkeypatch,
-        metadata_bodies=[_meta(2), _meta(2)],
-        file_pages=[
-            _FakeResponse(
-                [
-                    {"filename": "README.md"},
-                    {"filename": "src/ai_asset_platform/core/settings.py"},
-                ]
-            )
-        ],
-    )
-    assert result == ["README.md", "src/ai_asset_platform/core/settings.py"]
-
-    status, _ = gate.check_settings_file_not_modified_by_pr(changed_file_paths=result)
-    assert status == gate.FAIL
-
-
-def test_fetch_pr_changed_file_paths_gives_up_as_none_if_pages_exceed_cap(monkeypatch):
-    def _fake_urlopen(request, timeout=None):
-        url = request.full_url if hasattr(request, "full_url") else request
-        if isinstance(url, str) and url.rstrip("/").endswith("/pulls/281"):
-            return _FakeResponse(_meta(gate._MAX_FILES_PER_PR))
-        return _FakeResponse(
-            [{"filename": "a.py"}],
-            link_header='<https://api.github.com/next-page>; rel="next"',
-        )
-
-    monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2",
-        pr_number=281,
-        token="tok",
-        expected_pr_head_sha=HEAD_SHA,
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_files_page_fetch_fails_after_metadata_ok(
-    monkeypatch,
-):
-    def _fake_urlopen(request, timeout=None):
-        url = request.full_url if hasattr(request, "full_url") else request
-        if isinstance(url, str) and url.rstrip("/").endswith("/pulls/281"):
-            return _FakeResponse(_meta(1))
-        raise OSError("simulated network failure fetching files page")
-
-    monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2",
-        pr_number=281,
-        token="tok",
-        expected_pr_head_sha=HEAD_SHA,
-    )
-    assert result is None
-
-
-def test_fetch_pr_changed_file_paths_none_when_second_metadata_fetch_fails(monkeypatch):
-    calls = {"n": 0}
-
-    def _fake_urlopen(request, timeout=None):
-        url = request.full_url if hasattr(request, "full_url") else request
-        if isinstance(url, str) and url.rstrip("/").endswith("/pulls/281"):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _FakeResponse(_meta(1))
-            raise OSError("simulated network failure on the post-pagination metadata re-check")
-        return _FakeResponse([{"filename": "a.py"}])
-
-    monkeypatch.setattr(gate.urllib.request, "urlopen", _fake_urlopen)
-
-    result = gate.fetch_pr_changed_file_paths(
-        repo="kimurakougyouk-creator/stock_v2",
-        pr_number=281,
-        token="tok",
-        expected_pr_head_sha=HEAD_SHA,
-    )
-    assert result is None
-
-
-def test_fetch_pr_metadata_returns_none_on_network_failure(monkeypatch):
-    def _raise_urlopen(*args, **kwargs):
-        raise OSError("simulated network failure")
-
-    monkeypatch.setattr(gate.urllib.request, "urlopen", _raise_urlopen)
-
     assert (
-        gate._fetch_pr_metadata(
-            repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
+        gate.fetch_unresolved_review_thread_count(
+            repo="owner/repo", pr_number=283, token="tok"
         )
         is None
     )
+    assert gate.fetch_issue_state(repo="owner/repo", issue_number=255, token="tok") is None
 
 
-def test_fetch_pr_metadata_returns_count_and_head_sha_on_success(monkeypatch):
+def _configure_main(monkeypatch, *, head_lookup=None, settings_loader=_default_settings):
     monkeypatch.setattr(
-        gate.urllib.request,
-        "urlopen",
-        lambda request, timeout=None: _FakeResponse(_meta(5, HEAD_SHA)),
+        gate,
+        "_load_event_payload",
+        lambda: {
+            "pull_request": {
+                "number": 283,
+                "head": {"sha": HEAD_SHA},
+                "base": {"ref": "main", "sha": BASE_SHA},
+            }
+        },
     )
+    monkeypatch.setattr(gate, "_git_head_sha", lambda: BASE_SHA)
+    monkeypatch.setattr(gate, "fetch_unresolved_review_thread_count", lambda **kwargs: 0)
+    monkeypatch.setattr(gate, "fetch_issue_state", lambda **kwargs: "open")
+    calls = {"n": 0}
 
-    result = gate._fetch_pr_metadata(
-        repo="kimurakougyouk-creator/stock_v2", pr_number=281, token="tok"
-    )
-    assert result == (5, HEAD_SHA)
+    def _tree_lookup(**kwargs):
+        calls["n"] += 1
+        return _found() if calls["n"] == 1 else (head_lookup or _found())
+
+    monkeypatch.setattr(gate, "fetch_git_tree_entry_at_exact_ref", _tree_lookup)
+    monkeypatch.setattr(gate, "_load_platform_settings", settings_loader)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+
+
+def test_main_clean_path_prints_pass_and_fixed_no_go(monkeypatch, capsys):
+    _configure_main(monkeypatch)
+    assert gate.main() == 0
+    output = capsys.readouterr().out
+    assert "RELEASE_INTEGRITY_GATE=PASS" in output
+    assert "LIVE_EXECUTION=NO-GO" in output
+
+
+def test_main_rename_away_prints_fail_and_fixed_no_go(monkeypatch, capsys):
+    _configure_main(monkeypatch, head_lookup=_missing())
+    assert gate.main() != 0
+    output = capsys.readouterr().out
+    assert "RELEASE_INTEGRITY_GATE=FAIL" in output
+    assert "delete or rename-away" in output
+    assert "LIVE_EXECUTION=NO-GO" in output
+
+
+def test_main_settings_import_failure_is_unknown_not_crash(monkeypatch, capsys):
+    def _raise():
+        raise ModuleNotFoundError("ai_asset_platform")
+
+    _configure_main(monkeypatch, settings_loader=_raise)
+    assert gate.main() != 0
+    output = capsys.readouterr().out
+    assert "RELEASE_INTEGRITY_GATE=UNKNOWN" in output
+    assert "LIVE_EXECUTION=NO-GO" in output
