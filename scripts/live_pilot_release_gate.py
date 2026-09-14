@@ -72,7 +72,15 @@ _ISSUE_255_NUMBER = 255
 # the gate's own workflow/script (or other protected paths) is a separate,
 # later change.
 _LIVE_SAFETY_SETTINGS_PATH = "src/ai_asset_platform/core/settings.py"
-_MAX_PR_FILES_PAGES = 50  # 50 * 100 = 5000 files; well past any realistic PR here.
+
+# GitHub's "List pull request files" endpoint returns at most this many
+# files for a single PR, however many pages that spans, and silently stops
+# paginating beyond it -- it does not error. A listing derived from it can
+# therefore never be proven complete for a PR that changed more files than
+# this, regardless of how many pages are fetched.
+_MAX_FILES_PER_PR = 3000
+_FILES_PER_PAGE = 100
+_MAX_PR_FILES_PAGES = _MAX_FILES_PER_PR // _FILES_PER_PAGE
 
 
 @dataclass(frozen=True)
@@ -266,19 +274,75 @@ def _next_page_url(link_header: str | None) -> str | None:
     return None
 
 
+def _fetch_pr_changed_files_count(
+    *, repo: str, pr_number: int, token: str | None
+) -> int | None:
+    """Best-effort read-only lookup of the PR's own ``changed_files`` count.
+
+    This is the PR metadata endpoint's own tally, independent of the
+    paginated files listing below. It is the only way to prove that listing
+    is complete, so any doubt about this count -- a failed request,
+    malformed JSON, a missing key, or a value that is not a non-negative,
+    non-boolean int -- must return ``None`` rather than a guessed value.
+    """
+    owner, _, name = str(repo or "").partition("/")
+    if not owner or not name or not pr_number or not token:
+        return None
+    url = f"https://api.github.com/repos/{owner}/{name}/pulls/{pr_number}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "live-pilot-release-gate",
+    }
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=_GITHUB_API_TIMEOUT_SECONDS) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    count = body.get("changed_files")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return None
+    return count
+
+
 def fetch_pr_changed_file_paths(
     *, repo: str, pr_number: int, token: str | None
 ) -> list[str] | None:
     """Best-effort read-only lookup of every file path changed by the PR.
 
-    Returns ``None`` -- never a partial/truncated list -- if the complete
-    set of changed files cannot be established. A truncated list could
-    silently hide that a later, unfetched page changed a protected file, so
-    an incomplete fetch must be treated the same as a failed one.
+    Returns ``None`` -- never a partial, truncated, or otherwise doubtful
+    list -- unless completeness can actually be proven:
+
+    - the PR's own reported ``changed_files`` count must itself be
+      established (see ``_fetch_pr_changed_files_count``) and must not
+      exceed the files API's hard 3000-file ceiling (beyond that, no amount
+      of pagination can prove completeness);
+    - every page of the paginated files listing must be fetched within the
+      page budget implied by that ceiling;
+    - every entry on every page must be a dict with a non-empty string
+      ``filename`` -- a single malformed entry invalidates the whole
+      listing rather than being silently skipped;
+    - the collected filenames must contain no duplicates; and
+    - the final count of collected filenames must exactly equal the PR's
+      own reported ``changed_files`` count.
+
+    Any of these failing means completeness cannot be proven, so the whole
+    result is ``None`` -- never a partial list a caller might mistake for
+    complete.
     """
     owner, _, name = str(repo or "").partition("/")
     if not owner or not name or not pr_number or not token:
         return None
+
+    expected_count = _fetch_pr_changed_files_count(repo=repo, pr_number=pr_number, token=token)
+    if expected_count is None:
+        return None
+    if expected_count > _MAX_FILES_PER_PR:
+        return None
+
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {token}",
@@ -286,7 +350,8 @@ def fetch_pr_changed_file_paths(
     }
     paths: list[str] = []
     url: str | None = (
-        f"https://api.github.com/repos/{owner}/{name}/pulls/{pr_number}/files?per_page=100"
+        f"https://api.github.com/repos/{owner}/{name}/pulls/{pr_number}/files"
+        f"?per_page={_FILES_PER_PAGE}"
     )
     pages_fetched = 0
     while url:
@@ -302,10 +367,19 @@ def fetch_pr_changed_file_paths(
         if not isinstance(body, list):
             return None
         for entry in body:
-            if isinstance(entry, dict) and isinstance(entry.get("filename"), str):
-                paths.append(entry["filename"])
+            if not isinstance(entry, dict):
+                return None
+            filename = entry.get("filename")
+            if not isinstance(filename, str) or not filename:
+                return None
+            paths.append(filename)
         pages_fetched += 1
         url = _next_page_url(link_header)
+
+    if len(set(paths)) != len(paths):
+        return None
+    if len(paths) != expected_count:
+        return None
     return paths
 
 
