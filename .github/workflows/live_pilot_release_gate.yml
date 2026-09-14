@@ -4,9 +4,26 @@ name: live_pilot_release_gate
 # gates Live execution, never comments on the PR, never re-runs pytest (that
 # is protect-main's required "pytest" check), and never opens a broker
 # connection. See scripts/live_pilot_release_gate.py for the actual checks.
+#
+# Codex P2: a PR must not be able to modify this gate's own behavior (this
+# workflow file, the gate script, or the settings module it reads) and have
+# that modified version run against itself. This job therefore:
+#
+#   - triggers on `pull_request_target` instead of `pull_request`, so the
+#     workflow definition that actually executes is always read from the
+#     base branch (main) at the time the run starts, never from the PR;
+#   - checks out the default ref (main's current HEAD) with no `ref:`
+#     override, so the code that runs -- this workflow file, this script,
+#     and `src/ai_asset_platform/core/settings.py` -- is always main's own
+#     version. The PR's branch/commits are never checked out and no file
+#     from the PR tree is read or imported anywhere in this job.
+#
+# The PR's head sha, base ref, and number are still read, but only from the
+# `pull_request_target` event payload (`github.event.pull_request.*`), never
+# from the PR's file tree.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
     branches: [main]
 
@@ -19,10 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check out the exact PR head commit
+      - name: Check out main (never the PR's branch/commits)
         uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
 
       - uses: actions/setup-python@v7
         with:

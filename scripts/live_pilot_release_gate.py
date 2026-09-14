@@ -10,12 +10,21 @@ This script is advisory only:
 - ``LIVE_EXECUTION`` is always reported as the fixed literal ``NO-GO``.
   Nothing in this module can compute or assign any other value for it.
 
-It checks three things that actually determine PASS/FAIL/UNKNOWN:
+This job runs under ``pull_request_target`` and checks out only the trusted
+base (main), never the PR's own branch/commits -- so a PR cannot modify this
+gate's own behavior (this script, the workflow file, or the settings module
+it reads) and have that modified version run against itself. Accordingly:
 
-1. The checked-out commit is exactly the pull request's current head commit
-   (not a synthetic merge commit and not a stale checkout).
-2. The pull request's base branch is exactly ``main``.
-3. The repository's default ``PlatformSettings`` still disables Live trading
+It checks four things that actually determine PASS/FAIL/UNKNOWN:
+
+1. The PR's head sha was recognized: the event payload gave us a non-empty,
+   well-formed 40-character hex commit sha to identify the PR commit by.
+   This does NOT check out or inspect that commit's code in any way.
+2. The checked-out commit (always main/base, never the PR) is exactly the
+   base commit the event payload says main was at when the run started.
+3. The pull request's base branch is exactly ``main``.
+4. The repository's default ``PlatformSettings`` -- imported from this
+   trusted base checkout, never from the PR -- still disables Live trading
    out of the box (``enable_live_trading is False`` and
    ``run_mode != "LIVE"``, i.e. ``live_trading_unlocked is False``).
 
@@ -61,17 +70,49 @@ class GateResult:
     reasons: tuple[str, ...]
 
 
-def check_exact_head(checked_out_sha: str, pr_head_sha: str | None) -> tuple[str, str]:
-    """Fail unless the checked-out commit is exactly the PR's head commit."""
-    expected = str(pr_head_sha or "").strip().lower()
+def _is_well_formed_git_sha(value: str) -> bool:
+    return len(value) == 40 and all(ch in "0123456789abcdef" for ch in value)
+
+
+def check_pr_head_sha_present(pr_head_sha: str | None) -> tuple[str, str]:
+    """Verify the PR's head sha was recognized from the event payload.
+
+    This job intentionally never checks out the PR's own branch/commits (see
+    the module docstring and ``check_checked_out_matches_expected_base``
+    below for what actually gets checked out and verified: the trusted base
+    commit). So this check does NOT -- and cannot -- prove that any
+    checked-out code equals the PR's head commit. It only confirms that the
+    ``pull_request_target`` event payload gave us a non-empty, well-formed
+    40-character hex commit sha to identify which PR commit this run is
+    about.
+    """
+    candidate = str(pr_head_sha or "").strip()
+    if not candidate:
+        return FAIL, "PR head sha is missing from the event payload"
+    if not _is_well_formed_git_sha(candidate.lower()):
+        return FAIL, f"PR head sha {candidate!r} is not a well-formed 40-character hex commit sha"
+    return PASS, f"PR head sha is present and well-formed ({candidate.lower()})"
+
+
+def check_checked_out_matches_expected_base(
+    checked_out_sha: str, expected_base_sha: str | None
+) -> tuple[str, str]:
+    """Verify the checked-out commit is exactly the PR's base commit.
+
+    This job's checkout step deliberately checks out the trusted base
+    (main), never the PR's branch/commits. This proves that trusted checkout
+    is exactly the commit the ``pull_request_target`` event payload says the
+    base was at -- not a stale, unexpected, or (were the trigger ever
+    changed back) PR-controlled commit -- rather than proving anything about
+    the PR's own code.
+    """
+    expected = str(expected_base_sha or "").strip().lower()
     checked = str(checked_out_sha or "").strip().lower()
     if not expected:
-        return FAIL, "PR head sha is missing from the event payload"
-    if not checked:
-        return FAIL, "checked-out git HEAD could not be determined"
-    if checked != expected:
-        return FAIL, f"checked-out sha {checked!r} does not match PR head sha {expected!r}"
-    return PASS, f"checked-out sha matches PR head sha exactly ({checked})"
+        return UNKNOWN, "expected base sha (event payload's pull_request.base.sha) is missing"
+    if checked and checked == expected:
+        return PASS, f"checked-out sha matches the expected base sha exactly ({checked})"
+    return FAIL, f"checked-out sha {checked!r} does not match expected base sha {expected!r}"
 
 
 def check_base_branch(base_ref: str | None) -> tuple[str, str]:
@@ -177,6 +218,7 @@ def evaluate_release_gate(
     checked_out_sha: str,
     pr_head_sha: str | None,
     base_ref: str | None,
+    expected_base_sha: str | None,
     get_default_settings: Callable[[], object],
     unresolved_review_thread_count: int | None,
     issue_255_state: str | None,
@@ -191,9 +233,13 @@ def evaluate_release_gate(
     reasons: list[str] = []
     statuses: list[str] = []
 
-    status, reason = check_exact_head(checked_out_sha, pr_head_sha)
+    status, reason = check_pr_head_sha_present(pr_head_sha)
     statuses.append(status)
-    reasons.append(f"exact-head: {reason}")
+    reasons.append(f"pr-head-sha-present: {reason}")
+
+    status, reason = check_checked_out_matches_expected_base(checked_out_sha, expected_base_sha)
+    statuses.append(status)
+    reasons.append(f"checked-out-matches-base: {reason}")
 
     status, reason = check_base_branch(base_ref)
     statuses.append(status)
@@ -282,6 +328,7 @@ def main() -> int:
 
     base = pull_request.get("base")
     base_ref = base.get("ref") if isinstance(base, dict) else None
+    expected_base_sha = base.get("sha") if isinstance(base, dict) else None
 
     pr_number = pull_request.get("number")
 
@@ -305,6 +352,7 @@ def main() -> int:
         checked_out_sha=checked_out_sha,
         pr_head_sha=pr_head_sha,
         base_ref=base_ref,
+        expected_base_sha=expected_base_sha,
         get_default_settings=_load_platform_settings,
         unresolved_review_thread_count=unresolved_count,
         issue_255_state=issue_state,

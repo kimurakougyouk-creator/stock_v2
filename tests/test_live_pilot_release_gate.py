@@ -29,6 +29,7 @@ def _evaluate(**overrides):
         "checked_out_sha": HEAD_SHA,
         "pr_head_sha": HEAD_SHA,
         "base_ref": "main",
+        "expected_base_sha": HEAD_SHA,
         "get_default_settings": _default_settings,
         "unresolved_review_thread_count": 0,
         "issue_255_state": "open",
@@ -42,20 +43,63 @@ def test_clean_evidence_passes():
     assert result.status == gate.PASS
 
 
-def test_exact_head_mismatch_fails():
+def test_valid_hex_pr_head_sha_passes():
     result = _evaluate(pr_head_sha="b" * 40)
-    assert result.status == gate.FAIL
-    assert any("exact-head" in reason and "does not match" in reason for reason in result.reasons)
+    assert result.status == gate.PASS
 
 
-def test_missing_checked_out_sha_fails():
-    result = _evaluate(checked_out_sha="")
-    assert result.status == gate.FAIL
+def test_uppercase_hex_pr_head_sha_passes():
+    result = _evaluate(pr_head_sha=("b" * 40).upper())
+    assert result.status == gate.PASS
 
 
 def test_missing_pr_head_sha_fails():
     result = _evaluate(pr_head_sha=None)
     assert result.status == gate.FAIL
+    assert any(
+        "pr-head-sha-present" in reason and "missing" in reason for reason in result.reasons
+    )
+
+
+def test_wrong_length_pr_head_sha_fails():
+    result = _evaluate(pr_head_sha="a" * 39)
+    assert result.status == gate.FAIL
+    assert any("pr-head-sha-present" in reason for reason in result.reasons)
+
+
+def test_non_hex_pr_head_sha_fails():
+    result = _evaluate(pr_head_sha="g" * 40)
+    assert result.status == gate.FAIL
+    assert any("pr-head-sha-present" in reason for reason in result.reasons)
+
+
+def test_checked_out_sha_matches_expected_base_passes():
+    result = _evaluate(checked_out_sha=HEAD_SHA, expected_base_sha=HEAD_SHA)
+    assert result.status == gate.PASS
+
+
+def test_checked_out_sha_mismatched_with_expected_base_fails():
+    result = _evaluate(checked_out_sha=HEAD_SHA, expected_base_sha="b" * 40)
+    assert result.status == gate.FAIL
+    assert any(
+        "checked-out-matches-base" in reason and "does not match" in reason
+        for reason in result.reasons
+    )
+
+
+def test_missing_checked_out_sha_fails_against_a_known_expected_base():
+    result = _evaluate(checked_out_sha="", expected_base_sha=HEAD_SHA)
+    assert result.status == gate.FAIL
+    assert any("checked-out-matches-base" in reason for reason in result.reasons)
+
+
+def test_expected_base_sha_missing_is_unknown_not_ignored():
+    result = _evaluate(expected_base_sha=None)
+    assert result.status == gate.UNKNOWN
+    assert any(
+        "checked-out-matches-base" in reason and "expected base sha" in reason
+        for reason in result.reasons
+    )
 
 
 def test_base_branch_other_than_main_fails():
@@ -141,7 +185,7 @@ def test_issue_255_state_never_changes_pass_fail_verdict():
 
 def test_fail_takes_precedence_over_unknown():
     result = _evaluate(
-        pr_head_sha="b" * 40,  # FAIL
+        pr_head_sha=None,  # FAIL
         unresolved_review_thread_count=None,  # would be UNKNOWN alone
     )
     assert result.status == gate.FAIL
@@ -156,7 +200,7 @@ def test_main_always_prints_fixed_no_go_regardless_of_gate_outcome(monkeypatch, 
         "pull_request": {
             "number": 281,
             "head": {"sha": HEAD_SHA},
-            "base": {"ref": "main"},
+            "base": {"ref": "main", "sha": HEAD_SHA},
         }
     })
     monkeypatch.setattr(gate, "_git_head_sha", lambda: HEAD_SHA)
@@ -197,7 +241,7 @@ def test_main_survives_settings_import_failure_as_unknown_not_a_crash(monkeypatc
             "pull_request": {
                 "number": 281,
                 "head": {"sha": HEAD_SHA},
-                "base": {"ref": "main"},
+                "base": {"ref": "main", "sha": HEAD_SHA},
             }
         },
     )
@@ -218,12 +262,34 @@ def test_main_survives_settings_import_failure_as_unknown_not_a_crash(monkeypatc
     assert exit_code != 0
 
 
-def test_check_exact_head_is_case_insensitive_but_still_exact():
-    status, _ = gate.check_exact_head(HEAD_SHA.upper(), HEAD_SHA)
+def test_check_pr_head_sha_present_accepts_upper_or_lower_case_hex():
+    status, _ = gate.check_pr_head_sha_present(HEAD_SHA.upper())
     assert status == gate.PASS
 
-    status, _ = gate.check_exact_head(HEAD_SHA[:-1] + "0", HEAD_SHA)
+    status, _ = gate.check_pr_head_sha_present(HEAD_SHA)
+    assert status == gate.PASS
+
+
+def test_check_pr_head_sha_present_rejects_malformed_values():
+    status, _ = gate.check_pr_head_sha_present(None)
     assert status == gate.FAIL
+
+    status, _ = gate.check_pr_head_sha_present("a" * 39)
+    assert status == gate.FAIL
+
+    status, _ = gate.check_pr_head_sha_present("g" * 40)
+    assert status == gate.FAIL
+
+
+def test_check_checked_out_matches_expected_base_is_case_insensitive_but_exact():
+    status, _ = gate.check_checked_out_matches_expected_base(HEAD_SHA.upper(), HEAD_SHA)
+    assert status == gate.PASS
+
+    status, _ = gate.check_checked_out_matches_expected_base(HEAD_SHA[:-1] + "0", HEAD_SHA)
+    assert status == gate.FAIL
+
+    status, _ = gate.check_checked_out_matches_expected_base(HEAD_SHA, None)
+    assert status == gate.UNKNOWN
 
 
 def test_fetch_helpers_return_none_on_network_failure(monkeypatch):
