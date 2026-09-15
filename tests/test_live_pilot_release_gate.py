@@ -861,11 +861,20 @@ def _configure_main(
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
 
 
+_SCOPE_LINES = (
+    "RELEASE_INTEGRITY_SCOPE=BOUNDED_PROTECTED_SOURCE_CHECKS",
+    "RUNTIME_IMPORT_PATH_INTEGRITY=NOT_COVERED",
+    "RUNTIME_IMPORT_PATH_HARDENING=FOLLOWUP_REQUIRED",
+)
+
+
 def test_main_clean_path_prints_pass_and_fixed_no_go(monkeypatch, capsys):
     _configure_main(monkeypatch)
     assert gate.main() == 0
     output = capsys.readouterr().out
     assert "RELEASE_INTEGRITY_GATE=PASS" in output
+    for line in _SCOPE_LINES:
+        assert line in output
     assert "LIVE_EXECUTION=NO-GO" in output
 
 
@@ -875,6 +884,8 @@ def test_main_rename_away_prints_fail_and_fixed_no_go(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "RELEASE_INTEGRITY_GATE=FAIL" in output
     assert "delete or rename-away" in output
+    for line in _SCOPE_LINES:
+        assert line in output
     assert "LIVE_EXECUTION=NO-GO" in output
 
 
@@ -886,7 +897,49 @@ def test_main_settings_import_failure_is_unknown_not_crash(monkeypatch, capsys):
     assert gate.main() != 0
     output = capsys.readouterr().out
     assert "RELEASE_INTEGRITY_GATE=UNKNOWN" in output
+    for line in _SCOPE_LINES:
+        assert line in output
     assert "LIVE_EXECUTION=NO-GO" in output
+
+
+def test_scope_disclosure_constants_are_fixed_literals():
+    """PM scope-clarification requirement: these are plain, fixed string
+
+    constants -- never computed from gate input, evaluation result, or
+    runtime state (mirrors LIVE_EXECUTION_VALUE's own guarantee).
+    """
+    assert gate.RELEASE_INTEGRITY_SCOPE_VALUE == "BOUNDED_PROTECTED_SOURCE_CHECKS"
+    assert gate.RUNTIME_IMPORT_PATH_INTEGRITY_VALUE == "NOT_COVERED"
+    assert gate.RUNTIME_IMPORT_PATH_HARDENING_VALUE == "FOLLOWUP_REQUIRED"
+    assert isinstance(gate.RELEASE_INTEGRITY_SCOPE_VALUE, str)
+    assert isinstance(gate.RUNTIME_IMPORT_PATH_INTEGRITY_VALUE, str)
+    assert isinstance(gate.RUNTIME_IMPORT_PATH_HARDENING_VALUE, str)
+
+
+def test_scope_disclosure_lines_identical_across_pass_fail_unknown(monkeypatch, capsys):
+    """The three scope lines (and LIVE_EXECUTION) must be byte-identical no
+
+    matter what the overall gate verdict is -- PASS, FAIL, or UNKNOWN.
+    """
+    _configure_main(monkeypatch)
+    gate.main()
+    pass_output = capsys.readouterr().out
+
+    _configure_main(monkeypatch, settings_head_lookup=_missing())
+    gate.main()
+    fail_output = capsys.readouterr().out
+
+    def _raise():
+        raise ModuleNotFoundError("ai_asset_platform")
+
+    _configure_main(monkeypatch, settings_loader=_raise)
+    gate.main()
+    unknown_output = capsys.readouterr().out
+
+    for line in (*_SCOPE_LINES, "LIVE_EXECUTION=NO-GO"):
+        assert line in pass_output
+        assert line in fail_output
+        assert line in unknown_output
 
 
 def test_main_core_init_change_prints_fail_and_fixed_no_go(monkeypatch, capsys):

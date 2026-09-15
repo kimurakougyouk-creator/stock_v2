@@ -1,19 +1,50 @@
-"""Read-only, fail-closed release-integrity gate for PRs into main.
+"""Bounded, advisory, fail-closed release-integrity check for PRs into main.
 
-The workflow runs from trusted base code under ``pull_request_target``. PR
-code is never checked out, imported, or executed. The protected settings
-path, its package initialization/import context (``ai_asset_platform`` and
-``ai_asset_platform.core``'s own ``__init__.py``), and every path in
-``_FORBIDDEN_HEAD_ONLY_PATHS`` (stdlib-shadow modules, Python startup
-hooks, and a settings-module-shadowing package) are all inspected only as
-Git object metadata at immutable base/head commit SHAs -- an unchanged
-settings.py blob alone does not prove head's runtime behavior is
-unchanged, since importing it can be preceded or intercepted by any of
-these without touching settings.py's own bytes: a package initializer that
-imports settings.py and then replaces its class or singleton (or
-pre-populates ``sys.modules`` with a fake module), a Python startup hook
-that runs before this project's own code, or a same-named package that
-Python resolves ahead of the settings module itself. ``LIVE_EXECUTION`` is
+WHAT THIS GATE CHECKS (``RELEASE_INTEGRITY_SCOPE=BOUNDED_PROTECTED_SOURCE_CHECKS``):
+
+Read-only, Git-object-metadata checks against the exact, immutable
+base/head commit SHAs from the ``pull_request_target`` event payload: the
+PR head sha is present and canonical; the trusted-base checkout matches
+the event payload's own base sha; the PR targets ``main``; the
+repository's default ``PlatformSettings``, evaluated from this trusted
+base checkout only (never the PR's own code), still disables Live trading
+out of the box; and ``src/ai_asset_platform/core/settings.py``, its
+package initialization context (``ai_asset_platform`` and
+``ai_asset_platform.core``'s own ``__init__.py``), and every path
+currently listed in ``_FORBIDDEN_HEAD_ONLY_PATHS`` (a fixed, enumerated
+set of known stdlib-shadow modules, Python startup-hook paths, and a
+settings-module-shadowing package path) are identical, or newly absent,
+between base and head -- compared only via immutable Git blob/tree
+identity, never by checking out, importing, or executing any of it. This
+job runs under ``pull_request_target`` and checks out only the trusted
+base; PR code is never checked out, imported, or executed here.
+
+WHAT THIS GATE DOES NOT CHECK (``RUNTIME_IMPORT_PATH_INTEGRITY=NOT_COVERED``):
+
+A PASS is evidence about the specific, bounded checks above only -- it is
+NOT a guarantee of complete Python runtime import-path integrity for the
+operational Paper/Live wrappers. Out of scope: the operational wrappers'
+own ``PYTHONPATH``/startup-resolution behavior (they run outside this
+gate's checkout and are not evaluated here at all); and any repo-controlled
+file, directory, or symlink/gitlink outside the fixed, enumerated paths in
+``_FORBIDDEN_HEAD_ONLY_PATHS`` -- including a symlinked package-shadow
+directory, a repository-root-level Python startup hook
+(``sitecustomize``/``usercustomize``), or a repository-root or
+otherwise-unenumerated stdlib/transitive-dependency shadow (e.g. a
+same-named module reachable via ``dataclasses``'s own transitive imports,
+such as ``keyword``). These are known, currently ACKNOWLEDGED limitations
+-- not FIXED or RESOLVED -- tracked for structural hardening in a separate
+follow-up (``RUNTIME_IMPORT_PATH_HARDENING=FOLLOWUP_REQUIRED``): Issue #285,
+"Harden Python runtime import paths for Paper/Live operational wrappers"
+(https://github.com/kimurakougyouk-creator/stock_v2/issues/285). This gate
+deliberately does not attempt to close them here via further individual
+path enumeration, dynamic ``sys.modules`` inspection, or a full recursive
+source-tree diff -- that work belongs to Issue #285.
+
+``RELEASE_INTEGRITY_SCOPE``, ``RUNTIME_IMPORT_PATH_INTEGRITY``,
+``RUNTIME_IMPORT_PATH_HARDENING``, and ``LIVE_EXECUTION`` are fixed
+literals, unaffected by gate input or evaluation result, and are printed
+on every run regardless of PASS/FAIL/UNKNOWN. ``LIVE_EXECUTION`` is
 always the fixed literal ``NO-GO``.
 """
 from __future__ import annotations
@@ -31,6 +62,16 @@ PASS = "PASS"
 FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
 LIVE_EXECUTION_VALUE = "NO-GO"
+
+# Fixed scope-disclosure literals. These describe what this gate does and
+# does not guarantee (see the module docstring and Issue #285) and are
+# printed on every run regardless of PASS/FAIL/UNKNOWN. They never vary
+# with gate input, evaluation result, or runtime state -- like
+# LIVE_EXECUTION_VALUE, nothing in this module computes or assigns any
+# other value for them.
+RELEASE_INTEGRITY_SCOPE_VALUE = "BOUNDED_PROTECTED_SOURCE_CHECKS"
+RUNTIME_IMPORT_PATH_INTEGRITY_VALUE = "NOT_COVERED"
+RUNTIME_IMPORT_PATH_HARDENING_VALUE = "FOLLOWUP_REQUIRED"
 
 _GITHUB_API_TIMEOUT_SECONDS = 10
 _ISSUE_255_NUMBER = 255
@@ -686,6 +727,9 @@ def main() -> int:
     for reason in result.reasons:
         print(reason)
     print(f"RELEASE_INTEGRITY_GATE={result.status}")
+    print(f"RELEASE_INTEGRITY_SCOPE={RELEASE_INTEGRITY_SCOPE_VALUE}")
+    print(f"RUNTIME_IMPORT_PATH_INTEGRITY={RUNTIME_IMPORT_PATH_INTEGRITY_VALUE}")
+    print(f"RUNTIME_IMPORT_PATH_HARDENING={RUNTIME_IMPORT_PATH_HARDENING_VALUE}")
     print(f"LIVE_EXECUTION={LIVE_EXECUTION_VALUE}")
     return 0 if result.status == PASS else 1
 
