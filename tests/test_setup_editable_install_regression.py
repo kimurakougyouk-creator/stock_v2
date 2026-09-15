@@ -19,19 +19,29 @@ any `ai_asset_platform` invocation. This file verifies (a) statically that
 every such wrapper carries the fix in the right place, and (b) dynamically
 that the fix mechanism actually defeats a hostile inherited `PYTHONPATH`.
 
-Follow-up finding (P2): the editable install used PEP 517 build isolation,
-which builds an isolated environment for the build backend
-(`setuptools>=68`, per pyproject.toml) and fetches it from PyPI even though
-the runtime dependency install already used `--no-deps`. That breaks on
-offline hosts. Fixed by bootstrapping setuptools from the local
-Debian/Ubuntu wheel cache (`/usr/share/python-wheels`, shipped by the system
-`python3-pip` package specifically for ensurepip-style offline bootstrapping)
-and passing `--no-build-isolation`, so the editable install never touches the
+P2 (offline-safety) design note / responsibility split (post CI #2046):
+earlier revisions of this file ran a real `pip install -e .` inside a
+disposable venv to prove the editable install resolves to the current
+checkout, offline-safe via `/usr/share/python-wheels`. That path was dropped:
+the exact contents of `/usr/share/python-wheels` are not guaranteed across
+hosts or CI images (CI #2046 failed with `error: invalid command
+'bdist_wheel'` because that directory had setuptools but not wheel there),
+so a test that depends on it is not reliably offline-safe. That
+verification is not this file's job: `.github/workflows/pytest.yml` already
+runs the real `pip install -e .` followed by a "Verify plain-python runtime
+import" step that asserts `ai_asset_platform.__file__` resolves to this
+exact checkout -- and that step passed in CI #2046. This file instead only
+needs to prove the *PYTHONPATH-shadowing* property (P1), which does not
+require a real editable install: a single `.pth` file pointing at `src/`
+reproduces the one thing that matters here -- "ai_asset_platform is
+reachable via a site-packages path entry, at lower sys.path priority than an
+inherited PYTHONPATH" -- without pip, setuptools, wheel, apt, or the
 network.
 """
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import venv
 from pathlib import Path
@@ -39,7 +49,8 @@ from pathlib import Path
 import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-EXPECTED_INIT_FILE = (ROOT_DIR / "src" / "ai_asset_platform" / "__init__.py").resolve()
+SRC_DIR = ROOT_DIR / "src"
+EXPECTED_INIT_FILE = (SRC_DIR / "ai_asset_platform" / "__init__.py").resolve()
 
 # `/tmp` is tmpfs (RAM-backed) on some dev hosts with little RAM and no swap;
 # building a venv there competes with the running system for memory. Prefer a
@@ -48,12 +59,6 @@ EXPECTED_INIT_FILE = (ROOT_DIR / "src" / "ai_asset_platform" / "__init__.py").re
 _DISK_BACKED_TMP = (
     "/var/tmp" if os.path.isdir("/var/tmp") and os.access("/var/tmp", os.W_OK) else None
 )
-
-# Debian/Ubuntu ship pip's and setuptools' bootstrap wheels here so ensurepip
-# (and venv creation) never needs the network. We reuse it to make the
-# editable install offline-safe too. GitHub Actions ubuntu-* runners are
-# Debian-based and carry the same path.
-_OFFLINE_WHEEL_DIR = Path("/usr/share/python-wheels")
 
 _WRAPPER_INVOCATION_RE = re.compile(r"python3?\s+(\S+\s+)*-m\s+ai_asset_platform\b")
 _ACTIVATE_RE = re.compile(r"^\s*source \.venv/bin/activate\s*$")
@@ -69,70 +74,6 @@ def _discover_operational_wrappers():
         if _WRAPPER_INVOCATION_RE.search(path.read_text(encoding="utf-8"))
     ]
     return wrappers
-
-
-def _bootstrap_setuptools_offline(venv_python: Path) -> None:
-    if not _OFFLINE_WHEEL_DIR.is_dir():
-        pytest.skip(
-            f"offline setuptools wheel cache not found at {_OFFLINE_WHEEL_DIR}; "
-            "cannot verify the offline-safe editable install path on this host"
-        )
-    result = subprocess.run(
-        [
-            str(venv_python),
-            "-m",
-            "pip",
-            "install",
-            "--no-index",
-            "--find-links",
-            str(_OFFLINE_WHEEL_DIR),
-            "-q",
-            "setuptools",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode == 0, (
-        f"offline setuptools bootstrap failed:\nstdout={result.stdout}\nstderr={result.stderr}"
-    )
-
-
-@pytest.fixture(scope="module")
-def editable_venv():
-    """A disposable venv with ai_asset_platform editable-installed, offline-safe."""
-    with tempfile.TemporaryDirectory(
-        prefix="ai_asset_platform_setup_regression_", dir=_DISK_BACKED_TMP
-    ) as tmp:
-        venv_dir = Path(tmp) / "venv"
-        venv.EnvBuilder(with_pip=True).create(venv_dir)
-        venv_python = venv_dir / "bin" / "python"
-        assert venv_python.exists(), "venv creation did not produce a python executable"
-
-        _bootstrap_setuptools_offline(venv_python)
-
-        install = subprocess.run(
-            [
-                str(venv_python),
-                "-m",
-                "pip",
-                "install",
-                "--no-deps",
-                "--no-build-isolation",
-                "-q",
-                "-e",
-                str(ROOT_DIR),
-            ],
-            cwd=ROOT_DIR,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        assert install.returncode == 0, (
-            f"offline-safe editable install failed:\nstdout={install.stdout}\nstderr={install.stderr}"
-        )
-
-        yield venv_python
 
 
 def test_all_operational_wrappers_clear_inherited_pythonpath_before_first_use():
@@ -185,44 +126,48 @@ def test_all_operational_wrappers_clear_inherited_pythonpath_before_first_use():
     )
 
 
-def test_editable_install_resolves_plain_python_import_to_current_checkout(editable_venv):
-    """Offline-safe editable install resolves to this checkout with PYTHONPATH unset."""
-    env = dict(os.environ)
-    env.pop("PYTHONPATH", None)
-
-    check = subprocess.run(
-        [
-            str(editable_venv),
-            "-c",
-            "import ai_asset_platform, os; "
-            "print(os.path.realpath(ai_asset_platform.__file__))",
-        ],
-        cwd=tempfile.gettempdir(),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert check.returncode == 0, (
-        f"plain python import failed with PYTHONPATH unset:\n"
-        f"stdout={check.stdout}\nstderr={check.stderr}"
-    )
-
-    resolved = Path(check.stdout.strip()).resolve()
-    assert resolved == EXPECTED_INIT_FILE, (
-        f"ai_asset_platform resolved to {resolved}, expected {EXPECTED_INIT_FILE} "
-        "(plain python must resolve to the current checkout, not a stale copy)"
-    )
+def _site_packages_dir(venv_dir: Path) -> Path:
+    return venv_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
 
 
-def test_wrapper_pattern_defeats_hostile_inherited_pythonpath(editable_venv, tmp_path):
+@pytest.fixture(scope="module")
+def src_path_venv():
+    """A disposable, pip-free venv whose site-packages points at this checkout's src/.
+
+    No `pip install`, no setuptools/wheel, no network, no dependency on
+    `/usr/share/python-wheels`. A `.pth` file in site-packages is all that's
+    needed to reproduce the sys.path property this file actually tests: that
+    `ai_asset_platform` is reachable via a site-packages path entry, which
+    inherited `PYTHONPATH` entries take priority over. This is *not* a claim
+    that `pip install -e .` itself works offline -- that is verified by
+    `.github/workflows/pytest.yml`'s own `pip install -e .` step plus its
+    "Verify plain-python runtime import" step, independently of this file.
+    """
+    with tempfile.TemporaryDirectory(
+        prefix="ai_asset_platform_pythonpath_regression_", dir=_DISK_BACKED_TMP
+    ) as tmp:
+        venv_dir = Path(tmp) / "venv"
+        venv.EnvBuilder(with_pip=False).create(venv_dir)
+        venv_python = venv_dir / "bin" / "python"
+        assert venv_python.exists(), "venv creation did not produce a python executable"
+
+        site_packages = _site_packages_dir(venv_dir)
+        assert site_packages.is_dir(), f"expected venv site-packages at {site_packages}"
+        (site_packages / "ai_asset_platform_checkout.pth").write_text(
+            str(SRC_DIR) + "\n", encoding="utf-8"
+        )
+
+        yield venv_python
+
+
+def test_wrapper_pattern_defeats_hostile_inherited_pythonpath(src_path_venv, tmp_path):
     """Dynamic proof, via the real wrapper invocation pattern, of the P1 fix.
 
     Simulates a parent shell/service that leaks a hostile PYTHONPATH into the
     wrapper's environment, then runs the exact sequence every operational
     wrapper now uses (`source .venv/bin/activate` -> `unset PYTHONPATH` ->
     plain `python`) and asserts resolution lands on this checkout, not the
-    hostile path.
+    hostile path. Entirely offline: no pip, no network, no apt.
     """
     hostile_dir = tmp_path / "hostile_pythonpath"
     hostile_pkg = hostile_dir / "ai_asset_platform"
@@ -239,15 +184,15 @@ def test_wrapper_pattern_defeats_hostile_inherited_pythonpath(editable_venv, tmp
     )
 
     # Sanity check: without the fix, the hostile inherited PYTHONPATH really
-    # does shadow the editable install. This proves the test setup actually
+    # does shadow the src/ path entry. This proves the test setup actually
     # reproduces the Codex finding rather than trivially passing.
     vulnerable = subprocess.run(
-        [str(editable_venv), "-c", import_snippet],
+        [str(src_path_venv), "-c", import_snippet],
         cwd=tempfile.gettempdir(),
         env=env,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=30,
     )
     assert vulnerable.returncode == 0, (
         f"hostile-PYTHONPATH sanity import failed:\n"
@@ -261,7 +206,7 @@ def test_wrapper_pattern_defeats_hostile_inherited_pythonpath(editable_venv, tmp
     # The actual fix: `source .venv/bin/activate` followed by
     # `unset PYTHONPATH`, exactly as every operational wrapper now does
     # before its first ai_asset_platform invocation.
-    venv_dir = editable_venv.parent.parent
+    venv_dir = src_path_venv.parent.parent
     activate_script = venv_dir / "bin" / "activate"
     fixed = subprocess.run(
         [
@@ -273,7 +218,7 @@ def test_wrapper_pattern_defeats_hostile_inherited_pythonpath(editable_venv, tmp
         env=env,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=30,
     )
     assert fixed.returncode == 0, (
         f"wrapper-pattern invocation failed:\nstdout={fixed.stdout}\nstderr={fixed.stderr}"
