@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 git switch main
 git pull --ff-only origin main
 source .venv/bin/activate
+unset PYTHONPATH
 python -m pytest -q
 python - <<'PY'
 from ai_asset_platform.brokers.ibkr_future_whatif import preview_ibkr_paper_future_whatif

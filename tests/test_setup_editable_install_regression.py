@@ -98,6 +98,25 @@ block that the first invocation could reach without. The added check
 tracks bash `if`/`fi` nesting depth per line and requires `unset`'s depth
 to be no deeper than the first invocation's, so `unset` can never be
 skippable via a path the invocation itself isn't also skipped by.
+
+Follow-up finding (P1, fifth review / Codex, PR #287): `_WRAPPER_INVOCATION_RE`
+only matched `python -m ai_asset_platform...`, so `ibkr_future_whatif_once.sh`
+-- which runs `python - <<'PY'` and `import`s `ai_asset_platform` from
+*inside* the heredoc body, not via `-m` -- was invisible to
+`_discover_operational_wrappers()` and missing `unset PYTHONPATH` entirely.
+A read-only audit of every root and `scripts/*.sh` file for `python -`,
+`python3 -c`, and any other `import ai_asset_platform`/`from
+ai_asset_platform` invocation form found no other instance of this pattern
+(`ibkr_auto.sh` and `ibkr_overnight_e2e_once.sh` also use `python -
+<<'PY'`, but only for a socket-wait loop that never imports
+ai_asset_platform, so they were never affected). Fixed by adding `unset
+PYTHONPATH` immediately after `source .venv/bin/activate` in
+`ibkr_future_whatif_once.sh`, and by generalizing detection:
+`_find_first_ai_asset_platform_invocation` now also recognizes a `python -`
+/ `python3 -` heredoc whose body contains an `ai_asset_platform` import, so
+`_discover_operational_wrappers()` and the main structural test cover both
+invocation forms, and any future stdin-based wrapper that forgets `unset
+PYTHONPATH` will fail this test.
 """
 import os
 import re
@@ -124,6 +143,48 @@ _DISK_BACKED_TMP = (
 _WRAPPER_INVOCATION_RE = re.compile(r"python3?\s+(\S+\s+)*-m\s+ai_asset_platform\b")
 _ACTIVATE_RE = re.compile(r"^\s*source \.venv/bin/activate\s*$")
 _UNSET_PYTHONPATH_RE = re.compile(r"^\s*unset PYTHONPATH\s*$")
+
+# `python -`/`python3 -` stdin heredoc invocation, e.g. `python - <<'PY'` or
+# `python - "$ARG" <<'PY'`. Captures the heredoc delimiter so the body can be
+# scanned for an ai_asset_platform import (Codex PR #287 P1, fifth review).
+_STDIN_PYTHON_HEREDOC_RE = re.compile(r"^python3?\b.*<<\s*['\"]?(\w+)['\"]?\s*$")
+_AI_ASSET_PLATFORM_IMPORT_RE = re.compile(r"^\s*(import ai_asset_platform\b|from ai_asset_platform\b)")
+
+
+def _find_stdin_python_ai_asset_platform_invocation(lines):
+    """Line index of a `python -`/`python3 -` heredoc whose body imports
+    ai_asset_platform, or None. Distinct from `-m ai_asset_platform`
+    invocations, which pytest.ini's collection-time path injection and
+    `_WRAPPER_INVOCATION_RE` already cover.
+    """
+    for i, line in enumerate(lines):
+        m = _STDIN_PYTHON_HEREDOC_RE.match(line.strip())
+        if not m:
+            continue
+        delimiter = m.group(1)
+        for body_line in lines[i + 1 :]:
+            if body_line.strip() == delimiter:
+                break
+            if _AI_ASSET_PLATFORM_IMPORT_RE.match(body_line):
+                return i
+    return None
+
+
+def _find_first_ai_asset_platform_invocation(lines):
+    """Earliest line index where this wrapper invokes ai_asset_platform,
+    across both known invocation forms (`-m ai_asset_platform...` and a
+    `python -` stdin heredoc that imports it), or None if neither is
+    present.
+    """
+    candidates = [
+        idx
+        for idx in (
+            next((i for i, l in enumerate(lines) if _WRAPPER_INVOCATION_RE.search(l)), None),
+            _find_stdin_python_ai_asset_platform_invocation(lines),
+        )
+        if idx is not None
+    ]
+    return min(candidates) if candidates else None
 
 _INSTALLER_PATH = ROOT_DIR / "install_ibkr_readonly_autopilot.sh"
 _VERIFY_SCRIPT_PATH = ROOT_DIR / "scripts" / "verify_exact_checkout_import.py"
@@ -163,12 +224,17 @@ def _bash_conditional_depths(lines):
 
 
 def _discover_operational_wrappers():
-    """Every *.sh script (repo root + scripts/) that invokes ai_asset_platform."""
+    """Every *.sh script (repo root + scripts/) that invokes ai_asset_platform,
+    via `-m ai_asset_platform...` or a `python -` stdin heredoc import.
+    """
     candidates = sorted(ROOT_DIR.glob("*.sh")) + sorted((ROOT_DIR / "scripts").glob("*.sh"))
     wrappers = [
         path
         for path in candidates
-        if _WRAPPER_INVOCATION_RE.search(path.read_text(encoding="utf-8"))
+        if _find_first_ai_asset_platform_invocation(
+            path.read_text(encoding="utf-8").splitlines()
+        )
+        is not None
     ]
     return wrappers
 
@@ -196,9 +262,7 @@ def test_all_operational_wrappers_clear_inherited_pythonpath_before_first_use():
         lines = path.read_text(encoding="utf-8").splitlines()
         depths = _bash_conditional_depths(lines)
         activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
-        first_use_idx = next(
-            (i for i, l in enumerate(lines) if _WRAPPER_INVOCATION_RE.search(l)), None
-        )
+        first_use_idx = _find_first_ai_asset_platform_invocation(lines)
         if activate_idx is None or first_use_idx is None:
             failures.append(f"{path.name}: could not locate activate/first-use lines")
             continue
@@ -466,3 +530,66 @@ def test_verify_exact_checkout_import_script_is_fail_closed(src_path_venv, tmp_p
     )
     assert "FATAL" in shadowed.stderr
     assert "OK:" not in shadowed.stdout
+
+
+def test_stdin_heredoc_wrapper_is_discovered_and_checked():
+    """`ibkr_future_whatif_once.sh` imports ai_asset_platform from inside a
+    `python - <<'PY'` heredoc body, not via `-m`. Prove the detector actually
+    finds it (not just wrappers using `-m`), that it is included in
+    `_discover_operational_wrappers()`, and that the detected invocation
+    line is the `python -` launch line itself -- not a coincidental match
+    somewhere else -- so the activate < unset < stdin-python-use ordering
+    check in `test_all_operational_wrappers_clear_inherited_pythonpath_before_first_use`
+    is actually exercised for this file.
+    """
+    stdin_wrapper_path = ROOT_DIR / "ibkr_future_whatif_once.sh"
+    assert stdin_wrapper_path.is_file(), f"missing {stdin_wrapper_path}"
+
+    lines = stdin_wrapper_path.read_text(encoding="utf-8").splitlines()
+
+    # Sanity: this file has no `-m ai_asset_platform` invocation at all, so a
+    # detector limited to that pattern would find nothing here.
+    assert not any(_WRAPPER_INVOCATION_RE.search(l) for l in lines), (
+        f"{stdin_wrapper_path.name} unexpectedly contains a '-m ai_asset_platform' "
+        "invocation; this test assumes it is stdin-heredoc-only"
+    )
+
+    first_use_idx = _find_first_ai_asset_platform_invocation(lines)
+    assert first_use_idx is not None, (
+        f"stdin-heredoc detector failed to find the ai_asset_platform import in "
+        f"{stdin_wrapper_path.name}"
+    )
+    assert lines[first_use_idx].strip().startswith("python"), (
+        f"detected invocation line {first_use_idx + 1} is not the 'python -' "
+        f"heredoc launch line: {lines[first_use_idx]!r}"
+    )
+    assert "<<" in lines[first_use_idx], (
+        f"detected invocation line {first_use_idx + 1} is not a stdin heredoc "
+        f"launch: {lines[first_use_idx]!r}"
+    )
+
+    wrappers = _discover_operational_wrappers()
+    assert stdin_wrapper_path in wrappers, (
+        f"{stdin_wrapper_path.name} must be included in "
+        "_discover_operational_wrappers() via the stdin-heredoc detection path"
+    )
+
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    assert activate_idx is not None, f"{stdin_wrapper_path.name} must source .venv/bin/activate"
+    unset_idx = next(
+        (
+            i
+            for i in range(activate_idx + 1, first_use_idx)
+            if _UNSET_PYTHONPATH_RE.match(lines[i])
+        ),
+        None,
+    )
+    assert unset_idx is not None, (
+        f"{stdin_wrapper_path.name}: no 'unset PYTHONPATH' between venv activation "
+        f"(line {activate_idx + 1}) and the stdin-python first use "
+        f"(line {first_use_idx + 1})"
+    )
+    assert activate_idx < unset_idx < first_use_idx, (
+        "expected activate < unset PYTHONPATH < stdin-python first use; got "
+        f"activate={activate_idx} unset={unset_idx} first_use={first_use_idx}"
+    )
