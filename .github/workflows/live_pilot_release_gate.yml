@@ -1,0 +1,40 @@
+name: live_pilot_release_gate
+
+# Read-only, advisory release-integrity check for PRs into main. It never
+# gates Live execution, never comments on the PR, never re-runs pytest (that
+# is protect-main's required "pytest" check), and never opens a broker
+# connection. See scripts/live_pilot_release_gate.py for the actual checks.
+#
+# The workflow and executable gate code come only from the trusted base under
+# `pull_request_target`. The PR branch is never checked out, imported, or
+# executed. To determine whether the protected Live-safety settings path was
+# touched, the trusted gate reads only Git object metadata at the immutable
+# base/head commit SHAs from the event and compares that path's mode/type/blob
+# identity. It does not rely on mutable PR metadata or `/pulls/{n}/files`.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  release-integrity-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out main (never the PR's branch/commits)
+        uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Run release-integrity gate (read-only, advisory)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: src
+        run: python scripts/live_pilot_release_gate.py
