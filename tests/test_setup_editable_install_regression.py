@@ -37,6 +37,25 @@ reproduces the one thing that matters here -- "ai_asset_platform is
 reachable via a site-packages path entry, at lower sys.path priority than an
 inherited PYTHONPATH" -- without pip, setuptools, wheel, apt, or the
 network.
+
+Follow-up finding (P1, third review): unsetting PYTHONPATH in the wrappers
+is only safe once an existing `.venv` is actually editable-installed against
+the current checkout. `install_ibkr_readonly_autopilot.sh` (the installer
+for the unattended read-only autopilot service) only ran `pytest`, whose
+success is masked by pytest.ini's `pythonpath = src` regardless of whether
+`.venv` has ai_asset_platform installed at all. An operator upgrading an
+older install (pre editable-install, when the wrapper relied on an
+externally exported PYTHONPATH) could restart the service, have the wrapper
+correctly `unset PYTHONPATH`, and then hit `ModuleNotFoundError` under
+plain `python -m ai_asset_platform...` -- silently stopping the read-only
+monitor. Fixed by having the installer run `pip install -e .` (migrating
+any pre-existing `.venv`) and the new shared fail-closed checker
+`scripts/verify_exact_checkout_import.py` -- under `set -euo pipefail`, so a
+failed migration/verification aborts before `systemctl --user restart` is
+ever reached -- immediately after activating `.venv` and before the
+pytest-based checks. `scripts/setup.sh` now calls the same shared checker
+(previously an inline duplicate) so the fresh-setup and existing-install
+paths share one verification.
 """
 import os
 import re
@@ -63,6 +82,12 @@ _DISK_BACKED_TMP = (
 _WRAPPER_INVOCATION_RE = re.compile(r"python3?\s+(\S+\s+)*-m\s+ai_asset_platform\b")
 _ACTIVATE_RE = re.compile(r"^\s*source \.venv/bin/activate\s*$")
 _UNSET_PYTHONPATH_RE = re.compile(r"^\s*unset PYTHONPATH\s*$")
+
+_INSTALLER_PATH = ROOT_DIR / "install_ibkr_readonly_autopilot.sh"
+_VERIFY_SCRIPT_PATH = ROOT_DIR / "scripts" / "verify_exact_checkout_import.py"
+_PIP_EDITABLE_INSTALL_RE = re.compile(r"pip install\s+-e\s+\.\s*$")
+_VERIFY_SCRIPT_CALL_RE = re.compile(r"verify_exact_checkout_import\.py")
+_SYSTEMCTL_RESTART_RE = re.compile(r"systemctl --user restart")
 
 
 def _discover_operational_wrappers():
@@ -228,3 +253,88 @@ def test_wrapper_pattern_defeats_hostile_inherited_pythonpath(src_path_venv, tmp
         f"wrapper pattern (activate + unset PYTHONPATH) resolved to {resolved}, "
         f"expected {EXPECTED_INIT_FILE} (hostile inherited PYTHONPATH was not defeated)"
     )
+
+
+def test_install_autopilot_migrates_and_verifies_before_restart():
+    """Static proof that the installer migrates and verifies before restart.
+
+    `install_ibkr_readonly_autopilot.sh` must, in order: activate `.venv`,
+    editable-install the current checkout into it (migrating any
+    pre-existing `.venv`), run the fail-closed exact-checkout checker, and
+    only then restart the systemd service. Under `set -euo pipefail`, a
+    failed migration or verification aborts the script before the restart
+    line is ever reached.
+    """
+    assert _INSTALLER_PATH.is_file(), f"missing {_INSTALLER_PATH}"
+    lines = _INSTALLER_PATH.read_text(encoding="utf-8").splitlines()
+
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    pip_idx = next(
+        (i for i, l in enumerate(lines) if _PIP_EDITABLE_INSTALL_RE.search(l)), None
+    )
+    verify_idx = next(
+        (i for i, l in enumerate(lines) if _VERIFY_SCRIPT_CALL_RE.search(l)), None
+    )
+    restart_idx = next(
+        (i for i, l in enumerate(lines) if _SYSTEMCTL_RESTART_RE.search(l)), None
+    )
+
+    assert activate_idx is not None, "installer must source .venv/bin/activate"
+    assert pip_idx is not None, "installer must editable-install into the existing .venv"
+    assert verify_idx is not None, "installer must run the exact-checkout fail-closed verifier"
+    assert restart_idx is not None, "installer must restart the systemd service"
+
+    assert activate_idx < pip_idx < verify_idx < restart_idx, (
+        "installer must activate -> editable-install -> fail-closed verify -> "
+        f"restart, in that order; got activate={activate_idx} pip={pip_idx} "
+        f"verify={verify_idx} restart={restart_idx}"
+    )
+
+
+def test_verify_exact_checkout_import_script_is_fail_closed(src_path_venv, tmp_path):
+    """The shared checker only passes for *this* checkout, and fails closed
+    when a hostile/stale PYTHONPATH shadows it -- exactly what an
+    un-migrated existing .venv (or a leaked parent-process PYTHONPATH) would
+    do to `install_ibkr_readonly_autopilot.sh`'s new verification step.
+    Entirely offline: no pip, no network, no broker/TWS/order APIs.
+    """
+    assert _VERIFY_SCRIPT_PATH.is_file(), f"missing {_VERIFY_SCRIPT_PATH}"
+
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    correct = subprocess.run(
+        [str(src_path_venv), str(_VERIFY_SCRIPT_PATH)],
+        cwd=ROOT_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert correct.returncode == 0, (
+        f"checker must pass for this checkout with PYTHONPATH unset:\n"
+        f"stdout={correct.stdout}\nstderr={correct.stderr}"
+    )
+    assert "OK:" in correct.stdout
+
+    hostile_dir = tmp_path / "hostile_pythonpath_for_checker"
+    hostile_pkg = hostile_dir / "ai_asset_platform"
+    hostile_pkg.mkdir(parents=True)
+    hostile_pkg_init = hostile_pkg / "__init__.py"
+    hostile_pkg_init.write_text("HOSTILE = True\n", encoding="utf-8")
+
+    hostile_env = dict(os.environ)
+    hostile_env["PYTHONPATH"] = str(hostile_dir)
+    shadowed = subprocess.run(
+        [str(src_path_venv), str(_VERIFY_SCRIPT_PATH)],
+        cwd=ROOT_DIR,
+        env=hostile_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert shadowed.returncode != 0, (
+        "checker must fail closed when a hostile PYTHONPATH shadows ai_asset_platform, "
+        f"got returncode 0:\nstdout={shadowed.stdout}\nstderr={shadowed.stderr}"
+    )
+    assert "FATAL" in shadowed.stderr
+    assert "OK:" not in shadowed.stdout
