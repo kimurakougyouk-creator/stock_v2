@@ -7,11 +7,14 @@ cd "$ROOT"
 git switch main
 git pull --ff-only origin main
 
-if [[ -f .venv/bin/activate ]]; then
-  # shellcheck disable=SC1091
-  source .venv/bin/activate
-  unset PYTHONPATH
+if [[ ! -f .venv/bin/activate ]]; then
+  echo "BLOCKED: .venv/bin/activate not found. No order was sent."
+  exit 2
 fi
+
+# shellcheck disable=SC1091
+source .venv/bin/activate
+unset PYTHONPATH
 
 pytest -q \
   tests/test_ibkr_closed_spy_fx_ledger_repair.py \

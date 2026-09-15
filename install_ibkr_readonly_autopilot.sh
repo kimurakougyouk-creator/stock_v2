@@ -29,6 +29,7 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
+unset PYTHONPATH
 
 # Migrate any pre-existing .venv (created before editable install was
 # required) to the current checkout, and fail closed if ai_asset_platform

@@ -56,6 +56,48 @@ ever reached -- immediately after activating `.venv` and before the
 pytest-based checks. `scripts/setup.sh` now calls the same shared checker
 (previously an inline duplicate) so the fresh-setup and existing-install
 paths share one verification.
+
+Follow-up finding (P1, fourth review / Codex + ChatGPT audit, PR #287):
+two remaining gaps in the same family.
+
+(a) `ibkr_closed_spy_fx_ledger_repair_once.sh` and
+`ibkr_verified_derivative_ledger_cleanup_once.sh` wrapped `source
+.venv/bin/activate` + `unset PYTHONPATH` inside `if [[ -f .venv/bin/activate
+]]; then ... fi`. When `.venv` is missing, that whole block -- including
+`unset PYTHONPATH` -- is skipped, but the later `pytest`/`python -m
+ai_asset_platform...` calls are unconditional, so an inherited PYTHONPATH
+would still leak through. Fixed by making the `.venv` check fail-closed
+(`if [[ ! -f .venv/bin/activate ]]; then ... exit 2; fi`) and moving
+`source`/`unset` to unconditional top-level statements, matching the
+pattern the other wrappers already use.
+
+(b) `ibkr_readonly_soak_once.sh` activates `.venv` and runs `python -m
+pytest -q`, then delegates to `bash ./ibkr_auto.sh` -- it never invokes
+`ai_asset_platform` directly, so `_discover_operational_wrappers()` (which
+only matches direct `python -m ai_asset_platform` invocations) never saw
+it, and it was missing `unset PYTHONPATH` entirely. Fixed by adding `unset
+PYTHONPATH` immediately after `source .venv/bin/activate`, and covered here
+by a dedicated test rather than widening `_discover_operational_wrappers()`
+(which would also start matching unrelated pytest-only scripts like
+`scripts/setup.sh` that are already independently exact-checkout-safe via
+`scripts/verify_exact_checkout_import.py` and don't need this check).
+
+(c) `install_ibkr_readonly_autopilot.sh` ran `pip install -e .` and the
+fail-closed verifier with the parent environment's `PYTHONPATH` still set,
+so a stale/hostile inherited PYTHONPATH could shadow the editable install
+during the migration/verification itself. Fixed by adding `unset
+PYTHONPATH` immediately after `source .venv/bin/activate`, before `pip
+install -e .`.
+
+This file also adds a structural check (`_bash_conditional_depths`) to
+`test_all_operational_wrappers_clear_inherited_pythonpath_before_first_use`:
+finding `unset PYTHONPATH` textually between `activate` and the first
+`ai_asset_platform` call is not enough on its own -- (a) above passed that
+check while still being vulnerable, because `unset` sat inside an `if`
+block that the first invocation could reach without. The added check
+tracks bash `if`/`fi` nesting depth per line and requires `unset`'s depth
+to be no deeper than the first invocation's, so `unset` can never be
+skippable via a path the invocation itself isn't also skipped by.
 """
 import os
 import re
@@ -89,6 +131,36 @@ _PIP_EDITABLE_INSTALL_RE = re.compile(r"pip install\s+-e\s+\.\s*$")
 _VERIFY_SCRIPT_CALL_RE = re.compile(r"verify_exact_checkout_import\.py")
 _SYSTEMCTL_RESTART_RE = re.compile(r"systemctl --user restart")
 
+_SOAK_PATH = ROOT_DIR / "ibkr_readonly_soak_once.sh"
+_SOAK_FIRST_USE_RE = re.compile(r"python3?\s+(\S+\s+)*-m\s+pytest\b|^pytest\b|\bbash \./\S+\.sh\b")
+
+# Bash `if ...; then` / `fi` nesting depth tracker, single-line-conditional
+# only (matches this codebase's actual style -- verified against all
+# discovered wrappers). `elif`/`else` don't change depth: they're
+# alternatives within the same enclosing `if`, not new nesting.
+_IF_OPEN_RE = re.compile(r"^if\b.*;\s*then\s*$")
+_FI_RE = re.compile(r"^fi(?:\s*;.*)?$")
+
+
+def _bash_conditional_depths(lines):
+    """if/fi nesting depth *at* each line: how many enclosing conditional
+    blocks a statement on that line is inside. Used to catch `unset
+    PYTHONPATH` sitting inside an `if` block that a later, unconditional
+    invocation can bypass (Codex PR #287 P1, fourth review).
+    """
+    depths = []
+    depth = 0
+    for raw in lines:
+        stripped = raw.strip()
+        if _FI_RE.match(stripped):
+            depth = max(depth - 1, 0)
+            depths.append(depth)
+            continue
+        depths.append(depth)
+        if _IF_OPEN_RE.match(stripped):
+            depth += 1
+    return depths
+
 
 def _discover_operational_wrappers():
     """Every *.sh script (repo root + scripts/) that invokes ai_asset_platform."""
@@ -107,7 +179,11 @@ def test_all_operational_wrappers_clear_inherited_pythonpath_before_first_use():
     Every wrapper must `unset PYTHONPATH` after `source .venv/bin/activate`
     and before its first `ai_asset_platform` invocation, so an inherited
     PYTHONPATH from the parent shell/service can never shadow the editable
-    install.
+    install. Textual presence between the two lines is not sufficient on its
+    own -- `unset` must also not be reachable-but-skippable relative to the
+    first invocation: it must sit at an `if`-nesting depth no deeper than
+    that invocation, or a path exists (an un-migrated `.venv`, a false
+    conditional) where `unset` is skipped but the invocation still runs.
     """
     wrappers = _discover_operational_wrappers()
     assert len(wrappers) >= 30, (
@@ -118,6 +194,7 @@ def test_all_operational_wrappers_clear_inherited_pythonpath_before_first_use():
     failures = []
     for path in wrappers:
         lines = path.read_text(encoding="utf-8").splitlines()
+        depths = _bash_conditional_depths(lines)
         activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
         first_use_idx = next(
             (i for i, l in enumerate(lines) if _WRAPPER_INVOCATION_RE.search(l)), None
@@ -144,6 +221,15 @@ def test_all_operational_wrappers_clear_inherited_pythonpath_before_first_use():
                 f"{path.name}: no 'unset PYTHONPATH' between venv activation "
                 f"(line {activate_idx + 1}) and first ai_asset_platform invocation "
                 f"(line {first_use_idx + 1})"
+            )
+            continue
+        if depths[unset_idx] > depths[first_use_idx]:
+            failures.append(
+                f"{path.name}: 'unset PYTHONPATH' (line {unset_idx + 1}, if-depth "
+                f"{depths[unset_idx]}) is nested inside a conditional that the first "
+                f"ai_asset_platform invocation (line {first_use_idx + 1}, if-depth "
+                f"{depths[first_use_idx]}) can still reach when that conditional is "
+                "skipped -- inherited PYTHONPATH could leak through"
             )
 
     assert not failures, "wrappers vulnerable to inherited PYTHONPATH shadowing:\n" + "\n".join(
@@ -259,9 +345,10 @@ def test_install_autopilot_migrates_and_verifies_before_restart():
     """Static proof that the installer migrates and verifies before restart.
 
     `install_ibkr_readonly_autopilot.sh` must, in order: activate `.venv`,
-    editable-install the current checkout into it (migrating any
-    pre-existing `.venv`), run the fail-closed exact-checkout checker, and
-    only then restart the systemd service. Under `set -euo pipefail`, a
+    clear inherited PYTHONPATH (so it can't shadow the migration/verification
+    themselves), editable-install the current checkout into it (migrating
+    any pre-existing `.venv`), run the fail-closed exact-checkout checker,
+    and only then restart the systemd service. Under `set -euo pipefail`, a
     failed migration or verification aborts the script before the restart
     line is ever reached.
     """
@@ -269,6 +356,7 @@ def test_install_autopilot_migrates_and_verifies_before_restart():
     lines = _INSTALLER_PATH.read_text(encoding="utf-8").splitlines()
 
     activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
     pip_idx = next(
         (i for i, l in enumerate(lines) if _PIP_EDITABLE_INSTALL_RE.search(l)), None
     )
@@ -280,14 +368,54 @@ def test_install_autopilot_migrates_and_verifies_before_restart():
     )
 
     assert activate_idx is not None, "installer must source .venv/bin/activate"
+    assert unset_idx is not None, "installer must unset inherited PYTHONPATH"
     assert pip_idx is not None, "installer must editable-install into the existing .venv"
     assert verify_idx is not None, "installer must run the exact-checkout fail-closed verifier"
     assert restart_idx is not None, "installer must restart the systemd service"
 
-    assert activate_idx < pip_idx < verify_idx < restart_idx, (
-        "installer must activate -> editable-install -> fail-closed verify -> "
-        f"restart, in that order; got activate={activate_idx} pip={pip_idx} "
+    assert activate_idx < unset_idx < pip_idx < verify_idx < restart_idx, (
+        "installer must activate -> unset PYTHONPATH -> editable-install -> "
+        "fail-closed verify -> restart, in that order; got "
+        f"activate={activate_idx} unset={unset_idx} pip={pip_idx} "
         f"verify={verify_idx} restart={restart_idx}"
+    )
+
+
+def test_ibkr_readonly_soak_clears_pythonpath_before_first_use():
+    """`ibkr_readonly_soak_once.sh` never invokes ai_asset_platform directly
+    (it runs `python -m pytest`, then delegates to `bash ./ibkr_auto.sh`), so
+    `_discover_operational_wrappers()` cannot see it. Covered separately:
+    must `unset PYTHONPATH` right after `source .venv/bin/activate`, before
+    its first pytest/python/delegated-wrapper invocation.
+    """
+    assert _SOAK_PATH.is_file(), f"missing {_SOAK_PATH}"
+    lines = _SOAK_PATH.read_text(encoding="utf-8").splitlines()
+
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    first_use_idx = next(
+        (i for i, l in enumerate(lines) if _SOAK_FIRST_USE_RE.search(l)), None
+    )
+    assert activate_idx is not None, "ibkr_readonly_soak_once.sh must source .venv/bin/activate"
+    assert first_use_idx is not None, (
+        "ibkr_readonly_soak_once.sh must have a pytest/python/delegated-wrapper invocation"
+    )
+    assert activate_idx < first_use_idx, (
+        f"venv activation (line {activate_idx + 1}) does not precede first "
+        f"pytest/python/bash invocation (line {first_use_idx + 1})"
+    )
+
+    unset_idx = next(
+        (
+            i
+            for i in range(activate_idx + 1, first_use_idx)
+            if _UNSET_PYTHONPATH_RE.match(lines[i])
+        ),
+        None,
+    )
+    assert unset_idx is not None, (
+        "ibkr_readonly_soak_once.sh: no 'unset PYTHONPATH' between venv activation "
+        f"(line {activate_idx + 1}) and first pytest/python/bash invocation "
+        f"(line {first_use_idx + 1})"
     )
 
 
