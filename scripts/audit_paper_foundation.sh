@@ -13,6 +13,7 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
+unset PYTHONPATH
 
 echo "[1/3] Secret scan"
 python scripts/check_secrets.py

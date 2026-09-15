@@ -12,7 +12,7 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
 
 failures=0
 

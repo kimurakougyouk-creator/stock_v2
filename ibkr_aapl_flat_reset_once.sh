@@ -18,7 +18,7 @@ if [[ "${IBKR_AAPL_RESET_CONFIRM:-}" != "YES_SELL_EXACTLY_THREE_AAPL_PAPER_TO_FL
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
 
 # Run the complete regression suite in the normal default-safe environment.
 # The dedicated IBKR Paper opt-in is applied only to the reset process below,

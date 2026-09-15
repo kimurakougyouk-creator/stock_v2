@@ -32,6 +32,18 @@ jobs:
           # ibapi is installed only so tests importing the IBKR API can be collected.
           # CI does not connect to TWS/Gateway or transmit Paper/Live orders.
           pip install ibapi==9.81.1.post1
+          pip install -e .
+
+      - name: Verify plain-python runtime import (not just pytest's pythonpath=src)
+        run: |
+          python -c "
+          import os
+          import ai_asset_platform
+          resolved = os.path.realpath(ai_asset_platform.__file__)
+          expected = os.path.realpath(os.path.join(os.getcwd(), 'src', 'ai_asset_platform', '__init__.py'))
+          assert resolved == expected, f'ai_asset_platform resolved to {resolved}, expected {expected}'
+          print('OK:', resolved)
+          "
 
       - name: Run pytest
         run: pytest -q

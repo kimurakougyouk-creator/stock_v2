@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 git switch main
 git pull --ff-only origin main
 source .venv/bin/activate
+unset PYTHONPATH
 python -m pytest -q
 : "${IBKR_FUTURE_SYMBOL:=ES}"
 : "${IBKR_FUTURE_EXCHANGE:=CME}"

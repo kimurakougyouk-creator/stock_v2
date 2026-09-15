@@ -11,7 +11,7 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
 
 pytest -q tests/test_strategy_profitability_evidence.py
 python -m ai_asset_platform.reports.strategy_profitability_evidence
