@@ -11,7 +11,6 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
 
 pytest -q tests/test_ibkr_commission_snapshot.py
 python -m ai_asset_platform.brokers.ibkr_commission_snapshot

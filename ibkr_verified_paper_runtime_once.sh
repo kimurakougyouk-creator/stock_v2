@@ -14,7 +14,6 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
 
 pytest -q \
   tests/test_ibkr_verified_paper_runtime.py \

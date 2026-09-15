@@ -11,7 +11,6 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
 
 pytest -q tests/test_ibkr_live_all_open_orders.py
 AI_ASSET_LIVE_READONLY_CONFIRM=READ_LIVE_ACCOUNT_ONLY \

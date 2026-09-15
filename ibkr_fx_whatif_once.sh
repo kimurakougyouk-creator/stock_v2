@@ -28,7 +28,6 @@ for name in "${required[@]}"; do
 done
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
 
 # Run the full default-safe regression suite before contacting IBKR.
 python -m pytest -q

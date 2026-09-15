@@ -12,7 +12,6 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
 
 python -m pytest -q
 python -m ai_asset_platform.brokers.ibkr_fx_handshake_diagnostics

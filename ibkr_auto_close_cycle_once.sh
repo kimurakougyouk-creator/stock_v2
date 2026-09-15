@@ -18,7 +18,6 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
 export AI_ASSET_ENABLE_IBKR_PAPER=true
 export AI_ASSET_ENABLE_IBKR_OVERNIGHT_CLOSE_E2E=true
 export AI_ASSET_ENABLE_IBKR_EXTENDED_CLOSE_E2E=true

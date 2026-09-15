@@ -17,7 +17,6 @@ if [[ "${IBKR_9432_CLOSE_CONFIRM:-}" != "YES_SELL_EXACTLY_100_9432_TSEJ_PAPER_TO
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
 
 # Regression tests deliberately run before any Paper opt-in is set so the
 # repository's default-safe behavior remains tested exactly as shipped.

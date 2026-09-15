@@ -29,7 +29,6 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
 pytest -q \
   tests/test_ibkr_readonly_autopilot.py \
   tests/test_ibkr_account_snapshot.py \
