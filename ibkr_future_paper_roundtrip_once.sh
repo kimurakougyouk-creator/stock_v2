@@ -18,6 +18,7 @@ if [[ "${IBKR_FUTURE_E2E_CONFIRM:-}" != "YES_BUY_AND_SELL_ONE_ESU6_PAPER_TO_FLAT
 fi
 
 source .venv/bin/activate
+unset PYTHONPATH
 
 # Regression suite remains in the normal default-safe environment.
 python -m pytest -q

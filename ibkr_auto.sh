@@ -30,6 +30,7 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
+unset PYTHONPATH
 mkdir -p "$LOG_DIR"
 
 # Wait for either Paper endpoint. No broker request is made during this wait.

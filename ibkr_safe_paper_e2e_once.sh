@@ -20,6 +20,7 @@ if [[ ! -f .venv/bin/activate ]]; then
   exit 2
 fi
 source .venv/bin/activate
+unset PYTHONPATH
 
 # Repository safety first. A test failure stops before any local ledger mutation
 # or Paper order attempt.

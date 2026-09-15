@@ -11,6 +11,7 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
+unset PYTHONPATH
 
 pytest -q tests/test_live_cash_readiness.py
 python -m ai_asset_platform.reports.live_cash_readiness

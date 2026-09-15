@@ -11,6 +11,7 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
+unset PYTHONPATH
 
 pytest -q tests/test_ibkr_live_fx_evidence.py
 AI_ASSET_LIVE_READONLY_CONFIRM=READ_LIVE_ACCOUNT_ONLY \

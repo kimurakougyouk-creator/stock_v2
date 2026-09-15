@@ -18,6 +18,7 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
+unset PYTHONPATH
 export AI_ASSET_ENABLE_IBKR_PAPER=true
 export AI_ASSET_ENABLE_IBKR_EXTENDED_CLOSE_E2E=true
 

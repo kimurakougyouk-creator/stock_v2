@@ -10,6 +10,7 @@ git pull --ff-only origin main
 if [[ -f .venv/bin/activate ]]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
+  unset PYTHONPATH
 fi
 
 pytest -q \

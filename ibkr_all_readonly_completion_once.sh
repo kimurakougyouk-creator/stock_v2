@@ -12,6 +12,7 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
+unset PYTHONPATH
 
 failures=0
 

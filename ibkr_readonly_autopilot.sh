@@ -87,6 +87,7 @@ while true; do
       echo "AUTOPILOT SOURCE BLOCKED: tracked source differs from pinned HEAD outside runtime output directories. Monitoring code was not executed."
     elif [[ -f .venv/bin/activate ]]; then
       source .venv/bin/activate
+      unset PYTHONPATH
       set +e
       # Strict unattended policy: run only the IBKR-scoped read-only monitor.
       # Legacy local PAPER simulation rows are excluded from live Paper-account
