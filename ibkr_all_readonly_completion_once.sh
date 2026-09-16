@@ -13,7 +13,17 @@ fi
 
 source .venv/bin/activate
 unset PYTHONPATH
-bash scripts/ensure_exact_checkout_runtime.sh
+
+# This file intentionally does not enable bash errexit (see
+# `run_readonly_step` below, which collects individual audit-step failures
+# instead of aborting on the first one) but that must not let a failed
+# exact-checkout binding go unnoticed: unlike an audit step, if this
+# fails, no ai_asset_platform invocation below can be trusted at all, so
+# it is checked explicitly and blocks before any of them run.
+if ! bash scripts/ensure_exact_checkout_runtime.sh; then
+  echo "BLOCKED: exact checkout runtime binding failed. No order was sent."
+  exit 2
+fi
 
 failures=0
 

@@ -759,12 +759,53 @@ def _discover_self_updating_wrappers():
     ]
 
 
+# Short combined `set` flags only (e.g. `set -euo pipefail`, `set +e`) --
+# verified this codebase never uses the long `set -o`/`set +o` form.
+_SET_FLAGS_RE = re.compile(r"^set\s+([+-])([A-Za-z]+)\b")
+_HELPER_LINE_IS_CONDITIONAL_RE = re.compile(r"^if\b.*ensure_exact_checkout_runtime\.sh")
+
+
+def _errexit_active_before(lines, idx):
+    """Whether bash `errexit` (`set -e`, or `e` in a combined flag string
+    like `set -euo pipefail`) is active immediately before `lines[idx]`, by
+    scanning `set` toggles from the top of the file in order. `set +e`
+    (or `+` with `e` in the flags) turns it back off.
+    """
+    active = False
+    for l in lines[:idx]:
+        m = _SET_FLAGS_RE.match(l.strip())
+        if not m:
+            continue
+        sign, flags = m.groups()
+        if "e" in flags:
+            active = sign == "-"
+    return active
+
+
+def _helper_failure_is_fail_closed(lines, helper_idx):
+    """Whether a non-zero exit from the runtime-binding helper call at
+    `lines[helper_idx]` necessarily stops this script before it can reach
+    any later ai_asset_platform invocation (Codex PR #287 P1,
+    `ibkr_all_readonly_completion_once.sh` review): either bash `errexit`
+    is active at that point, so a bare call aborts the script on failure,
+    or the call is itself the condition of an `if`/`if !`, which must
+    therefore branch on failure rather than silently continue. `set +e`
+    appearing *after* the helper call does not matter here -- only state
+    at the point of the call does.
+    """
+    if _errexit_active_before(lines, helper_idx):
+        return True
+    if _HELPER_LINE_IS_CONDITIONAL_RE.match(lines[helper_idx].strip()):
+        return True
+    return False
+
+
 def _check_exact_checkout_binding(name, lines):
     """Verify one wrapper's own lines correctly bind the exact checkout
     before its own first ai_asset_platform use. Returns a list of failure
     strings (empty if safe).
 
-    Two things must both hold:
+    Three things must all hold:
     - if this file performs any self-update (git pull/fetch/switch/checkout)
       before its first ai_asset_platform use, the *last* such update must
       precede venv activation -- not just the first one. A second update
@@ -775,6 +816,12 @@ def _check_exact_checkout_binding(name, lines):
     - activate < unset PYTHONPATH < the runtime-binding helper < first use,
       with the helper not hidden behind a deeper `if`/`fi` conditional than
       the invocation it's meant to gate.
+    - a non-zero exit from the helper call must actually stop the script
+      before first use (`_helper_failure_is_fail_closed`) -- textual
+      ordering alone is not enough: `ibkr_all_readonly_completion_once.sh`
+      had the helper correctly *positioned* before every audit step, but
+      ran under `set -uo pipefail` (no `-e`) with a bare, unchecked call,
+      so a failed binding would not have stopped the script at all.
 
     A file with no self-update at all (last_update_idx is None) is not
     required to have one here -- this function also serves as the
@@ -826,6 +873,14 @@ def _check_exact_checkout_binding(name, lines):
             f"{depths[helper_idx]}) is nested inside a conditional that the first "
             f"ai_asset_platform invocation (line {first_use_idx + 1}, if-depth "
             f"{depths[first_use_idx]}) can still reach when that conditional is skipped"
+        ]
+
+    if not _helper_failure_is_fail_closed(lines, helper_idx):
+        return [
+            f"{name}: a failed runtime-binding helper (line {helper_idx + 1}) would "
+            "not stop this script before ai_asset_platform is used -- no active "
+            "'set -e' at that point and the call is not itself checked (e.g. "
+            "'if ! bash scripts/ensure_exact_checkout_runtime.sh; then ... exit ...; fi')"
         ]
 
     return []
@@ -1231,3 +1286,82 @@ def test_delegate_chain_unresolvable_target_is_unsafe_not_assumed_safe(tmp_path)
     failures = _verify_delegate_chain(delegator, tmp_path)
     assert failures
     assert any("could not be statically resolved" in f for f in failures), failures
+
+
+def _synthetic_wrapper_lines(set_line, helper_block):
+    return (
+        "#!/usr/bin/env bash\n"
+        f"{set_line}\n"
+        "git pull --ff-only origin main\n"
+        "source .venv/bin/activate\n"
+        "unset PYTHONPATH\n"
+        f"{helper_block}"
+        "python -m ai_asset_platform.brokers.something\n"
+    ).splitlines()
+
+
+def test_synthetic_helper_failure_propagation_errexit_active_passes():
+    """Scenario 1: `set -euo pipefail` + a bare helper call -- a failed
+    helper aborts the script via errexit, so this is fail-closed.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -euo pipefail",
+        "bash scripts/ensure_exact_checkout_runtime.sh\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_errexit.sh", lines)
+    assert not failures, failures
+
+
+def test_synthetic_helper_failure_propagation_explicit_check_passes():
+    """Scenario 2: `set -uo pipefail` (no `-e`) + an explicit
+    `if ! helper; then exit; fi` check -- still fail-closed even without
+    errexit, because the failure is checked directly.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n"
+        '  echo "BLOCKED: exact checkout runtime binding failed. No order was sent."\n'
+        "  exit 2\n"
+        "fi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_explicit_check.sh", lines)
+    assert not failures, failures
+
+
+def test_synthetic_helper_failure_propagation_no_errexit_bare_call_fails():
+    """Scenario 3 (the actual `ibkr_all_readonly_completion_once.sh` bug):
+    `set -uo pipefail` (no `-e`) + a bare, unchecked helper call -- a
+    failed helper does NOT stop the script, so this must be flagged.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "bash scripts/ensure_exact_checkout_runtime.sh\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_no_errexit_bare.sh", lines)
+    assert failures, "expected a failure: helper failure would not stop the script"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_failure_propagation_set_plus_e_after_helper_is_irrelevant():
+    """`set +e` appearing *after* the helper call must not matter -- only
+    the errexit state at the point of the call does.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -euo pipefail",
+        "bash scripts/ensure_exact_checkout_runtime.sh\nset +e\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_set_plus_e_after.sh", lines)
+    assert not failures, failures
+
+
+def test_synthetic_helper_failure_propagation_set_plus_e_before_helper_fails():
+    """`set +e` appearing *before* the helper call disables errexit at
+    that point; without an explicit check, this must be flagged.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -euo pipefail",
+        "set +e\nbash scripts/ensure_exact_checkout_runtime.sh\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_set_plus_e_before.sh", lines)
+    assert failures, "expected a failure: errexit was disabled before the helper call"
+    assert any("would not stop this script" in f for f in failures), failures
