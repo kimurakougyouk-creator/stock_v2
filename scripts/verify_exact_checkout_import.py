@@ -12,12 +12,31 @@ Shared by:
 - scripts/setup.sh (fresh setup)
 - install_ibkr_readonly_autopilot.sh (existing-install migration, before any
   service restart)
+
+Import-context note (Codex PR #287 P1, PRRT_kwDOTZGJWc6i2VXi): every real
+caller invokes `python -m ai_asset_platform...`, where Python prepends
+`sys.path[0] = cwd` (the repo root). This script instead runs as `python
+scripts/verify_exact_checkout_import.py`, where Python prepends
+`sys.path[0] = <this script's own directory>` (`scripts/`) -- a different
+sys.path than the real invocations it verifies. An untracked (so `git
+switch`/`git pull`/`git diff` checks never see it) `ai_asset_platform/`
+directory sitting directly at the repo root would be invisible to this
+check (`scripts/` doesn't contain it) while still shadowing the editable
+install for every real `-m ai_asset_platform...` call (repo root does
+contain it, and repo root is `sys.path[0]` there). `sys.path[0]` is
+corrected to match the real invocation context below before importing
+anything, so this check sees exactly what those callers would.
 """
 import os
 import sys
 
 
 def main() -> int:
+    # Match sys.path[0] to what `python -m ai_asset_platform...` actually
+    # uses (cwd), not this script's own directory (`scripts/`) -- see the
+    # module docstring. Must happen before the import below.
+    sys.path[0] = os.getcwd()
+
     expected_dir = os.path.realpath(os.path.join(os.getcwd(), "src", "ai_asset_platform"))
 
     try:

@@ -311,6 +311,36 @@ wrong, but changing this file's carefully "never auto-updates" design
 without a safety need is exactly what this review chain has repeatedly
 avoided doing to already-safe files. See `_INSTALLER_GATED_EXEMPT` and
 `test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_first_use`.
+
+Follow-up finding (P1, fourteenth review / Codex, PRRT_kwDOTZGJWc6i2VXi,
+`scripts/verify_exact_checkout_import.py`): the shared checker itself did
+not see what its real callers see. Every caller invokes `python -m
+ai_asset_platform...`, where Python prepends `sys.path[0] = cwd` (the repo
+root). The checker instead ran as `python
+scripts/verify_exact_checkout_import.py`, where Python prepends
+`sys.path[0] = <this script's own directory>` (`scripts/`) -- a different
+sys.path than the invocations it exists to verify. An untracked (so `git
+switch`/`git pull`/`git diff` checks never see it) `ai_asset_platform/`
+directory sitting directly at the repo root would shadow the editable
+install for every real `-m ai_asset_platform...` call (repo root is
+`sys.path[0]` there) while being invisible to the checker (`scripts/`
+doesn't contain it) -- the checker would report `OK:` while every actual
+wrapper ran the untracked shadow package instead. Fixed with a one-line,
+surgical change: `sys.path[0] = os.getcwd()` at the top of `main()`,
+before the import, so the checker's own import resolution now matches its
+callers' exactly, and the existing `resolved.startswith(expected_dir)`
+check catches a root-level shadow the same way it already caught a
+PYTHONPATH-based one -- no new shadow-specific check needed, and no
+change to the 38 wrapper call sites: all three real callers
+(`scripts/setup.sh`, `install_ibkr_readonly_autopilot.sh`, and
+`scripts/ensure_exact_checkout_runtime.sh`, which every direct-use
+operational wrapper goes through) invoke this one script the same way, so
+fixing it here closes the gap everywhere at once. Considered and rejected:
+converting `scripts/` into an importable package to run this as `python -m
+scripts.verify_exact_checkout_import` -- correct in principle, but it
+would give `scripts/` package semantics it has never had (affecting every
+other file in that directory) to fix a one-line sys.path issue that a
+one-line fix already solves.
 """
 import os
 import re
@@ -737,6 +767,124 @@ def test_verify_exact_checkout_import_script_is_fail_closed(src_path_venv, tmp_p
     )
     assert "FATAL" in shadowed.stderr
     assert "OK:" not in shadowed.stdout
+
+
+def _write_fake_editable_pth(venv_dir: Path, src_dir: Path) -> None:
+    site_packages = _site_packages_dir(venv_dir)
+    (site_packages / "fake_editable.pth").write_text(str(src_dir) + "\n", encoding="utf-8")
+
+
+def test_verify_exact_checkout_import_matches_real_m_invocation_sys_path(tmp_path):
+    """Codex PR #287 P1 (PRRT_kwDOTZGJWc6i2VXi): every real caller invokes
+    `python -m ai_asset_platform...`, where Python prepends `sys.path[0] =
+    cwd` (the repo root). The verifier used to run as `python
+    scripts/verify_exact_checkout_import.py`, where Python instead prepends
+    `sys.path[0] = <this script's own directory>` (`scripts/`) -- not the
+    same sys.path as the real invocations it exists to verify.
+
+    Built entirely from a synthetic fake "repo" under `tmp_path` (never
+    touches the real checkout's root): a correct `src/ai_asset_platform`
+    (the editable-install target) plus, in the shadow scenario, an
+    untracked `ai_asset_platform/` directly at the fake repo root -- the
+    same thing `git switch`/`git pull`/`git diff` checks would never
+    flag, since it was never tracked.
+
+    A. clean fake repo (no shadow): the verifier passes, resolving to the
+       fake repo's own `src/ai_asset_platform`.
+    B. shadow present at the fake repo root: the verifier must fail
+       closed -- this is the actual regression check for the fix (with
+       the pre-fix `sys.path[0]`, this case passed incorrectly).
+    C. sanity: with the shadow present, a plain `import ai_asset_platform`
+       under the real `-m`/`-c` sys.path[0] behavior (cwd-prepended)
+       resolves to the *shadow*, not the fake repo's `src/`, proving B's
+       failure is catching a real, not hypothetical, divergence.
+
+    Entirely offline: no pip, no network, no broker/TWS/order APIs (a
+    disposable, pip-free venv -- `with_pip=False` -- with a single `.pth`
+    standing in for the editable install, same technique as
+    `src_path_venv`).
+    """
+    fake_root = tmp_path / "fake_repo"
+    fake_src_pkg = fake_root / "src" / "ai_asset_platform"
+    fake_src_pkg.mkdir(parents=True)
+    (fake_src_pkg / "__init__.py").write_text("CORRECT_SRC_PACKAGE = True\n", encoding="utf-8")
+
+    venv_dir = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False).create(venv_dir)
+    venv_python = venv_dir / "bin" / "python"
+    assert venv_python.exists(), "venv creation did not produce a python executable"
+    _write_fake_editable_pth(venv_dir, fake_root / "src")
+
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+
+    # A: clean fake repo, no shadow -- the verifier passes.
+    clean = subprocess.run(
+        [str(venv_python), str(_VERIFY_SCRIPT_PATH)],
+        cwd=fake_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert clean.returncode == 0, (
+        f"expected the verifier to pass for a clean fake checkout:\n"
+        f"stdout={clean.stdout}\nstderr={clean.stderr}"
+    )
+    assert "OK:" in clean.stdout
+    assert str((fake_src_pkg / "__init__.py").resolve()) in clean.stdout
+
+    # Plant the shadow: an untracked ai_asset_platform/ at the fake repo root.
+    shadow_pkg = fake_root / "ai_asset_platform"
+    shadow_pkg.mkdir()
+    shadow_init = shadow_pkg / "__init__.py"
+    shadow_init.write_text("SHADOW_ROOT_PACKAGE = True\n", encoding="utf-8")
+
+    # C (checked first, as the sanity precondition): the real -m/-c
+    # sys.path[0] behavior (cwd-prepended) actually picks up the shadow.
+    real_invocation = subprocess.run(
+        [
+            str(venv_python),
+            "-c",
+            "import ai_asset_platform, os; "
+            "print(os.path.realpath(ai_asset_platform.__file__))",
+        ],
+        cwd=fake_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert real_invocation.returncode == 0, (
+        f"stdout={real_invocation.stdout}\nstderr={real_invocation.stderr}"
+    )
+    assert Path(real_invocation.stdout.strip()).resolve() == shadow_init.resolve(), (
+        "test setup did not reproduce the root-shadow precondition; the real "
+        f"invocation pattern resolved to {real_invocation.stdout.strip()!r} instead "
+        "of the shadow package"
+    )
+
+    # B: the actual regression check -- the verifier must fail closed now
+    # that a shadow exists at the fake repo root, matching what C just
+    # proved the real invocation pattern would actually run.
+    shadowed = subprocess.run(
+        [str(venv_python), str(_VERIFY_SCRIPT_PATH)],
+        cwd=fake_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert shadowed.returncode != 0, (
+        "the verifier must fail closed when an untracked ai_asset_platform/ "
+        f"shadows the editable install at the repo root:\nstdout={shadowed.stdout}\n"
+        f"stderr={shadowed.stderr}"
+    )
+    assert "FATAL" in shadowed.stderr
+    assert "OK:" not in shadowed.stdout
+    assert str(shadow_init.resolve()) in shadowed.stderr, (
+        "expected the FATAL message to name the shadow path it actually resolved to"
+    )
 
 
 def test_stdin_heredoc_wrapper_is_discovered_and_checked():
