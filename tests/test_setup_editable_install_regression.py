@@ -192,6 +192,34 @@ is mechanical (matches on `git pull`/`fetch`/`switch`/`checkout`, not a
 hard-coded filename list), so a future self-updating wrapper that forgets
 this helper will fail `test_all_self_updating_wrappers_bind_exact_checkout_before_first_use`
 automatically.
+
+Follow-up finding (P1, eighth review / Codex, `ibkr_all_readonly_completion_once.sh`):
+the helper call being present and correctly *positioned* before the first
+ai_asset_platform use is not enough -- a failed helper call must actually
+stop the script from reaching that use. `ibkr_all_readonly_completion_once.sh`
+ran under `set -uo pipefail` (no `-e`, intentionally, so `run_readonly_step`
+can collect individual audit-step failures instead of aborting on the
+first one) with a bare, unchecked helper call, so a failed exact-checkout
+binding would not have stopped anything. Fixed by explicitly checking the
+helper's exit status (`if ! bash scripts/ensure_exact_checkout_runtime.sh;
+then echo BLOCKED...; exit 2; fi`) without touching `set -uo pipefail` or
+the "run every audit step" design elsewhere in the file.
+`_helper_failure_is_fail_closed`/`_classify_helper_call_control_flow`
+verify this for every helper-calling wrapper.
+
+Follow-up finding (P1, ninth review / ChatGPT re-audit): the first version
+of that control-flow check treated "the helper call is the condition of
+some `if`" as sufficient proof of safety on its own. It is not:
+`if ! helper; then echo; fi` and `if helper; then echo ok; fi` both let a
+helper failure fall straight through to later code, and both would have
+been misclassified as safe. `_classify_helper_call_control_flow` now
+requires an actual unconditional `exit`/`return`/`exec` reachable on the
+failure path (`if ! helper; then ... exit ...; fi`, or `helper || exit N`
+/ `helper || { ...; exit N; }` on the same line) -- a non-negated
+`if helper; then ...; fi` (or anything more complex: elif chains, a
+while/until condition, a pipeline, a case statement, a multi-line
+continuation) is never assumed safe; it is either proven safe by this
+narrow set of recognized patterns or treated as unverified/unsafe.
 """
 import os
 import re
@@ -266,7 +294,14 @@ _VERIFY_SCRIPT_PATH = ROOT_DIR / "scripts" / "verify_exact_checkout_import.py"
 _HELPER_PATH = ROOT_DIR / "scripts" / "ensure_exact_checkout_runtime.sh"
 _PIP_EDITABLE_INSTALL_RE = re.compile(r"pip install\s+-e\s+\.\s*$")
 _VERIFY_SCRIPT_CALL_RE = re.compile(r"verify_exact_checkout_import\.py")
-_HELPER_CALL_RE = re.compile(r"ensure_exact_checkout_runtime\.sh")
+# Requires the `bash` invocation prefix (not just the bare filename), so a
+# comment that merely *mentions* the helper (e.g. "See
+# scripts/ensure_exact_checkout_runtime.sh for detail") is never mistaken
+# for the actual call -- found via ibkr_auto.sh's own explanatory comment
+# (added in an earlier fix in this same PR) being picked as `helper_idx`
+# ahead of the real call on the next line, silently defeating the
+# control-flow check below (ChatGPT re-audit).
+_HELPER_CALL_RE = re.compile(r"\bbash\s+scripts/ensure_exact_checkout_runtime\.sh\b")
 _SYSTEMCTL_RESTART_RE = re.compile(r"systemctl --user restart")
 
 _SOAK_PATH = ROOT_DIR / "ibkr_readonly_soak_once.sh"
@@ -762,7 +797,8 @@ def _discover_self_updating_wrappers():
 # Short combined `set` flags only (e.g. `set -euo pipefail`, `set +e`) --
 # verified this codebase never uses the long `set -o`/`set +o` form.
 _SET_FLAGS_RE = re.compile(r"^set\s+([+-])([A-Za-z]+)\b")
-_HELPER_LINE_IS_CONDITIONAL_RE = re.compile(r"^if\b.*ensure_exact_checkout_runtime\.sh")
+_EXIT_STATEMENT_RE = re.compile(r"^(?:exit|return|exec)\b")
+_OR_EXIT_SAME_LINE_RE = re.compile(r"\|\|.*\b(?:exit|return|exec)\b")
 
 
 def _errexit_active_before(lines, idx):
@@ -782,22 +818,85 @@ def _errexit_active_before(lines, idx):
     return active
 
 
-def _helper_failure_is_fail_closed(lines, helper_idx):
-    """Whether a non-zero exit from the runtime-binding helper call at
-    `lines[helper_idx]` necessarily stops this script before it can reach
-    any later ai_asset_platform invocation (Codex PR #287 P1,
-    `ibkr_all_readonly_completion_once.sh` review): either bash `errexit`
-    is active at that point, so a bare call aborts the script on failure,
-    or the call is itself the condition of an `if`/`if !`, which must
-    therefore branch on failure rather than silently continue. `set +e`
-    appearing *after* the helper call does not matter here -- only state
-    at the point of the call does.
+def _block_end_index(lines, if_idx, depths):
+    """Index of the `fi` line that closes the if-block opened at
+    `lines[if_idx]` (which must match `_IF_OPEN_RE`), found via `if`/`fi`
+    depth tracking. None if no matching `fi` is found.
     """
-    if _errexit_active_before(lines, helper_idx):
+    target_depth = depths[if_idx]
+    for i in range(if_idx + 1, len(lines)):
+        if _FI_RE.match(lines[i].strip()) and depths[i] == target_depth:
+            return i
+    return None
+
+
+def _block_has_unconditional_exit(lines, depths, start, end, body_depth):
+    """Whether lines[start:end] contains an `exit`/`return`/`exec` at
+    exactly `body_depth` -- i.e. not itself buried in a further nested
+    conditional that could skip it.
+    """
+    return any(
+        depths[i] == body_depth and _EXIT_STATEMENT_RE.match(lines[i].strip())
+        for i in range(start, end)
+    )
+
+
+def _classify_helper_call_control_flow(lines, depths, helper_idx, errexit_active):
+    """Whether a non-zero exit from the runtime-binding helper call at
+    `lines[helper_idx]` necessarily terminates this script's control flow
+    before it can reach any later ai_asset_platform invocation (Codex
+    PR #287 P1, `ibkr_all_readonly_completion_once.sh` review, and its
+    follow-up: the helper call being the *condition* of an `if` is not, by
+    itself, proof of anything -- `if helper; then ...; fi` and
+    `if ! helper; then echo; fi` both let a failure fall straight through).
+
+    Returns True (verified safe), False (verified unsafe), or None (cannot
+    be statically verified here) -- callers must treat None the same as
+    False, never assume safety when it can't be shown.
+    """
+    line = lines[helper_idx].strip()
+
+    # `helper || exit N` / `helper || { ...; exit N; }` on the same line:
+    # on failure, the right-hand side runs unconditionally.
+    if _OR_EXIT_SAME_LINE_RE.search(line):
         return True
-    if _HELPER_LINE_IS_CONDITIONAL_RE.match(lines[helper_idx].strip()):
-        return True
-    return False
+
+    # `if [!] <...helper...>; then` -- the helper call is itself the
+    # if-condition.
+    if re.match(r"^if\b", line):
+        negated = bool(re.match(r"^if\s*!\s*", line))
+        if not negated:
+            # Failure -> the `then` body is skipped, and execution falls
+            # straight through past `fi` regardless of what the `then`
+            # body (or any else/elif) contains. Not verified safe by this
+            # analysis -- treated conservatively as unsafe rather than
+            # trying to reason about else/elif chains.
+            return False
+        block_end = _block_end_index(lines, helper_idx, depths)
+        if block_end is None:
+            return None
+        body_depth = depths[helper_idx] + 1
+        return _block_has_unconditional_exit(lines, depths, helper_idx + 1, block_end, body_depth)
+
+    # A bare statement: the entire line is just the helper invocation,
+    # nothing else -- errexit is what would stop the script here. (Note
+    # this is *not* checked for the `if`/`||` cases above: a command's
+    # exit status used as an if/while condition, or as part of `||`/`&&`,
+    # is exempt from triggering errexit regardless of whether it's active.)
+    if line == "bash scripts/ensure_exact_checkout_runtime.sh":
+        return errexit_active
+
+    # Anything else (part of a pipeline, a while/until condition, a case
+    # statement, `&&`, a multi-line continuation, ...) is not statically
+    # verified here -- never assumed safe.
+    return None
+
+
+def _helper_failure_is_fail_closed(lines, depths, helper_idx):
+    errexit_active = _errexit_active_before(lines, helper_idx)
+    return bool(
+        _classify_helper_call_control_flow(lines, depths, helper_idx, errexit_active)
+    )
 
 
 def _check_exact_checkout_binding(name, lines):
@@ -875,7 +974,7 @@ def _check_exact_checkout_binding(name, lines):
             f"{depths[first_use_idx]}) can still reach when that conditional is skipped"
         ]
 
-    if not _helper_failure_is_fail_closed(lines, helper_idx):
+    if not _helper_failure_is_fail_closed(lines, depths, helper_idx):
         return [
             f"{name}: a failed runtime-binding helper (line {helper_idx + 1}) would "
             "not stop this script before ai_asset_platform is used -- no active "
@@ -1365,3 +1464,78 @@ def test_synthetic_helper_failure_propagation_set_plus_e_before_helper_fails():
     failures = _check_exact_checkout_binding("synthetic_set_plus_e_before.sh", lines)
     assert failures, "expected a failure: errexit was disabled before the helper call"
     assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_conditional_negated_with_exit_passes():
+    """`if ! helper; then ... exit N; fi` -- failure runs the `then` body,
+    which unconditionally exits. Safe, even without errexit. This is the
+    actual pattern used by `ibkr_all_readonly_completion_once.sh`.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n"
+        '  echo "BLOCKED: exact checkout runtime binding failed. No order was sent."\n'
+        "  exit 2\n"
+        "fi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_negated_with_exit.sh", lines)
+    assert not failures, failures
+
+
+def test_synthetic_helper_conditional_negated_without_exit_fails():
+    """`if ! helper; then echo; fi` (no `exit`/`return`/`exec` in the
+    body) -- on failure, the body runs but doesn't stop the script, and
+    execution falls through past `fi` to whatever comes next. Must be
+    flagged: merely being an if-condition is not proof of anything.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n"
+        '  echo "binding failed"\n'
+        "fi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_negated_without_exit.sh", lines)
+    assert failures, "expected a failure: the then-body never exits on helper failure"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_conditional_plain_fails():
+    """`if helper; then echo ok; fi` (not negated, no else) -- on
+    *failure*, the `then` body is skipped entirely and execution falls
+    straight through past `fi`; the failure path has no handling at all.
+    Must be flagged.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if bash scripts/ensure_exact_checkout_runtime.sh; then\n"
+        '  echo "ok"\n'
+        "fi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_plain_if.sh", lines)
+    assert failures, "expected a failure: the failure path is entirely unhandled"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_or_exit_same_line_passes():
+    """`helper || exit N` on one line -- failure unconditionally exits.
+    Safe, even without errexit.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "bash scripts/ensure_exact_checkout_runtime.sh || exit 2\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_or_exit.sh", lines)
+    assert not failures, failures
+
+
+def test_synthetic_helper_or_exit_brace_group_passes():
+    """`helper || { ...; exit N; }` -- failure runs the brace group, which
+    unconditionally exits. Not currently used by any real wrapper, but
+    must still be recognized as safe.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        'bash scripts/ensure_exact_checkout_runtime.sh || { echo "failed"; exit 2; }\n',
+    )
+    failures = _check_exact_checkout_binding("synthetic_or_exit_brace.sh", lines)
+    assert not failures, failures
