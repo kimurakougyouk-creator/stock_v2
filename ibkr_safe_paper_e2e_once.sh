@@ -21,6 +21,7 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 # Repository safety first. A test failure stops before any local ledger mutation
 # or Paper order attempt.

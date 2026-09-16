@@ -15,6 +15,7 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 pytest -q tests/test_ibkr_verified_derivative_ledger_cleanup.py
 

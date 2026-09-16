@@ -140,6 +140,58 @@ already requires network reachability, and this exact `pip install -e .`
 invocation (no `--no-build-isolation`/`--no-index`) is the same one already
 used and passing in `scripts/setup.sh`, `install_ibkr_readonly_autopilot.sh`,
 and `.github/workflows/pytest.yml`.
+
+Follow-up finding (P1-A/P1-B, seventh review / Codex, cross-cutting, PR
+#287 Stage1): the sixth-review fix above was a one-off patch of
+`ibkr_auto.sh` alone, and it was itself unsafe. A read-only, mechanical
+audit of every root and `scripts/*.sh` file for a git self-update
+(`pull`/`fetch`/`switch`/`checkout`) found 31 self-updating wrappers, not
+just `ibkr_auto.sh` -- e.g. `ibkr_crypto_whatif_once.sh`,
+`ibkr_future_whatif_once.sh`, `ibkr_option_paper_roundtrip_once.sh`, and
+27 others, all with the same P1-A shape (self-update -> activate -> unset
+PYTHONPATH -> direct `ai_asset_platform` use, with no migration/verify at
+all). Patching each individually, copy-pasting `pip install -e .` +
+`verify_exact_checkout_import.py` into every one of them, was rejected: it
+also reproduces P1-B -- unconditionally calling `pip install -e .` breaks
+`ibkr_auto.sh`'s own documented contract of continuing read-only
+monitoring when `git pull` fails/origin is unreachable, because PEP 517
+build isolation needs the network to fetch the build backend
+(`setuptools>=68`, per `pyproject.toml`), and this repo's own `.venv` does
+*not* retain setuptools/wheel after its own initial editable install
+(verified empirically: a fresh `python3 -m venv .venv` plus a real
+`pip install -e .` leaves neither `setuptools` nor `wheel` importable
+afterward), so `--no-build-isolation` cannot be assumed to work on an
+arbitrary already-set-up `.venv` either.
+
+Fixed with one shared helper, `scripts/ensure_exact_checkout_runtime.sh`,
+reusing (not duplicating) `scripts/verify_exact_checkout_import.py`:
+verify first; only migrate (`pip install -e .`) if that verify fails; then
+re-verify; fail closed if either check still fails. In the steady state
+(the common case: `.venv` already migrated once), this never calls `pip`
+and never touches the network -- verified empirically to complete in
+under 50ms with no build backend contacted, versus several seconds with
+real network I/O when migration is actually needed. This makes every
+self-updating wrapper's `git`-pull-failure-tolerance (where it has one)
+and offline-capability strictly no worse than before, while still
+guaranteeing `ai_asset_platform` is bound to the exact current checkout
+before use, or the wrapper fails closed. All 30 self-updating wrappers with
+a direct `ai_asset_platform` use now call this one helper (`ibkr_auto.sh`
+itself was changed from its sixth-review inline pip+verify to the same
+helper call, for one design instead of two); `ibkr_readonly_soak_once.sh`
+is self-updating but never uses `ai_asset_platform` directly (it only runs
+`pytest` and delegates to `bash ./ibkr_auto.sh`, which gates itself), so it
+does not need its own gate. `scripts/setup.sh` and
+`install_ibkr_readonly_autopilot.sh` were left unchanged: neither has a
+"continue when offline" contract (the installer doesn't even `git pull`),
+so their existing unconditional `pip install -e .` + verify is already
+safe for their own contract, and rewriting already-tested, working files
+without a safety need would be scope creep beyond this Stage1 fix.
+
+The cross-cutting discovery this file uses (`_discover_self_updating_wrappers`)
+is mechanical (matches on `git pull`/`fetch`/`switch`/`checkout`, not a
+hard-coded filename list), so a future self-updating wrapper that forgets
+this helper will fail `test_all_self_updating_wrappers_bind_exact_checkout_before_first_use`
+automatically.
 """
 import os
 import re
@@ -211,12 +263,18 @@ def _find_first_ai_asset_platform_invocation(lines):
 
 _INSTALLER_PATH = ROOT_DIR / "install_ibkr_readonly_autopilot.sh"
 _VERIFY_SCRIPT_PATH = ROOT_DIR / "scripts" / "verify_exact_checkout_import.py"
+_HELPER_PATH = ROOT_DIR / "scripts" / "ensure_exact_checkout_runtime.sh"
 _PIP_EDITABLE_INSTALL_RE = re.compile(r"pip install\s+-e\s+\.\s*$")
 _VERIFY_SCRIPT_CALL_RE = re.compile(r"verify_exact_checkout_import\.py")
+_HELPER_CALL_RE = re.compile(r"ensure_exact_checkout_runtime\.sh")
 _SYSTEMCTL_RESTART_RE = re.compile(r"systemctl --user restart")
 
 _SOAK_PATH = ROOT_DIR / "ibkr_readonly_soak_once.sh"
 _SOAK_FIRST_USE_RE = re.compile(r"python3?\s+(\S+\s+)*-m\s+pytest\b|^pytest\b|\bbash \./\S+\.sh\b")
+
+# Self-update indicators: any command that can change this checkout's own
+# tracked source before the wrapper keeps running.
+_GIT_UPDATE_RE = re.compile(r"^(if\s+)?git\s+(pull|fetch)\b|^git\s+switch\b|^git\s+checkout\b")
 
 # Bash `if ...; then` / `fi` nesting depth tracker, single-line-conditional
 # only (matches this codebase's actual style -- verified against all
@@ -631,11 +689,15 @@ def test_ibkr_auto_migrates_venv_after_pull_before_first_use():
     checkout and, once PYTHONPATH is correctly unset, hit
     ModuleNotFoundError or resolve ai_asset_platform to a stale/wrong
     checkout. Must, in order: `set -euo pipefail` -> git pull -> activate ->
-    unset PYTHONPATH -> editable-install (migrating the .venv) -> the shared
-    fail-closed exact-checkout verifier -> only then the first
-    ai_asset_platform invocation. `set -euo pipefail` being active before
-    the pull means a failed migration/verification later aborts the rest of
-    the cycle before any ai_asset_platform module runs.
+    unset PYTHONPATH -> the shared runtime-binding helper (verify-first,
+    migrate-only-on-failure) -> only then the first ai_asset_platform
+    invocation. `set -euo pipefail` being active before the pull means a
+    failed migration/verification later aborts the rest of the cycle before
+    any ai_asset_platform module runs. `ibkr_auto.sh` must NOT call `pip` or
+    the verifier directly -- it must go through the one shared helper, so a
+    verify-first (no-network-when-already-correct) design applies here too,
+    preserving this script's "keep monitoring even when origin is
+    unreachable" contract.
     """
     assert _IBKR_AUTO_PATH.is_file(), f"missing {_IBKR_AUTO_PATH}"
     lines = _IBKR_AUTO_PATH.read_text(encoding="utf-8").splitlines()
@@ -644,33 +706,290 @@ def test_ibkr_auto_migrates_venv_after_pull_before_first_use():
     pull_idx = next((i for i, l in enumerate(lines) if _GIT_PULL_RE.search(l)), None)
     activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
     unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
-    pip_idx = next((i for i, l in enumerate(lines) if _PIP_EDITABLE_INSTALL_RE.search(l)), None)
-    verify_idx = next((i for i, l in enumerate(lines) if _VERIFY_SCRIPT_CALL_RE.search(l)), None)
+    helper_idx = next((i for i, l in enumerate(lines) if _HELPER_CALL_RE.search(l)), None)
     first_use_idx = _find_first_ai_asset_platform_invocation(lines)
 
     assert strict_mode_idx is not None, "ibkr_auto.sh must have 'set -euo pipefail'"
     assert pull_idx is not None, "ibkr_auto.sh must git pull --ff-only origin main"
     assert activate_idx is not None, "ibkr_auto.sh must source .venv/bin/activate"
     assert unset_idx is not None, "ibkr_auto.sh must unset inherited PYTHONPATH"
-    assert pip_idx is not None, (
-        "ibkr_auto.sh must editable-install into the (possibly pre-existing, "
-        "possibly stale) .venv after pulling and before using ai_asset_platform"
-    )
-    assert verify_idx is not None, (
-        "ibkr_auto.sh must run the shared exact-checkout fail-closed verifier"
+    assert helper_idx is not None, (
+        "ibkr_auto.sh must call the shared runtime-binding helper "
+        "(scripts/ensure_exact_checkout_runtime.sh) before using ai_asset_platform"
     )
     assert first_use_idx is not None, "ibkr_auto.sh must invoke ai_asset_platform"
 
-    assert (
-        strict_mode_idx < pull_idx < activate_idx < unset_idx < pip_idx < verify_idx < first_use_idx
-    ), (
+    assert strict_mode_idx < pull_idx < activate_idx < unset_idx < helper_idx < first_use_idx, (
         "ibkr_auto.sh must run: set -euo pipefail -> git pull -> activate -> "
-        "unset PYTHONPATH -> editable-install -> fail-closed verify -> first "
-        f"ai_asset_platform use, in that order; got strict_mode={strict_mode_idx} "
-        f"pull={pull_idx} activate={activate_idx} unset={unset_idx} "
-        f"pip={pip_idx} verify={verify_idx} first_use={first_use_idx}"
+        "unset PYTHONPATH -> runtime-binding helper -> first ai_asset_platform "
+        f"use, in that order; got strict_mode={strict_mode_idx} pull={pull_idx} "
+        f"activate={activate_idx} unset={unset_idx} helper={helper_idx} "
+        f"first_use={first_use_idx}"
     )
 
-    # Reuses the one shared checker (also used by scripts/setup.sh and
-    # install_ibkr_readonly_autopilot.sh) -- no duplicate verifier introduced.
+    # ibkr_auto.sh must not duplicate the migration/verification logic
+    # itself; it must go through the one shared helper/verifier.
+    assert not any(_PIP_EDITABLE_INSTALL_RE.search(l) for l in lines), (
+        "ibkr_auto.sh must not call 'pip install -e .' directly -- it must go "
+        "through scripts/ensure_exact_checkout_runtime.sh, so the common case "
+        "(already-correct .venv) never touches pip/network"
+    )
+    assert not any(_VERIFY_SCRIPT_CALL_RE.search(l) for l in lines), (
+        "ibkr_auto.sh must not call verify_exact_checkout_import.py directly -- "
+        "it must go through the shared helper"
+    )
+
+    # Reuses the one shared checker/helper (also usable by scripts/setup.sh
+    # and install_ibkr_readonly_autopilot.sh) -- no duplicate verifier.
     assert _VERIFY_SCRIPT_PATH.is_file(), f"missing {_VERIFY_SCRIPT_PATH}"
+    assert _HELPER_PATH.is_file(), f"missing {_HELPER_PATH}"
+
+
+def _discover_self_updating_wrappers():
+    """Every *.sh script (repo root + scripts/) whose own execution can
+    change its checkout's tracked source (git pull/fetch/switch/checkout),
+    mechanically -- not a hard-coded filename list, so a future
+    self-updating wrapper is automatically covered.
+    """
+    candidates = sorted(ROOT_DIR.glob("*.sh")) + sorted((ROOT_DIR / "scripts").glob("*.sh"))
+    return [
+        path
+        for path in candidates
+        if any(_GIT_UPDATE_RE.match(l.strip()) for l in path.read_text(encoding="utf-8").splitlines())
+    ]
+
+
+def test_all_self_updating_wrappers_bind_exact_checkout_before_first_use():
+    """Cross-cutting proof for every self-updating wrapper (P1-A), not just
+    `ibkr_auto.sh`: a self-update (git pull/fetch/switch/checkout) can bring
+    in a newer checkout than an older, never-migrated `.venv` has installed.
+    Every such wrapper that directly uses `ai_asset_platform` must, in
+    order: self-update -> activate -> unset PYTHONPATH -> the shared
+    runtime-binding helper -> first ai_asset_platform use. As with the
+    PYTHONPATH check, textual presence is not enough: the helper call must
+    not be reachable-but-skippable relative to the first invocation (same
+    `if`/`fi` depth requirement as `unset PYTHONPATH`).
+
+    Wrappers that self-update but never call `ai_asset_platform` directly
+    (e.g. `ibkr_readonly_soak_once.sh`, which only runs `pytest` and
+    delegates to `bash ./ibkr_auto.sh`) are skipped here -- the delegate
+    they call gates itself.
+    """
+    wrappers = _discover_self_updating_wrappers()
+    assert len(wrappers) >= 25, (
+        f"expected at least 25 self-updating wrappers, found {len(wrappers)}: "
+        f"{[w.name for w in wrappers]}"
+    )
+
+    failures = []
+    checked = 0
+    for path in wrappers:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        first_use_idx = _find_first_ai_asset_platform_invocation(lines)
+        if first_use_idx is None:
+            continue  # delegate-only wrapper; the delegate gates itself
+
+        checked += 1
+        depths = _bash_conditional_depths(lines)
+        update_idx = next((i for i, l in enumerate(lines) if _GIT_UPDATE_RE.match(l.strip())), None)
+        activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+        unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
+        helper_idx = next((i for i, l in enumerate(lines) if _HELPER_CALL_RE.search(l)), None)
+
+        missing = [
+            name
+            for name, idx in (
+                ("self-update", update_idx),
+                ("activate", activate_idx),
+                ("unset PYTHONPATH", unset_idx),
+                ("runtime-binding helper", helper_idx),
+            )
+            if idx is None
+        ]
+        if missing:
+            failures.append(f"{path.name}: missing {', '.join(missing)}")
+            continue
+
+        if not (update_idx < activate_idx < unset_idx < helper_idx < first_use_idx):
+            failures.append(
+                f"{path.name}: expected self-update < activate < unset < helper < "
+                f"first_use; got update={update_idx} activate={activate_idx} "
+                f"unset={unset_idx} helper={helper_idx} first_use={first_use_idx}"
+            )
+            continue
+
+        if depths[helper_idx] > depths[first_use_idx]:
+            failures.append(
+                f"{path.name}: runtime-binding helper (line {helper_idx + 1}, "
+                f"if-depth {depths[helper_idx]}) is nested inside a conditional "
+                f"that the first ai_asset_platform invocation (line "
+                f"{first_use_idx + 1}, if-depth {depths[first_use_idx]}) can "
+                "still reach when that conditional is skipped"
+            )
+
+    assert checked >= 25, (
+        f"expected at least 25 self-updating wrappers with a direct ai_asset_platform "
+        f"use, found {checked}"
+    )
+    assert not failures, (
+        "self-updating wrappers not exact-checkout-bound before first use:\n"
+        + "\n".join(failures)
+    )
+
+
+def _write_fake_python(bin_dir: Path) -> None:
+    """A `python` stand-in used only to test scripts/ensure_exact_checkout_runtime.sh
+    in isolation: no real venv, no real pip, no network. Behavior is driven
+    entirely by env vars the test sets, and every call is logged so tests
+    can assert whether pip was ever invoked.
+    """
+    fake = bin_dir / "python"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys, pathlib\n"
+        'state_dir = pathlib.Path(os.environ["FAKE_PYTHON_STATE_DIR"])\n'
+        'with (state_dir / "calls.log").open("a") as f:\n'
+        '    f.write(repr(sys.argv[1:]) + "\\n")\n'
+        "argv = sys.argv[1:]\n"
+        'if argv and argv[0] == "scripts/verify_exact_checkout_import.py":\n'
+        '    count_file = state_dir / "verify_count"\n'
+        "    n = int(count_file.read_text()) if count_file.exists() else 0\n"
+        "    n += 1\n"
+        "    count_file.write_text(str(n))\n"
+        '    code = int(os.environ.get(f"FAKE_VERIFY_EXIT_{n}", os.environ.get("FAKE_VERIFY_EXIT_DEFAULT", "0")))\n'
+        '    print(f"FAKE VERIFY call #{n} exit={code}")\n'
+        "    sys.exit(code)\n"
+        'if "pip" in argv and "install" in argv:\n'
+        '    (state_dir / "pip_called").write_text("1")\n'
+        '    code = int(os.environ.get("FAKE_PIP_EXIT", "0"))\n'
+        '    print(f"FAKE PIP install exit={code}")\n'
+        "    sys.exit(code)\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+
+def _run_helper_with_fake_python(tmp_path, env_overrides):
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_fake_python(bin_dir)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["FAKE_PYTHON_STATE_DIR"] = str(state_dir)
+    env.pop("PYTHONPATH", None)
+    env.update(env_overrides)
+
+    result = subprocess.run(
+        ["bash", str(_HELPER_PATH)],
+        cwd=ROOT_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    pip_called = (state_dir / "pip_called").exists()
+    return result, pip_called
+
+
+def test_ensure_exact_checkout_runtime_passes_without_pip_when_already_correct(tmp_path):
+    """Helper scenario 1: first verify PASSes -> no migration, no pip call."""
+    result, pip_called = _run_helper_with_fake_python(tmp_path, {"FAKE_VERIFY_EXIT_1": "0"})
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert not pip_called, "helper must not call pip when the first verify already passes"
+
+
+def test_ensure_exact_checkout_runtime_migrates_then_succeeds(tmp_path):
+    """Helper scenario 2: first verify FAILs -> migration succeeds -> re-verify PASSes."""
+    result, pip_called = _run_helper_with_fake_python(
+        tmp_path,
+        {"FAKE_VERIFY_EXIT_1": "1", "FAKE_PIP_EXIT": "0", "FAKE_VERIFY_EXIT_2": "0"},
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert pip_called, "helper must migrate when the first verify fails"
+
+
+def test_ensure_exact_checkout_runtime_fails_closed_when_migration_fails(tmp_path):
+    """Helper scenario 3: first verify FAILs -> migration itself fails -> fail closed."""
+    result, pip_called = _run_helper_with_fake_python(
+        tmp_path, {"FAKE_VERIFY_EXIT_1": "1", "FAKE_PIP_EXIT": "1"}
+    )
+    assert result.returncode != 0, "helper must fail closed when migration fails"
+    assert pip_called
+
+
+def test_ensure_exact_checkout_runtime_fails_closed_when_reverify_fails(tmp_path):
+    """Helper scenario 4: migration succeeds but re-verify still FAILs -> fail closed."""
+    result, pip_called = _run_helper_with_fake_python(
+        tmp_path,
+        {"FAKE_VERIFY_EXIT_1": "1", "FAKE_PIP_EXIT": "0", "FAKE_VERIFY_EXIT_2": "1"},
+    )
+    assert result.returncode != 0, (
+        "helper must fail closed when ai_asset_platform still does not resolve "
+        "correctly after a successful migration"
+    )
+    assert pip_called
+
+
+def test_ensure_exact_checkout_runtime_real_verifier_already_correct_skips_pip_offline(
+    src_path_venv,
+):
+    """Helper scenario 6, with the *real* verifier (not faked): a venv that
+    already resolves ai_asset_platform to this checkout (via the offline
+    `.pth` fixture, no pip installed at all -- `with_pip=False`) must pass
+    without ever invoking pip. `PIP_NO_INDEX=1` simulates an explicit
+    offline policy; since this venv cannot run pip at all, any success here
+    mathematically proves pip was never invoked.
+    """
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env["PATH"] = f"{src_path_venv.parent}:{env['PATH']}"
+    env["PIP_NO_INDEX"] = "1"
+
+    result = subprocess.run(
+        ["bash", str(_HELPER_PATH)],
+        cwd=ROOT_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "OK:" in result.stdout
+
+
+def test_ensure_exact_checkout_runtime_hostile_pythonpath_fails_closed_not_silently(
+    src_path_venv, tmp_path
+):
+    """Helper scenario 5, with the *real* verifier: if a caller forgot to
+    `unset PYTHONPATH` (or it leaked back in), a hostile inherited
+    PYTHONPATH makes the first verify see the wrong package and fail. The
+    helper then tries to migrate; in this pip-free venv (`with_pip=False`)
+    that migration itself fails, so the helper fails closed -- it never
+    treats the hostile package as a valid resolution.
+    """
+    hostile_dir = tmp_path / "hostile_pythonpath_for_helper"
+    hostile_pkg = hostile_dir / "ai_asset_platform"
+    hostile_pkg.mkdir(parents=True)
+    (hostile_pkg / "__init__.py").write_text("HOSTILE = True\n", encoding="utf-8")
+
+    env = dict(os.environ)
+    env["PATH"] = f"{src_path_venv.parent}:{env['PATH']}"
+    env["PYTHONPATH"] = str(hostile_dir)
+
+    result = subprocess.run(
+        ["bash", str(_HELPER_PATH)],
+        cwd=ROOT_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0, (
+        "helper must fail closed rather than accept a hostile-PYTHONPATH-shadowed "
+        f"resolution:\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+    assert "OK:" not in result.stdout

@@ -29,6 +29,7 @@ done
 
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 # Run the full default-safe regression suite before contacting IBKR.
 python -m pytest -q

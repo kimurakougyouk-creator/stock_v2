@@ -19,6 +19,7 @@ fi
 
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 # Run the complete regression suite in the normal default-safe environment.
 # The dedicated IBKR Paper opt-in is applied only to the reset process below,

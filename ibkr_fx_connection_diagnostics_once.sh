@@ -13,6 +13,7 @@ fi
 
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 python -m pytest -q
 python -m ai_asset_platform.brokers.ibkr_fx_connection_diagnostics

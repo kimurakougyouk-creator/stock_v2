@@ -19,6 +19,7 @@ fi
 
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 # Regression suite remains in the normal default-safe environment.
 python -m pytest -q

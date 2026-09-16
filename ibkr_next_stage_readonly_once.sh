@@ -5,6 +5,7 @@ git switch main >/dev/null
 git pull --ff-only origin main
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 python -m pytest -q
 python -m ai_asset_platform.accounting.futures_postfill_audit
 python -m ai_asset_platform.brokers.ibkr_option_chain_discovery

@@ -19,6 +19,7 @@ fi
 
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 export AI_ASSET_ENABLE_IBKR_PAPER=true
 export AI_ASSET_ENABLE_IBKR_OVERNIGHT_CLOSE_E2E=true
 export AI_ASSET_ENABLE_IBKR_EXTENDED_CLOSE_E2E=true

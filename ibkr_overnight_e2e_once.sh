@@ -29,6 +29,7 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 mkdir -p "$LOG_DIR"
 
 # Wait for the user's local Paper endpoint; no broker request/order during wait.

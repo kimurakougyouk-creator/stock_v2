@@ -32,14 +32,13 @@ fi
 source .venv/bin/activate
 unset PYTHONPATH
 
-# The git pull above may have fetched a newer checkout than an older .venv
-# (created before editable install was required) has installed. Migrate
-# this .venv to the current checkout and fail closed if ai_asset_platform
-# still does not resolve here under plain python -- before any
-# ai_asset_platform module is invoked below. `set -e` (top of file) means a
-# failed migration/verification aborts the rest of this cycle.
-python -m pip install -e .
-python scripts/verify_exact_checkout_import.py
+# The git pull above may have fetched a newer checkout than this .venv has
+# installed. This verifies first and only migrates (pip install -e .) if
+# that verify fails, so the common case -- .venv already bound to this
+# checkout -- never touches pip or the network, preserving this script's
+# "keep monitoring even when origin is unreachable" contract. See
+# scripts/ensure_exact_checkout_runtime.sh for the fail-closed detail.
+bash scripts/ensure_exact_checkout_runtime.sh
 
 mkdir -p "$LOG_DIR"
 

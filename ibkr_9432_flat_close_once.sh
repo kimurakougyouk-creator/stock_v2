@@ -18,6 +18,7 @@ fi
 
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 # Regression tests deliberately run before any Paper opt-in is set so the
 # repository's default-safe behavior remains tested exactly as shipped.
