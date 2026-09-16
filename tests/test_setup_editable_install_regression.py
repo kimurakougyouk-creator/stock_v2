@@ -341,6 +341,33 @@ scripts.verify_exact_checkout_import` -- correct in principle, but it
 would give `scripts/` package semantics it has never had (affecting every
 other file in that directory) to fix a one-line sys.path issue that a
 one-line fix already solves.
+
+Follow-up finding (P1, fifteenth review / Codex, PRRT_kwDOTZGJWc6i3eu6,
+`scripts/verify_exact_checkout_import.py`): the previous fix corrected
+*which* sys.path the checker searches, but the checker still decided
+safety by `import ai_asset_platform` first and reading
+`ai_asset_platform.__file__` second -- which executes whatever package it
+finds (the real one, or a root-level shadow) *before* judging whether
+that was safe to run at all. Any package's own `__init__.py` can freely
+rebind its module-level `__file__` while running, so a root-shadow
+package can forge the exact legitimate path this checker trusted, after
+already having executed arbitrary code (reproduced with a synthetic
+shadow that both writes a marker file and forges `__file__` to the
+expected `src/ai_asset_platform/__init__.py` path -- the unfixed checker
+printed `OK:` for it). Fixed by switching to
+`importlib.util.find_spec("ai_asset_platform")`, which resolves where a
+module *would* load from by walking `sys.path` through the standard
+finders -- `PathFinder` locates a package by checking for a matching
+directory/file, it does not execute `__init__.py` to do that -- and
+judging safety entirely from the returned `ModuleSpec` (`spec.origin`,
+and `spec.submodule_search_locations` since this project's package must
+be a real package with submodules, not a namespace package or a
+single-file module) before importing anything. Only once origin and
+search locations are both confirmed to be exactly this checkout's
+`src/ai_asset_platform/` does the checker import the package at all, as
+an optional plain sanity check that it imports cleanly -- by then it has
+already been judged safe, so running it is no longer the risk the fix
+removes.
 """
 import os
 import re
@@ -885,6 +912,137 @@ def test_verify_exact_checkout_import_matches_real_m_invocation_sys_path(tmp_pat
     assert str(shadow_init.resolve()) in shadowed.stderr, (
         "expected the FATAL message to name the shadow path it actually resolved to"
     )
+
+
+def test_verify_exact_checkout_import_resolves_origin_before_executing_package(tmp_path):
+    """Codex PR #287 P1 (PRRT_kwDOTZGJWc6i3eu6): the checker must never
+    execute the target package's code before judging whether it is safe to
+    run at all. A prior version did `import ai_asset_platform` and only
+    *then* read `ai_asset_platform.__file__` -- but any package's own
+    `__init__.py` can freely rebind its module-level `__file__` while
+    running, so a root-shadow package can forge the exact path this
+    checker trusts, after already having executed whatever it wanted to.
+    Fixed via `importlib.util.find_spec`, which resolves where a module
+    would load from by walking `sys.path` only -- the standard finders
+    never execute `__init__.py` to do this -- so the safety judgment now
+    happens strictly before any package code runs.
+
+    Built entirely from a synthetic fake "repo" under `tmp_path` (never
+    touches the real checkout):
+
+    A. clean fake repo (no shadow): passes.
+    B/C. a root-shadow package whose `__init__.py` (i) writes a marker
+       file as a side effect proving it ran, and (ii) rebinds its own
+       `__file__` to the expected legitimate path: the checker must still
+       fail closed, reporting the shadow's *real* origin.
+    D. the marker file must never exist after running the checker against
+       that shadow -- proof its code never ran as part of, or before, the
+       safety judgment.
+    E. a single-file root-level `ai_asset_platform.py` shadow (not a
+       package -- `submodule_search_locations` is empty) fails closed too.
+    F. a stale/shared editable install pointing at a *different*
+       checkout's `src/ai_asset_platform` fails closed.
+    G. the correct checkout, re-confirmed after all of the above, still
+       passes.
+
+    Entirely offline (H): a disposable, pip-free venv (`with_pip=False`)
+    with a single `.pth` standing in for the editable install -- no pip,
+    no network, no broker/TWS/order APIs.
+    """
+    fake_root = tmp_path / "fake_repo"
+    fake_src_pkg = fake_root / "src" / "ai_asset_platform"
+    fake_src_pkg.mkdir(parents=True)
+    (fake_src_pkg / "__init__.py").write_text("CORRECT_SRC_PACKAGE = True\n", encoding="utf-8")
+
+    venv_dir = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False).create(venv_dir)
+    venv_python = venv_dir / "bin" / "python"
+    assert venv_python.exists(), "venv creation did not produce a python executable"
+    _write_fake_editable_pth(venv_dir, fake_root / "src")
+
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+
+    def run_checker():
+        return subprocess.run(
+            [str(venv_python), str(_VERIFY_SCRIPT_PATH)],
+            cwd=fake_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    # A: clean fake repo, no shadow.
+    clean = run_checker()
+    assert clean.returncode == 0, f"stdout={clean.stdout}\nstderr={clean.stderr}"
+    assert "OK:" in clean.stdout
+
+    # B/C/D: a root-shadow package whose __init__.py runs a side effect
+    # and forges __file__ to the expected legitimate path.
+    marker_path = fake_root / "SHADOW_EXECUTED_MARKER"
+    shadow_pkg = fake_root / "ai_asset_platform"
+    shadow_pkg.mkdir()
+    shadow_init = shadow_pkg / "__init__.py"
+    shadow_init.write_text(
+        "import os\n"
+        f"with open({str(marker_path)!r}, 'w') as f:\n"
+        "    f.write('shadow ran\\n')\n"
+        "__file__ = os.path.realpath(\n"
+        "    os.path.join(os.getcwd(), 'src', 'ai_asset_platform', '__init__.py')\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    assert not marker_path.exists(), "test setup produced a stale marker file"
+
+    spoofed = run_checker()
+    assert spoofed.returncode != 0, (
+        "the checker must fail closed for a root-shadow package that forges its "
+        f"own __file__:\nstdout={spoofed.stdout}\nstderr={spoofed.stderr}"
+    )
+    assert "FATAL" in spoofed.stderr
+    assert "OK:" not in spoofed.stdout
+    # The FATAL message must name the shadow's *real* origin -- not the
+    # forged path it tried to claim.
+    assert str(shadow_init.resolve()) in spoofed.stderr
+
+    # D: the shadow's own code must never have run.
+    assert not marker_path.exists(), (
+        "the shadow package's __init__.py executed (marker file exists) -- the "
+        "safety judgment must happen strictly before any package code runs"
+    )
+
+    import shutil
+
+    shutil.rmtree(shadow_pkg)
+
+    # E: a single-file root-level shadow module (not a package) also
+    # fails closed.
+    shadow_module = fake_root / "ai_asset_platform.py"
+    shadow_module.write_text("SHADOW_MODULE = True\n", encoding="utf-8")
+    module_shadowed = run_checker()
+    assert module_shadowed.returncode != 0, (
+        f"stdout={module_shadowed.stdout}\nstderr={module_shadowed.stderr}"
+    )
+    assert "FATAL" in module_shadowed.stderr
+    shadow_module.unlink()
+
+    # F: a stale/shared editable install pointing at a *different*
+    # checkout's src/ai_asset_platform.
+    other_root = tmp_path / "other_fake_repo"
+    other_src_pkg = other_root / "src" / "ai_asset_platform"
+    other_src_pkg.mkdir(parents=True)
+    (other_src_pkg / "__init__.py").write_text("OTHER_CHECKOUT_PACKAGE = True\n", encoding="utf-8")
+    _write_fake_editable_pth(venv_dir, other_root / "src")
+    stale = run_checker()
+    assert stale.returncode != 0, f"stdout={stale.stdout}\nstderr={stale.stderr}"
+    assert "FATAL" in stale.stderr
+    _write_fake_editable_pth(venv_dir, fake_root / "src")  # restore
+
+    # G: the correct checkout, re-confirmed clean after all of the above.
+    restored = run_checker()
+    assert restored.returncode == 0, f"stdout={restored.stdout}\nstderr={restored.stderr}"
+    assert "OK:" in restored.stdout
 
 
 def test_stdin_heredoc_wrapper_is_discovered_and_checked():
