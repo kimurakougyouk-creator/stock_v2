@@ -220,6 +220,19 @@ failure path (`if ! helper; then ... exit ...; fi`, or `helper || exit N`
 while/until condition, a pipeline, a case statement, a multi-line
 continuation) is never assumed safe; it is either proven safe by this
 narrow set of recognized patterns or treated as unverified/unsafe.
+
+Follow-up finding (P1, tenth review / ChatGPT re-audit): for `if ! helper;
+then ...; fi`, the exit-search originally scanned the *entire* if/fi
+block at the `then` body's depth, not just the `then` branch specifically.
+Since `elif`/`else` don't change depth in `_bash_conditional_depths` (they
+are siblings of `then`, not nested inside it), an `exit` sitting in an
+`else` or `elif` branch -- which only runs on *success*, never on the
+helper *failure* this whole check is about -- was being read as proof the
+failure path exits too, which it does not:
+`if ! helper; then echo failed; else exit 2; fi` was misclassified safe.
+`_then_branch_end_index` now bounds the exit search to the `then` branch
+only (from the `if` line up to the first `elif`/`else` at that same
+depth, or the block's own `fi` if there is none).
 """
 import os
 import re
@@ -841,6 +854,26 @@ def _block_has_unconditional_exit(lines, depths, start, end, body_depth):
     )
 
 
+_ELIF_OR_ELSE_RE = re.compile(r"^elif\b|^else\s*$")
+
+
+def _then_branch_end_index(lines, depths, if_idx, block_end, body_depth):
+    """Exclusive end index of the `then` branch specifically -- the first
+    `elif`/`else` at `body_depth` between `if_idx` and `block_end`, or
+    `block_end` itself if there is none. `elif`/`else` don't change depth
+    in `_bash_conditional_depths` (they're siblings of `then`, not nested
+    inside it), so they -- and anything inside them -- are recorded at the
+    same `body_depth` as the `then` branch's own content and must be
+    excluded explicitly, not just by depth (ChatGPT re-audit: an `exit` in
+    an `else` branch was being read as proof the `then`/failure branch
+    exits too, which it does not).
+    """
+    for i in range(if_idx + 1, block_end):
+        if depths[i] == body_depth and _ELIF_OR_ELSE_RE.match(lines[i].strip()):
+            return i
+    return block_end
+
+
 def _classify_helper_call_control_flow(lines, depths, helper_idx, errexit_active):
     """Whether a non-zero exit from the runtime-binding helper call at
     `lines[helper_idx]` necessarily terminates this script's control flow
@@ -876,7 +909,11 @@ def _classify_helper_call_control_flow(lines, depths, helper_idx, errexit_active
         if block_end is None:
             return None
         body_depth = depths[helper_idx] + 1
-        return _block_has_unconditional_exit(lines, depths, helper_idx + 1, block_end, body_depth)
+        # Only the `then` branch runs on failure (this is `if !`); an
+        # `exit` in `else`/`elif` never executes then and is not evidence
+        # of anything.
+        then_end = _then_branch_end_index(lines, depths, helper_idx, block_end, body_depth)
+        return _block_has_unconditional_exit(lines, depths, helper_idx + 1, then_end, body_depth)
 
     # A bare statement: the entire line is just the helper invocation,
     # nothing else -- errexit is what would stop the script here. (Note
@@ -1539,3 +1576,79 @@ def test_synthetic_helper_or_exit_brace_group_passes():
     )
     failures = _check_exact_checkout_binding("synthetic_or_exit_brace.sh", lines)
     assert not failures, failures
+
+
+def test_synthetic_helper_conditional_negated_then_exits_else_does_not_passes():
+    """Scenario A: `if ! helper; then exit 2; else echo ok; fi` -- the
+    `then` (failure) branch itself unconditionally exits. Safe, regardless
+    of what `else` (the success branch) does.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n"
+        "  exit 2\n"
+        "else\n"
+        '  echo "ok"\n'
+        "fi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_then_exit_else_ok.sh", lines)
+    assert not failures, failures
+
+
+def test_synthetic_helper_conditional_negated_else_exits_then_does_not_fails():
+    """Scenario B: `if ! helper; then echo failed; else exit 2; fi` -- on
+    helper *failure*, only the `then` branch runs, and it does not exit.
+    The `exit` sitting in `else` (the success branch, which never runs on
+    failure) must NOT be read as proof the failure path exits -- that was
+    the exact bug this test guards against.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n"
+        '  echo "binding failed"\n'
+        "else\n"
+        "  exit 2\n"
+        "fi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_then_echo_else_exit.sh", lines)
+    assert failures, "expected a failure: the failure (then) branch never exits"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_conditional_negated_elif_exit_does_not_cover_then_fails():
+    """Scenario C: `if ! helper; then echo failed; elif ...; then exit 2;
+    fi` -- the `elif` branch is not part of the `then` (failure) branch
+    either; its `exit` must not count.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n"
+        '  echo "binding failed"\n'
+        'elif [[ -n "$SOMETHING" ]]; then\n'
+        "  exit 2\n"
+        "fi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_then_echo_elif_exit.sh", lines)
+    assert failures, "expected a failure: the elif branch's exit does not cover the then branch"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_conditional_negated_nested_if_exit_fails():
+    """Scenario D: `if ! helper; then if something; then exit 2; fi; fi`
+    -- the `exit` is inside a further nested conditional, so a helper
+    failure alone does not guarantee it runs. Must be flagged.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n"
+        '  if [[ -n "$SOMETHING" ]]; then\n'
+        "    exit 2\n"
+        "  fi\n"
+        "fi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_then_nested_if_exit.sh", lines)
+    assert failures, (
+        "expected a failure: the exit is inside a further nested conditional, "
+        "not unconditional on the outer helper failure"
+    )
+    assert any("would not stop this script" in f for f in failures), failures
