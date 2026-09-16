@@ -233,6 +233,26 @@ failure path exits too, which it does not:
 `_then_branch_end_index` now bounds the exit search to the `then` branch
 only (from the `if` line up to the first `elif`/`else` at that same
 depth, or the block's own `fi` if there is none).
+
+Follow-up finding (P1, eleventh review / ChatGPT re-audit): two more
+false-SAFE vectors in the same static proof. (a) `_EXIT_STATEMENT_RE`
+accepted `return` and bare `exec` as proof of an unconditional exit;
+`return` does not exit a top-level wrapper script (only a function), and
+a bare/redirection-only `exec` (e.g. `exec >log.txt`) does not replace
+the process or exit either -- both let control fall through just like no
+statement at all, and neither is used as an exit mechanism anywhere in
+this repo. Only a literal `exit` now counts. (b) the `helper || ...`
+same-line check was a loose "`||` appears, and the word exit appears
+somewhere after it" search, which treated `|| echo "please exit 2"`,
+`|| true  # exit 2`, and `|| printf 'exit 2\n'` as if they exited, when
+none of them do -- "exit" as text inside a string/comment/printf format
+is not an executed exit statement. `_HELPER_OR_EXIT_RE` now requires the
+*entire* line to be exactly `bash scripts/.../ensure_exact_checkout_runtime.sh
+|| exit [status]`; a brace-group form (`helper || { ...; exit N; }`) is no
+longer recognized as safe either -- not used by any real wrapper, and
+correctly parsing a brace group's contents (multiple statements, nested
+quoting) is beyond what this line-based check can prove, so it is now
+treated as unverified/unsafe rather than assumed safe.
 """
 import os
 import re
@@ -810,8 +830,27 @@ def _discover_self_updating_wrappers():
 # Short combined `set` flags only (e.g. `set -euo pipefail`, `set +e`) --
 # verified this codebase never uses the long `set -o`/`set +o` form.
 _SET_FLAGS_RE = re.compile(r"^set\s+([+-])([A-Za-z]+)\b")
-_EXIT_STATEMENT_RE = re.compile(r"^(?:exit|return|exec)\b")
-_OR_EXIT_SAME_LINE_RE = re.compile(r"\|\|.*\b(?:exit|return|exec)\b")
+# Only a literal `exit` statement counts as proof a branch terminates the
+# script (ChatGPT re-audit): `return` outside a function does not exit a
+# top-level wrapper script, and bare/redirection-only `exec` (e.g.
+# `exec >log.txt`) does not replace the process or exit either -- both
+# would let control fall through to later code just like no statement at
+# all. Neither is used as an exit mechanism anywhere in this repo's
+# wrappers, so excluding them costs nothing real and removes two
+# false-SAFE vectors.
+_EXIT_STATEMENT_RE = re.compile(r"^exit\b")
+
+# `helper || exit [status]` matched as the *entire* line, not merely
+# "`||` appears somewhere before the word exit" (ChatGPT re-audit): a
+# loose substring/word-boundary search treats `|| echo "please exit 2"`,
+# `|| true  # exit 2`, and `|| printf 'exit 2\n'` as if they exited, when
+# none of them do. A brace-group form (`helper || { ...; exit N; }`) is
+# deliberately NOT recognized as safe here either -- not used by any real
+# wrapper, and parsing it correctly (multiple statements, nested quoting)
+# is more than this line-based check can prove; treated as unverified.
+_HELPER_OR_EXIT_RE = re.compile(
+    r"^bash\s+scripts/ensure_exact_checkout_runtime\.sh\s*\|\|\s*exit(?:\s+\d+)?\s*$"
+)
 
 
 def _errexit_active_before(lines, idx):
@@ -889,9 +928,10 @@ def _classify_helper_call_control_flow(lines, depths, helper_idx, errexit_active
     """
     line = lines[helper_idx].strip()
 
-    # `helper || exit N` / `helper || { ...; exit N; }` on the same line:
-    # on failure, the right-hand side runs unconditionally.
-    if _OR_EXIT_SAME_LINE_RE.search(line):
+    # `helper || exit N`, matched as the entire line: on failure, `exit`
+    # runs unconditionally. Anything else after `||` (a brace group, any
+    # other command) is not recognized here -- see `_HELPER_OR_EXIT_RE`.
+    if _HELPER_OR_EXIT_RE.match(line):
         return True
 
     # `if [!] <...helper...>; then` -- the helper call is itself the
@@ -1565,17 +1605,85 @@ def test_synthetic_helper_or_exit_same_line_passes():
     assert not failures, failures
 
 
-def test_synthetic_helper_or_exit_brace_group_passes():
-    """`helper || { ...; exit N; }` -- failure runs the brace group, which
-    unconditionally exits. Not currently used by any real wrapper, but
-    must still be recognized as safe.
+def test_synthetic_helper_or_exit_brace_group_is_not_recognized_as_safe():
+    """`helper || { ...; exit N; }` -- deliberately NOT recognized as safe:
+    not used by any real wrapper, and a line-based check can't reliably
+    prove a brace group always exits (nested quoting, multiple
+    statements). Conservative default: treated as unverified/unsafe.
     """
     lines = _synthetic_wrapper_lines(
         "set -uo pipefail",
         'bash scripts/ensure_exact_checkout_runtime.sh || { echo "failed"; exit 2; }\n',
     )
     failures = _check_exact_checkout_binding("synthetic_or_exit_brace.sh", lines)
-    assert not failures, failures
+    assert failures, "brace-group `||` must not be assumed safe"
+
+
+def test_synthetic_helper_or_exit_non_exit_command_fails():
+    """`helper || echo "please exit 2"` -- the word "exit" appearing in an
+    echoed string must not be mistaken for an actual exit statement.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        'bash scripts/ensure_exact_checkout_runtime.sh || echo "please exit 2"\n',
+    )
+    failures = _check_exact_checkout_binding("synthetic_or_echo.sh", lines)
+    assert failures, "expected a failure: the failure path only echoes, it never exits"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_or_true_with_exit_in_comment_fails():
+    """`helper || true  # exit 2` -- "exit 2" is a comment, not code; the
+    actual failure-path command is `true`, which never exits the script.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "bash scripts/ensure_exact_checkout_runtime.sh || true  # exit 2\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_or_true_comment.sh", lines)
+    assert failures, "expected a failure: '# exit 2' is a comment, not an executed exit"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_or_printf_with_exit_text_fails():
+    """`helper || printf 'exit 2\\n'` -- "exit 2" is printed text, not an
+    executed exit statement.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "bash scripts/ensure_exact_checkout_runtime.sh || printf 'exit 2\\n'\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_or_printf.sh", lines)
+    assert failures, "expected a failure: printf'ing the text 'exit 2' does not exit"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_conditional_negated_return_does_not_pass():
+    """`if ! helper; then return N; fi` -- `return` does not exit a
+    top-level wrapper script (only a function); must not be treated as an
+    unconditional exit.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n  return 2\nfi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_negated_return.sh", lines)
+    assert failures, "expected a failure: 'return' does not exit a top-level script"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_conditional_negated_bare_exec_does_not_pass():
+    """`if ! helper; then exec >log.txt; fi` -- a bare/redirection-only
+    `exec` does not replace the process or exit; execution continues with
+    the redirection applied. Must not be treated as an unconditional exit.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n  exec >log.txt\nfi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_negated_exec.sh", lines)
+    assert failures, "expected a failure: a bare/redirection-only 'exec' does not exit"
+    assert any("would not stop this script" in f for f in failures), failures
 
 
 def test_synthetic_helper_conditional_negated_then_exits_else_does_not_passes():
