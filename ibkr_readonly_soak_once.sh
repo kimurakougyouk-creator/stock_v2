@@ -31,7 +31,7 @@ if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || (( INTERVAL_SECONDS < 1 || INTERVA
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
 mkdir -p "$LOG_DIR"
 : > "$LOG_FILE"
 

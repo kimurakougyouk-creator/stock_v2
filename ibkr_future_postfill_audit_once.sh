@@ -4,6 +4,7 @@ cd "${IBKR_REPO_DIR:-$HOME/stock_v2_latest}"
 git switch main >/dev/null
 git pull --ff-only origin main
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 python -m pytest -q
 python -m ai_asset_platform.accounting.futures_postfill_audit

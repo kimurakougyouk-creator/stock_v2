@@ -30,7 +30,16 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
+
+# The git pull above may have fetched a newer checkout than this .venv has
+# installed. This verifies first and only migrates (pip install -e .) if
+# that verify fails, so the common case -- .venv already bound to this
+# checkout -- never touches pip or the network, preserving this script's
+# "keep monitoring even when origin is unreachable" contract. See
+# scripts/ensure_exact_checkout_runtime.sh for the fail-closed detail.
+bash scripts/ensure_exact_checkout_runtime.sh
+
 mkdir -p "$LOG_DIR"
 
 # Wait for either Paper endpoint. No broker request is made during this wait.

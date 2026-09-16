@@ -20,7 +20,8 @@ if [[ ! -f .venv/bin/activate ]]; then
   exit 2
 fi
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 # Repository safety first. A test failure stops before any local ledger mutation
 # or Paper order attempt.

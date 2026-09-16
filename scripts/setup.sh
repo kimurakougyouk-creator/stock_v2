@@ -15,12 +15,19 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
+unset PYTHONPATH
 
 echo "pip を更新します。"
 python -m pip install --upgrade pip
 
 echo "requirements.txt の依存関係を一括インストールします。"
 python -m pip install -r requirements.txt
+
+echo "ai_asset_platform を editable install します（通常pythonでのruntime import解決に必須）。"
+python -m pip install -e .
+
+echo "ai_asset_platform が現在のcheckoutへ解決することを fail-closed で検証します。"
+python scripts/verify_exact_checkout_import.py
 
 echo "既存テストを実行します。"
 python -m pytest -q

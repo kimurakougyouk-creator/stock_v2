@@ -12,7 +12,8 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 # Verify the shipped default-safe state before any local runtime audit.
 # No Paper transmission opt-in and no order confirmation string is supplied.

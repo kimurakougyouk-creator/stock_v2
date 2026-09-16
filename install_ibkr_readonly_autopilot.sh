@@ -29,7 +29,18 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
+
+# Migrate any pre-existing .venv (created before editable install was
+# required) to the current checkout, and fail closed if ai_asset_platform
+# still does not resolve here under plain python -- not just under pytest's
+# pythonpath=src. `set -e` (above) means any failure here aborts before the
+# service is ever (re)started.
+echo "既存 .venv を現在のcheckoutへ editable install で migrate します。"
+python -m pip install -e .
+echo "ai_asset_platform が現在のcheckoutへ解決することを fail-closed で検証します（service restartはこの後のみ）。"
+python scripts/verify_exact_checkout_import.py
+
 pytest -q \
   tests/test_ibkr_readonly_autopilot.py \
   tests/test_ibkr_account_snapshot.py \

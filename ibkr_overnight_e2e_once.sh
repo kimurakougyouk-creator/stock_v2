@@ -28,7 +28,8 @@ if [[ ! -f .venv/bin/activate ]]; then
   exit 2
 fi
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 mkdir -p "$LOG_DIR"
 
 # Wait for the user's local Paper endpoint; no broker request/order during wait.

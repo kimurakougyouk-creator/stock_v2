@@ -87,22 +87,33 @@ while true; do
       echo "AUTOPILOT SOURCE BLOCKED: tracked source differs from pinned HEAD outside runtime output directories. Monitoring code was not executed."
     elif [[ -f .venv/bin/activate ]]; then
       source .venv/bin/activate
-      export PYTHONPATH="$PWD/src:$PWD"
-      set +e
-      # Strict unattended policy: run only the IBKR-scoped read-only monitor.
-      # Legacy local PAPER simulation rows are excluded from live Paper-account
-      # risk state, while a complete broker snapshot is checked for every actual
-      # non-zero position. No order API request is used by this path.
-      python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict \
-        2>&1 | tee "$MONITOR_LOG"
-      monitor_status=${PIPESTATUS[0]}
-      set -e
-      if [[ "$monitor_status" -eq 2 ]]; then
-        echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
-      elif [[ "$monitor_status" -eq 1 ]]; then
-        echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
+      unset PYTHONPATH
+      # Install-time migration/verification (install_ibkr_readonly_autopilot.sh)
+      # is not enough on its own for a daemon that loops indefinitely: .venv's
+      # binding could change between cycles without a restart, and each cycle
+      # spawns a fresh monitor subprocess that would pick up whatever is
+      # there *then*. Re-verify every cycle, immediately before the monitor
+      # -- read-only, no migration attempt (this daemon never touches pip or
+      # git) -- and skip the monitor entirely on failure.
+      if ! python scripts/verify_exact_checkout_import.py; then
+        echo "AUTOPILOT SOURCE BLOCKED: exact checkout runtime binding failed this cycle. Monitoring code was not executed."
+      else
+        set +e
+        # Strict unattended policy: run only the IBKR-scoped read-only monitor.
+        # Legacy local PAPER simulation rows are excluded from live Paper-account
+        # risk state, while a complete broker snapshot is checked for every actual
+        # non-zero position. No order API request is used by this path.
+        python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict \
+          2>&1 | tee "$MONITOR_LOG"
+        monitor_status=${PIPESTATUS[0]}
+        set -e
+        if [[ "$monitor_status" -eq 2 ]]; then
+          echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
+        elif [[ "$monitor_status" -eq 1 ]]; then
+          echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
+        fi
+        echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
       fi
-      echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
     else
       echo "SKIP: .venv/bin/activate not found. No order was sent."
     fi

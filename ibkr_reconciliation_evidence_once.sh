@@ -13,7 +13,8 @@ if [[ ! -f .venv/bin/activate ]]; then
 fi
 
 source .venv/bin/activate
-export PYTHONPATH="$PWD/src:$PWD"
+unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 python -m pytest -q tests/test_ibkr_reconciliation_evidence_audit.py
 python -m ai_asset_platform.brokers.ibkr_reconciliation_evidence_audit
