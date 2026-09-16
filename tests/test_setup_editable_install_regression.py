@@ -253,6 +253,36 @@ longer recognized as safe either -- not used by any real wrapper, and
 correctly parsing a brace group's contents (multiple statements, nested
 quoting) is beyond what this line-based check can prove, so it is now
 treated as unverified/unsafe rather than assumed safe.
+
+Follow-up finding (P1, twelfth review / ChatGPT re-audit, cross-version +
+exit-path): two more items, resolved differently.
+
+(a) A genuine cross-version gap, not a code bug: comparing the 058cb7f
+(pushed) and c0a2e80 (local, at the time) revisions of every self-updating
+wrapper found that only `ibkr_all_readonly_completion_once.sh` differs --
+every other wrapper file is byte-identical between the two. That file's
+058cb7f content is exactly the pre-fix, unsafe pattern this review chain
+already found and fixed in it. The fix on disk protects every *future*
+invocation, but cannot retroactively protect a process that was already
+mid-execution under the 058cb7f content when its own `git pull` updated
+the checkout to a newer revision -- that already-running process continues
+executing whatever control flow bash had already read into that process,
+never the new file. `ibkr_all_readonly_completion_once.sh` has no
+installer/service gate in this repo that would guarantee a fresh process
+(verified: no other file references it), so this specific first-transition
+gap is closed only by an external step (confirming no such process is
+in-flight around deployment of this fix), not by any further code change.
+`test_cross_version_fix_does_not_retroactively_cover_058cb7f_content`
+checks the actual historical 058cb7f content via `git show` to keep this
+as a permanent, concrete record rather than an assumption.
+
+(b) A real false-SAFE code bug: `_EXIT_STATEMENT_RE` matched `^exit\b` --
+a *prefix* match -- so `exit 2 &` (backgrounds the exit instead of running
+it in this shell) and `exit 2 | cat` (makes `exit`'s status the left side
+of a pipeline; the script does not actually stop there) were both wrongly
+treated the same as a plain `exit 2`. The match is now anchored to the
+*whole* line, allowing only an optional numeric status and/or trailing `#`
+comment after `exit`.
 """
 import os
 import re
@@ -830,15 +860,23 @@ def _discover_self_updating_wrappers():
 # Short combined `set` flags only (e.g. `set -euo pipefail`, `set +e`) --
 # verified this codebase never uses the long `set -o`/`set +o` form.
 _SET_FLAGS_RE = re.compile(r"^set\s+([+-])([A-Za-z]+)\b")
-# Only a literal `exit` statement counts as proof a branch terminates the
-# script (ChatGPT re-audit): `return` outside a function does not exit a
-# top-level wrapper script, and bare/redirection-only `exec` (e.g.
-# `exec >log.txt`) does not replace the process or exit either -- both
-# would let control fall through to later code just like no statement at
-# all. Neither is used as an exit mechanism anywhere in this repo's
-# wrappers, so excluding them costs nothing real and removes two
-# false-SAFE vectors.
-_EXIT_STATEMENT_RE = re.compile(r"^exit\b")
+# Only a literal, unconditional `exit` *statement* counts as proof a
+# branch terminates the script (ChatGPT re-audit): `return` outside a
+# function does not exit a top-level wrapper script, and bare/
+# redirection-only `exec` (e.g. `exec >log.txt`) does not replace the
+# process or exit either -- both would let control fall through to later
+# code just like no statement at all. Neither is used as an exit
+# mechanism anywhere in this repo's wrappers, so excluding them costs
+# nothing real and removes two false-SAFE vectors.
+#
+# The match is anchored to the *whole* line (only an optional numeric
+# status and/or a trailing `#` comment may follow) rather than just a
+# `^exit\b` prefix: `exit 2 &` backgrounds the exit instead of running it
+# in this shell, and `exit 2 | cat` makes `exit` the left side of a
+# pipeline (its exit status is consumed by `cat`'s, under `pipefail` or
+# not, and the script does not actually stop) -- a prefix-only match
+# treated both as if they were a plain `exit 2`, which they are not.
+_EXIT_STATEMENT_RE = re.compile(r"^exit(?:\s+[0-9]+)?\s*(?:#.*)?$")
 
 # `helper || exit [status]` matched as the *entire* line, not merely
 # "`||` appears somewhere before the word exit" (ChatGPT re-audit): a
@@ -1686,6 +1724,49 @@ def test_synthetic_helper_conditional_negated_bare_exec_does_not_pass():
     assert any("would not stop this script" in f for f in failures), failures
 
 
+def test_synthetic_helper_conditional_negated_backgrounded_exit_fails():
+    """Scenario B: `if ! helper; then exit 2 & fi` -- `&` backgrounds the
+    `exit` as a subshell job instead of running it in this shell; the
+    script itself does not stop. A `^exit\\b` prefix match alone would
+    have wrongly treated this the same as a plain `exit 2`.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n  exit 2 &\nfi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_backgrounded_exit.sh", lines)
+    assert failures, "expected a failure: 'exit 2 &' backgrounds the exit, it does not stop this script"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_conditional_negated_piped_exit_fails():
+    """Scenario C: `if ! helper; then exit 2 | cat; fi` -- `exit` as the
+    left side of a pipeline: its exit status feeds the pipeline (and is
+    consumed by `cat`'s own exit status unless `pipefail` changes that),
+    but the *script* does not actually terminate at that point.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n  exit 2 | cat\nfi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_piped_exit.sh", lines)
+    assert failures, "expected a failure: 'exit 2 | cat' does not stop this script"
+    assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_synthetic_helper_conditional_negated_exit_with_comment_passes():
+    """Scenario D: `if ! helper; then exit 2 # comment; fi` -- a trailing
+    `#` comment after the status code is still just a plain, unconditional
+    `exit` statement. Safe.
+    """
+    lines = _synthetic_wrapper_lines(
+        "set -uo pipefail",
+        "if ! bash scripts/ensure_exact_checkout_runtime.sh; then\n  exit 2 # comment\nfi\n",
+    )
+    failures = _check_exact_checkout_binding("synthetic_exit_with_comment.sh", lines)
+    assert not failures, failures
+
+
 def test_synthetic_helper_conditional_negated_then_exits_else_does_not_passes():
     """Scenario A: `if ! helper; then exit 2; else echo ok; fi` -- the
     `then` (failure) branch itself unconditionally exits. Safe, regardless
@@ -1760,3 +1841,59 @@ def test_synthetic_helper_conditional_negated_nested_if_exit_fails():
         "not unconditional on the outer helper failure"
     )
     assert any("would not stop this script" in f for f in failures), failures
+
+
+def test_cross_version_fix_does_not_retroactively_cover_058cb7f_content():
+    """Cross-version proof (ChatGPT re-audit, PR #287 Stage1): fixing
+    `ibkr_all_readonly_completion_once.sh` in the current checkout does not
+    retroactively make an already-running process safe. A process launched
+    from the 058cb7f version of this file, that performs its own `git
+    pull` (self-update) and then continues executing *that same process's*
+    already-buffered 058cb7f control flow, never reads the current (fixed)
+    file -- the fix on disk only protects the *next* fresh invocation.
+
+    This is checked against the real historical 058cb7f content via `git
+    show`, not a synthetic stand-in, so it is also the permanent record of
+    the first-transition gap that editing file content alone cannot close
+    (an already-in-flight process cannot be retroactively patched); closing
+    it requires an external step -- e.g. confirming no such process is
+    in-flight before/while this fix is deployed, or (for wrappers that do
+    run under supervision) a restart through a gate like
+    `install_ibkr_readonly_autopilot.sh`. `ibkr_all_readonly_completion_once.sh`
+    is a manually-invoked `_once.sh` script with no such installer/service
+    gate in this repo (verified: no other file references it).
+    """
+    result = subprocess.run(
+        ["git", "show", "058cb7f:ibkr_all_readonly_completion_once.sh"],
+        cwd=ROOT_DIR,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            "058cb7f is not available in this checkout's git history "
+            f"(git show failed: {result.stderr.strip()})"
+        )
+    old_lines = result.stdout.splitlines()
+
+    old_failures = _check_exact_checkout_binding(
+        "ibkr_all_readonly_completion_once.sh@058cb7f", old_lines
+    )
+    assert old_failures, (
+        "expected the 058cb7f content to still be classified unsafe -- fixing "
+        "the file on disk now must never be treated as having fixed an "
+        "already-running process that is still executing that old content"
+    )
+    assert any("would not stop this script" in f for f in old_failures), old_failures
+
+    current_lines = (ROOT_DIR / "ibkr_all_readonly_completion_once.sh").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    current_failures = _check_exact_checkout_binding(
+        "ibkr_all_readonly_completion_once.sh@current", current_lines
+    )
+    assert not current_failures, (
+        "the current on-disk content is expected to be the actual, already-applied "
+        f"fix and therefore safe; got {current_failures}"
+    )
