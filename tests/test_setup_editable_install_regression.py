@@ -283,6 +283,34 @@ of a pipeline; the script does not actually stop there) were both wrongly
 treated the same as a plain `exit 2`. The match is now anchored to the
 *whole* line, allowing only an optional numeric status and/or trailing `#`
 comment after `exit`.
+
+Follow-up finding (P1, thirteenth review / Codex, PRRT_kwDOTZGJWc6i199q,
+`live_cash_readiness_once.sh`): every fix so far gated *self-updating*
+wrappers (P1-A/P1-B) or the installer. But the underlying risk --
+`unset PYTHONPATH` removing the PYTHONPATH-based fallback that used to
+paper over a `.venv` that was never editable-installed -- applies equally
+to any wrapper with such a `.venv`, whether or not it happens to
+self-update. A mechanical audit (`_discover_operational_wrappers() -
+_discover_self_updating_wrappers()`) found 8 such wrappers:
+`audit_paper_foundation.sh`, `ibkr_commission_evidence_once.sh`,
+`ibkr_live_all_open_orders_once.sh`, `ibkr_live_fx_evidence_once.sh`,
+`ibkr_live_readonly_account_once.sh`, `ibkr_readonly_autopilot.sh`,
+`ibkr_strategy_profitability_evidence_once.sh`, and
+`live_cash_readiness_once.sh` -- all with the identical pre-fix shape
+(`source .venv/bin/activate` -> `unset PYTHONPATH` -> bare `pytest` ->
+bare `python -m ai_asset_platform...`, no gate at all). Fixed by adding
+the same `bash scripts/ensure_exact_checkout_runtime.sh` call immediately
+after `unset PYTHONPATH` in 7 of the 8. The eighth,
+`ibkr_readonly_autopilot.sh`, is deliberately left unchanged: it never
+fetches/pulls/switches/executes newly downloaded code by design (verified:
+zero mutating git commands), and its own `.venv` binding is already
+guaranteed correct by `install_ibkr_readonly_autopilot.sh` running this
+same migrate-then-verify gate before every `systemctl --user restart`
+that (re)starts it -- adding a redundant in-process gate would not be
+wrong, but changing this file's carefully "never auto-updates" design
+without a safety need is exactly what this review chain has repeatedly
+avoided doing to already-safe files. See `_INSTALLER_GATED_EXEMPT` and
+`test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_first_use`.
 """
 import os
 import re
@@ -1220,6 +1248,74 @@ def test_all_self_updating_wrappers_bind_exact_checkout_before_first_use():
     )
 
 
+# `ibkr_readonly_autopilot.sh` never fetches/pulls/switches/executes newly
+# downloaded code by design (verified: zero mutating git commands) -- its
+# own `.venv` binding is guaranteed correct not by anything in this file,
+# but because `install_ibkr_readonly_autopilot.sh` already runs the same
+# migrate-then-verify gate before every `systemctl --user restart` that
+# (re)starts this service (see
+# `test_install_autopilot_migrates_and_verifies_before_restart`). Adding
+# a redundant in-process gate here would not be wrong, but it would also
+# not be needed, and the "never auto-updates" design of this specific file
+# is deliberately left untouched (Codex PR #287 P1, `live_cash_readiness_once.sh`
+# review) rather than changed without a safety need.
+_INSTALLER_GATED_EXEMPT = {"ibkr_readonly_autopilot.sh"}
+
+
+def test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_first_use():
+    """Cross-cutting proof for every operational wrapper that directly uses
+    ai_asset_platform but never self-updates (Codex PR #287 P1,
+    `live_cash_readiness_once.sh` review, PRRT_kwDOTZGJWc6i199q): an older,
+    never-migrated `.venv` (from before editable install was required) is
+    not only a risk for self-updating wrappers that just pulled a newer
+    checkout -- any wrapper with such a `.venv`, self-updating or not, can
+    hit `ModuleNotFoundError` or resolve `ai_asset_platform` to a
+    stale/wrong checkout once `unset PYTHONPATH` removes the fallback that
+    previously (before this PR) papered over it. `pytest` alone does not
+    prove otherwise: pytest.ini's `pythonpath = src` makes plain `import
+    ai_asset_platform` succeed inside pytest even when the package is not
+    actually installed anywhere -- the exact same masking effect the
+    original P1 finding in this file's module docstring is about, just
+    reached via a different (non-self-updating) route this time.
+
+    Every such wrapper must bind the exact checkout (see
+    `_check_exact_checkout_binding`, reused unchanged -- it already treats
+    "no self-update in this file" as fine, only requiring activate < unset
+    < helper < first use) before that use, except the one file with an
+    equivalent external gate instead (`_INSTALLER_GATED_EXEMPT`).
+    """
+    operational = set(_discover_operational_wrappers())
+    self_updating = set(_discover_self_updating_wrappers())
+    non_self_updating = sorted(operational - self_updating, key=lambda p: p.name)
+
+    assert len(non_self_updating) >= 7, (
+        f"expected at least 7 non-self-updating operational wrappers, found "
+        f"{len(non_self_updating)}: {[w.name for w in non_self_updating]}"
+    )
+    assert any(w.name in _INSTALLER_GATED_EXEMPT for w in non_self_updating), (
+        "expected ibkr_readonly_autopilot.sh among the non-self-updating "
+        "operational wrappers (installer-gated exemption would otherwise be dead code)"
+    )
+
+    failures = []
+    checked = 0
+    for path in non_self_updating:
+        if path.name in _INSTALLER_GATED_EXEMPT:
+            continue
+        checked += 1
+        lines = path.read_text(encoding="utf-8").splitlines()
+        failures.extend(_check_exact_checkout_binding(path.name, lines))
+
+    assert checked >= 7, (
+        f"expected at least 7 non-self-updating wrappers to require the gate "
+        f"(all but the installer-gated exemption), found {checked}"
+    )
+    assert not failures, (
+        "non-self-updating wrappers not exact-checkout-bound before first use:\n"
+        + "\n".join(failures)
+    )
+
+
 def _write_fake_python(bin_dir: Path) -> None:
     """A `python` stand-in used only to test scripts/ensure_exact_checkout_runtime.sh
     in isolation: no real venv, no real pip, no network. Behavior is driven
@@ -1376,6 +1472,55 @@ def test_ensure_exact_checkout_runtime_hostile_pythonpath_fails_closed_not_silen
         f"resolution:\nstdout={result.stdout}\nstderr={result.stderr}"
     )
     assert "OK:" not in result.stdout
+
+
+_LIVE_CASH_READINESS_PATH = ROOT_DIR / "live_cash_readiness_once.sh"
+
+
+def test_live_cash_readiness_once_uses_shared_helper_before_first_use():
+    """Dedicated proof for the file Codex's review named directly
+    (PRRT_kwDOTZGJWc6i199q): `live_cash_readiness_once.sh` -- a
+    non-self-updating wrapper -- routes through the exact same shared
+    `scripts/ensure_exact_checkout_runtime.sh` gate (already proven
+    offline-safe and migration-capable by
+    `test_ensure_exact_checkout_runtime_migrates_then_succeeds` and
+    `test_ensure_exact_checkout_runtime_real_verifier_already_correct_skips_pip_offline`),
+    not a duplicate/ad-hoc check, and that the gate comes strictly before
+    both the `pytest` step and the plain-python `ai_asset_platform` use.
+    `pytest -q tests/test_live_cash_readiness.py` passing is not
+    sufficient proof on its own -- pytest.ini's `pythonpath = src` would
+    mask a genuinely broken plain-python import exactly as it did for the
+    original P1 finding this module's docstring opens with -- so this
+    specifically locates the plain-python invocation, not the pytest step.
+    """
+    assert _LIVE_CASH_READINESS_PATH.is_file(), f"missing {_LIVE_CASH_READINESS_PATH}"
+    lines = _LIVE_CASH_READINESS_PATH.read_text(encoding="utf-8").splitlines()
+
+    failures = _check_exact_checkout_binding(_LIVE_CASH_READINESS_PATH.name, lines)
+    assert not failures, failures
+
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
+    helper_idx = next((i for i, l in enumerate(lines) if _HELPER_CALL_RE.search(l)), None)
+    pytest_idx = next((i for i, l in enumerate(lines) if re.match(r"^pytest\b", l.strip())), None)
+    first_use_idx = _find_first_ai_asset_platform_invocation(lines)
+
+    assert activate_idx is not None, "must source .venv/bin/activate"
+    assert unset_idx is not None, "must unset inherited PYTHONPATH"
+    assert helper_idx is not None, "must call the shared runtime-binding helper"
+    assert pytest_idx is not None, "expected a pytest step in this wrapper"
+    assert first_use_idx is not None, "must invoke ai_asset_platform"
+
+    assert activate_idx < unset_idx < helper_idx < pytest_idx < first_use_idx, (
+        "expected activate < unset < helper < pytest < plain-python first use; "
+        f"got activate={activate_idx} unset={unset_idx} helper={helper_idx} "
+        f"pytest={pytest_idx} first_use={first_use_idx}"
+    )
+
+    # The gate is exactly the one shared helper -- not a duplicate/ad-hoc check.
+    assert lines[helper_idx].strip() == "bash scripts/ensure_exact_checkout_runtime.sh", (
+        f"expected the shared helper call verbatim, got: {lines[helper_idx]!r}"
+    )
 
 
 def test_synthetic_update_after_helper_is_flagged():

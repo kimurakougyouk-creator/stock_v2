@@ -12,6 +12,7 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 pytest -q tests/test_ibkr_live_readonly_account.py
 AI_ASSET_LIVE_READONLY_CONFIRM=READ_LIVE_ACCOUNT_ONLY \

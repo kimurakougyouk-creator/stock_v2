@@ -14,6 +14,7 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 echo "[1/3] Secret scan"
 python scripts/check_secrets.py
