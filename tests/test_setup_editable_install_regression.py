@@ -117,6 +117,29 @@ PYTHONPATH` immediately after `source .venv/bin/activate` in
 `_discover_operational_wrappers()` and the main structural test cover both
 invocation forms, and any future stdin-based wrapper that forgets `unset
 PYTHONPATH` will fail this test.
+
+Follow-up finding (P1, sixth review / Codex, PR #287): `ibkr_auto.sh` has
+its own independent self-update path -- it runs `git pull --ff-only origin
+main` on every cycle, unrelated to `install_ibkr_readonly_autopilot.sh`'s
+migration/verification (which only runs when the installer itself is
+re-run). An older `.venv` (created by a pre-editable-install
+`scripts/setup.sh`) could pull in a newer checkout, correctly `unset
+PYTHONPATH`, and then hit `ModuleNotFoundError` or resolve
+`ai_asset_platform` to a stale/wrong checkout once the first `python -m
+ai_asset_platform...` call runs. Fixed by reusing the exact same pattern
+already established (and CI/operator-tested) in
+`install_ibkr_readonly_autopilot.sh`: immediately after `unset PYTHONPATH`
+and before any `ai_asset_platform` invocation, `ibkr_auto.sh` now runs
+`python -m pip install -e .` (migrating the `.venv`) and the shared
+`scripts/verify_exact_checkout_import.py` checker -- no new/duplicate
+verifier, no new flags. `set -euo pipefail` (already at the top of the
+file) means a failed migration or verification aborts the rest of the
+cycle before any ai_asset_platform module runs. This does not add a new
+network dependency: the preceding `git pull` on the same execution path
+already requires network reachability, and this exact `pip install -e .`
+invocation (no `--no-build-isolation`/`--no-index`) is the same one already
+used and passing in `scripts/setup.sh`, `install_ibkr_readonly_autopilot.sh`,
+and `.github/workflows/pytest.yml`.
 """
 import os
 import re
@@ -593,3 +616,61 @@ def test_stdin_heredoc_wrapper_is_discovered_and_checked():
         "expected activate < unset PYTHONPATH < stdin-python first use; got "
         f"activate={activate_idx} unset={unset_idx} first_use={first_use_idx}"
     )
+
+
+_IBKR_AUTO_PATH = ROOT_DIR / "ibkr_auto.sh"
+_GIT_PULL_RE = re.compile(r"git pull --ff-only origin main")
+_STRICT_MODE_RE = re.compile(r"^set -euo pipefail\s*$")
+
+
+def test_ibkr_auto_migrates_venv_after_pull_before_first_use():
+    """`ibkr_auto.sh` self-updates via `git pull`, independently of
+    `install_ibkr_readonly_autopilot.sh`'s own migration/verification (which
+    only runs when the installer itself is re-run). An older `.venv`
+    (created before editable install was required) could then pull a newer
+    checkout and, once PYTHONPATH is correctly unset, hit
+    ModuleNotFoundError or resolve ai_asset_platform to a stale/wrong
+    checkout. Must, in order: `set -euo pipefail` -> git pull -> activate ->
+    unset PYTHONPATH -> editable-install (migrating the .venv) -> the shared
+    fail-closed exact-checkout verifier -> only then the first
+    ai_asset_platform invocation. `set -euo pipefail` being active before
+    the pull means a failed migration/verification later aborts the rest of
+    the cycle before any ai_asset_platform module runs.
+    """
+    assert _IBKR_AUTO_PATH.is_file(), f"missing {_IBKR_AUTO_PATH}"
+    lines = _IBKR_AUTO_PATH.read_text(encoding="utf-8").splitlines()
+
+    strict_mode_idx = next((i for i, l in enumerate(lines) if _STRICT_MODE_RE.match(l)), None)
+    pull_idx = next((i for i, l in enumerate(lines) if _GIT_PULL_RE.search(l)), None)
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
+    pip_idx = next((i for i, l in enumerate(lines) if _PIP_EDITABLE_INSTALL_RE.search(l)), None)
+    verify_idx = next((i for i, l in enumerate(lines) if _VERIFY_SCRIPT_CALL_RE.search(l)), None)
+    first_use_idx = _find_first_ai_asset_platform_invocation(lines)
+
+    assert strict_mode_idx is not None, "ibkr_auto.sh must have 'set -euo pipefail'"
+    assert pull_idx is not None, "ibkr_auto.sh must git pull --ff-only origin main"
+    assert activate_idx is not None, "ibkr_auto.sh must source .venv/bin/activate"
+    assert unset_idx is not None, "ibkr_auto.sh must unset inherited PYTHONPATH"
+    assert pip_idx is not None, (
+        "ibkr_auto.sh must editable-install into the (possibly pre-existing, "
+        "possibly stale) .venv after pulling and before using ai_asset_platform"
+    )
+    assert verify_idx is not None, (
+        "ibkr_auto.sh must run the shared exact-checkout fail-closed verifier"
+    )
+    assert first_use_idx is not None, "ibkr_auto.sh must invoke ai_asset_platform"
+
+    assert (
+        strict_mode_idx < pull_idx < activate_idx < unset_idx < pip_idx < verify_idx < first_use_idx
+    ), (
+        "ibkr_auto.sh must run: set -euo pipefail -> git pull -> activate -> "
+        "unset PYTHONPATH -> editable-install -> fail-closed verify -> first "
+        f"ai_asset_platform use, in that order; got strict_mode={strict_mode_idx} "
+        f"pull={pull_idx} activate={activate_idx} unset={unset_idx} "
+        f"pip={pip_idx} verify={verify_idx} first_use={first_use_idx}"
+    )
+
+    # Reuses the one shared checker (also used by scripts/setup.sh and
+    # install_ibkr_readonly_autopilot.sh) -- no duplicate verifier introduced.
+    assert _VERIFY_SCRIPT_PATH.is_file(), f"missing {_VERIFY_SCRIPT_PATH}"

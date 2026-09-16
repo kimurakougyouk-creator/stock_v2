@@ -31,6 +31,16 @@ fi
 
 source .venv/bin/activate
 unset PYTHONPATH
+
+# The git pull above may have fetched a newer checkout than an older .venv
+# (created before editable install was required) has installed. Migrate
+# this .venv to the current checkout and fail closed if ai_asset_platform
+# still does not resolve here under plain python -- before any
+# ai_asset_platform module is invoked below. `set -e` (top of file) means a
+# failed migration/verification aborts the rest of this cycle.
+python -m pip install -e .
+python scripts/verify_exact_checkout_import.py
+
 mkdir -p "$LOG_DIR"
 
 # Wait for either Paper endpoint. No broker request is made during this wait.
