@@ -759,21 +759,165 @@ def _discover_self_updating_wrappers():
     ]
 
 
+def _check_exact_checkout_binding(name, lines):
+    """Verify one wrapper's own lines correctly bind the exact checkout
+    before its own first ai_asset_platform use. Returns a list of failure
+    strings (empty if safe).
+
+    Two things must both hold:
+    - if this file performs any self-update (git pull/fetch/switch/checkout)
+      before its first ai_asset_platform use, the *last* such update must
+      precede venv activation -- not just the first one. A second update
+      inserted after activation/the helper (e.g. a future edit adding
+      another `git pull` later in the file) would re-change the checkout
+      after binding was verified, invalidating it; using the first match
+      would miss that (Codex/ChatGPT re-audit, PR #287 Stage1).
+    - activate < unset PYTHONPATH < the runtime-binding helper < first use,
+      with the helper not hidden behind a deeper `if`/`fi` conditional than
+      the invocation it's meant to gate.
+
+    A file with no self-update at all (last_update_idx is None) is not
+    required to have one here -- this function also serves as the
+    per-node check for delegate-chain verification, where a delegate
+    target may correctly rely on its caller's earlier update.
+    """
+    first_use_idx = _find_first_ai_asset_platform_invocation(lines)
+    if first_use_idx is None:
+        return [f"{name}: has no direct ai_asset_platform invocation to check"]
+
+    depths = _bash_conditional_depths(lines)
+    update_indices_before_first_use = [
+        i for i, l in enumerate(lines) if _GIT_UPDATE_RE.match(l.strip()) and i < first_use_idx
+    ]
+    last_update_idx = max(update_indices_before_first_use) if update_indices_before_first_use else None
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
+    helper_idx = next((i for i, l in enumerate(lines) if _HELPER_CALL_RE.search(l)), None)
+
+    missing = [
+        n
+        for n, idx in (
+            ("activate", activate_idx),
+            ("unset PYTHONPATH", unset_idx),
+            ("runtime-binding helper", helper_idx),
+        )
+        if idx is None
+    ]
+    if missing:
+        return [f"{name}: missing {', '.join(missing)}"]
+
+    if last_update_idx is not None and not (last_update_idx < activate_idx):
+        return [
+            f"{name}: a self-update (line {last_update_idx + 1}) occurs at or after "
+            f"venv activation (line {activate_idx + 1}); the exact-checkout binding "
+            "that follows could already be stale by the time ai_asset_platform is used"
+        ]
+
+    if not (activate_idx < unset_idx < helper_idx < first_use_idx):
+        return [
+            f"{name}: expected activate < unset < helper < first_use; got "
+            f"activate={activate_idx} unset={unset_idx} helper={helper_idx} "
+            f"first_use={first_use_idx}"
+        ]
+
+    if depths[helper_idx] > depths[first_use_idx]:
+        return [
+            f"{name}: runtime-binding helper (line {helper_idx + 1}, if-depth "
+            f"{depths[helper_idx]}) is nested inside a conditional that the first "
+            f"ai_asset_platform invocation (line {first_use_idx + 1}, if-depth "
+            f"{depths[first_use_idx]}) can still reach when that conditional is skipped"
+        ]
+
+    return []
+
+
+# Delegate detection: `bash ./xxx.sh`, `bash path/to/xxx.sh`, `bash
+# "$DYNAMIC/target.sh"`, optionally preceded by env-var assignments on the
+# same line (those aren't captured). Deliberately broad (any non-whitespace
+# run ending in `.sh`) so a dynamically-built target is still *captured*
+# here and can be explicitly rejected as unresolvable in
+# `_resolve_delegate_path`, rather than silently not matching at all.
+_DELEGATE_RE = re.compile(r"\bbash\s+(\S+\.sh)\b")
+
+
+def _find_delegate_targets(lines):
+    """Repo-relative delegate script paths this wrapper invokes via `bash`."""
+    targets = []
+    for l in lines:
+        targets.extend(m.group(1) for m in _DELEGATE_RE.finditer(l))
+    return targets
+
+
+def _resolve_delegate_path(raw, root):
+    """Resolve a delegate target string to a file under `root`, or None if
+    it can't be statically resolved (a shell-variable-built path, or one
+    that escapes `root`, or one that doesn't exist) -- callers must treat
+    an unresolved target as unverified/unsafe, never assume it's SAFE.
+    """
+    if "$" in raw:
+        return None
+    candidate = (root / raw).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _verify_delegate_chain(path, root, visiting=None):
+    """Recursively verify that `path` -- and, if it has no direct
+    ai_asset_platform use, everything it delegates to via `bash` -- ends up
+    exact-checkout-bound before ai_asset_platform is ever used. Returns a
+    list of failure strings (empty if safe). A delegate cycle is a failure,
+    not an infinite loop. An unresolved delegate target is a failure, not
+    an assumed-safe skip.
+    """
+    visiting = list(visiting) if visiting else []
+    if path in visiting:
+        cycle = " -> ".join(p.name for p in visiting + [path])
+        return [f"delegate cycle detected: {cycle}"]
+    visiting = visiting + [path]
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if _find_first_ai_asset_platform_invocation(lines) is not None:
+        return _check_exact_checkout_binding(path.name, lines)
+
+    delegates = _find_delegate_targets(lines)
+    if not delegates:
+        return [
+            f"{path.name}: no direct ai_asset_platform use and no delegate target "
+            "found -- cannot verify exact-checkout binding"
+        ]
+
+    failures = []
+    for raw in delegates:
+        resolved = _resolve_delegate_path(raw, root)
+        if resolved is None:
+            failures.append(
+                f"{path.name}: delegate target {raw!r} could not be statically "
+                "resolved to a repo script (dynamic path or outside repo) -- "
+                "treating as unverified/unsafe rather than assuming it is gated"
+            )
+            continue
+        failures.extend(_verify_delegate_chain(resolved, root, visiting))
+    return failures
+
+
 def test_all_self_updating_wrappers_bind_exact_checkout_before_first_use():
     """Cross-cutting proof for every self-updating wrapper (P1-A), not just
     `ibkr_auto.sh`: a self-update (git pull/fetch/switch/checkout) can bring
     in a newer checkout than an older, never-migrated `.venv` has installed.
-    Every such wrapper that directly uses `ai_asset_platform` must, in
-    order: self-update -> activate -> unset PYTHONPATH -> the shared
-    runtime-binding helper -> first ai_asset_platform use. As with the
-    PYTHONPATH check, textual presence is not enough: the helper call must
-    not be reachable-but-skippable relative to the first invocation (same
-    `if`/`fi` depth requirement as `unset PYTHONPATH`).
+    Every such wrapper that directly uses `ai_asset_platform` must bind the
+    exact checkout (see `_check_exact_checkout_binding`) before that use.
 
     Wrappers that self-update but never call `ai_asset_platform` directly
     (e.g. `ibkr_readonly_soak_once.sh`, which only runs `pytest` and
-    delegates to `bash ./ibkr_auto.sh`) are skipped here -- the delegate
-    they call gates itself.
+    delegates to `bash ./ibkr_auto.sh`) are verified via
+    `_verify_delegate_chain` instead of being skipped -- the delegate chain
+    must itself resolve to a gated wrapper, recursively, with cycles and
+    unresolved (dynamic/external) targets treated as failures.
     """
     wrappers = _discover_self_updating_wrappers()
     assert len(wrappers) >= 25, (
@@ -782,54 +926,24 @@ def test_all_self_updating_wrappers_bind_exact_checkout_before_first_use():
     )
 
     failures = []
-    checked = 0
+    direct_use_checked = 0
+    delegate_checked = 0
     for path in wrappers:
         lines = path.read_text(encoding="utf-8").splitlines()
-        first_use_idx = _find_first_ai_asset_platform_invocation(lines)
-        if first_use_idx is None:
-            continue  # delegate-only wrapper; the delegate gates itself
+        if _find_first_ai_asset_platform_invocation(lines) is not None:
+            direct_use_checked += 1
+            failures.extend(_check_exact_checkout_binding(path.name, lines))
+        else:
+            delegate_checked += 1
+            failures.extend(_verify_delegate_chain(path, ROOT_DIR))
 
-        checked += 1
-        depths = _bash_conditional_depths(lines)
-        update_idx = next((i for i, l in enumerate(lines) if _GIT_UPDATE_RE.match(l.strip())), None)
-        activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
-        unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
-        helper_idx = next((i for i, l in enumerate(lines) if _HELPER_CALL_RE.search(l)), None)
-
-        missing = [
-            name
-            for name, idx in (
-                ("self-update", update_idx),
-                ("activate", activate_idx),
-                ("unset PYTHONPATH", unset_idx),
-                ("runtime-binding helper", helper_idx),
-            )
-            if idx is None
-        ]
-        if missing:
-            failures.append(f"{path.name}: missing {', '.join(missing)}")
-            continue
-
-        if not (update_idx < activate_idx < unset_idx < helper_idx < first_use_idx):
-            failures.append(
-                f"{path.name}: expected self-update < activate < unset < helper < "
-                f"first_use; got update={update_idx} activate={activate_idx} "
-                f"unset={unset_idx} helper={helper_idx} first_use={first_use_idx}"
-            )
-            continue
-
-        if depths[helper_idx] > depths[first_use_idx]:
-            failures.append(
-                f"{path.name}: runtime-binding helper (line {helper_idx + 1}, "
-                f"if-depth {depths[helper_idx]}) is nested inside a conditional "
-                f"that the first ai_asset_platform invocation (line "
-                f"{first_use_idx + 1}, if-depth {depths[first_use_idx]}) can "
-                "still reach when that conditional is skipped"
-            )
-
-    assert checked >= 25, (
-        f"expected at least 25 self-updating wrappers with a direct ai_asset_platform "
-        f"use, found {checked}"
+    assert direct_use_checked >= 25, (
+        "expected at least 25 self-updating wrappers with a direct ai_asset_platform "
+        f"use, found {direct_use_checked}"
+    )
+    assert delegate_checked >= 1, (
+        "expected at least one delegate-only self-updating wrapper (e.g. "
+        f"ibkr_readonly_soak_once.sh) to exercise delegate-chain verification, found {delegate_checked}"
     )
     assert not failures, (
         "self-updating wrappers not exact-checkout-bound before first use:\n"
@@ -993,3 +1107,127 @@ def test_ensure_exact_checkout_runtime_hostile_pythonpath_fails_closed_not_silen
         f"resolution:\nstdout={result.stdout}\nstderr={result.stderr}"
     )
     assert "OK:" not in result.stdout
+
+
+def test_synthetic_update_after_helper_is_flagged():
+    """Regression proof for the discovery-logic fix: a self-update placed
+    *after* the runtime-binding helper (a future edit could introduce
+    this, e.g. a second `git pull` added later in a file) must be caught.
+    Using the *first* self-update line (the old logic) would have missed
+    this, since that first update still precedes activate/unset/helper --
+    only the *last* update before first-use matters, and it must still
+    precede activation.
+    """
+    content = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "git switch main\n"
+        "source .venv/bin/activate\n"
+        "unset PYTHONPATH\n"
+        "bash scripts/ensure_exact_checkout_runtime.sh\n"
+        "git pull --ff-only origin main\n"  # update AFTER the helper
+        "python -m ai_asset_platform.brokers.something\n"
+    )
+    lines = content.splitlines()
+
+    # Sanity: the *first*-match logic this replaces would have missed it.
+    first_update_idx = next((i for i, l in enumerate(lines) if _GIT_UPDATE_RE.match(l.strip())), None)
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    assert first_update_idx is not None and first_update_idx < activate_idx, (
+        "test setup did not reproduce the first-update-still-precedes-activate "
+        "precondition that made the old (first-match) logic blind to this case"
+    )
+
+    failures = _check_exact_checkout_binding("synthetic_wrapper.sh", lines)
+    assert failures, "expected a failure: a self-update occurs after the runtime-binding helper"
+    assert any("self-update" in f for f in failures), failures
+
+
+def test_delegate_chain_safe_target_passes(tmp_path):
+    """A delegate-only wrapper whose delegate target is itself fully gated
+    (self-update -> activate -> unset -> helper -> first use) must pass.
+    """
+    target = tmp_path / "gated_target.sh"
+    target.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "git pull --ff-only origin main\n"
+        "source .venv/bin/activate\n"
+        "unset PYTHONPATH\n"
+        "bash scripts/ensure_exact_checkout_runtime.sh\n"
+        "python -m ai_asset_platform.brokers.something\n",
+        encoding="utf-8",
+    )
+    delegator = tmp_path / "delegator.sh"
+    delegator.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "git pull --ff-only origin main\n"
+        f"bash {target.name}\n",
+        encoding="utf-8",
+    )
+
+    failures = _verify_delegate_chain(delegator, tmp_path)
+    assert not failures, failures
+
+
+def test_delegate_chain_ungated_target_fails(tmp_path):
+    """A delegate-only wrapper whose delegate target directly uses
+    ai_asset_platform but never calls the runtime-binding helper must fail
+    -- delegation must not be a way to silently bypass the gate.
+    """
+    target = tmp_path / "ungated_target.sh"
+    target.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "git pull --ff-only origin main\n"
+        "source .venv/bin/activate\n"
+        "unset PYTHONPATH\n"
+        "python -m ai_asset_platform.brokers.something\n",  # no helper call
+        encoding="utf-8",
+    )
+    delegator = tmp_path / "delegator.sh"
+    delegator.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "git pull --ff-only origin main\n"
+        f"bash {target.name}\n",
+        encoding="utf-8",
+    )
+
+    failures = _verify_delegate_chain(delegator, tmp_path)
+    assert failures
+    assert any("runtime-binding helper" in f for f in failures), failures
+
+
+def test_delegate_chain_cycle_fails(tmp_path):
+    """A delegate cycle (A -> B -> A) must be a failure, not an infinite
+    loop or a silent pass.
+    """
+    a = tmp_path / "a.sh"
+    b = tmp_path / "b.sh"
+    a.write_text("#!/usr/bin/env bash\nset -euo pipefail\nbash b.sh\n", encoding="utf-8")
+    b.write_text("#!/usr/bin/env bash\nset -euo pipefail\nbash a.sh\n", encoding="utf-8")
+
+    failures = _verify_delegate_chain(a, tmp_path)
+    assert failures
+    assert any("cycle" in f for f in failures), failures
+
+
+def test_delegate_chain_unresolvable_target_is_unsafe_not_assumed_safe(tmp_path):
+    """A delegate target that can't be statically resolved (a dynamically
+    built path, or one that escapes the repo) must be treated as
+    unverified/unsafe -- never silently assumed SAFE.
+    """
+    delegator = tmp_path / "delegator.sh"
+    delegator.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "git pull --ff-only origin main\n"
+        'bash "$SCRIPT_DIR/target.sh"\n',
+        encoding="utf-8",
+    )
+
+    failures = _verify_delegate_chain(delegator, tmp_path)
+    assert failures
+    assert any("could not be statically resolved" in f for f in failures), failures
