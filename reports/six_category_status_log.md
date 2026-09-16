@@ -53,3 +53,16 @@
 
 ### 前回からの変化点
 実運用カテゴリで実質的な進展あり:PR #281(Codex P1安全修正、PR #271/#273/#274由来)が本日マージされ、`main` HEADが `d3d46e0` → `0cc746b` に前進、CI(pytest run #2002)はgreen。PR #282は依然オープンだがPR #281マージの影響でコンフリクト状態(`dirty`)に変化。新規PR #283(release-integrity gate、advisory・非Live)が本日オープンされたが未マージ。他の5項目(分析/シグナル/バックテスト/資産推移/リスク管理)はコード変更なしのため判定・根拠とも前回から変化なし。Issue #255は依然0/10チェックのままでNO-GO状態を維持。
+
+---
+
+## 2026-09-16 (JST)
+- 分析: 完成 — 変化なし。`git log --since` で前回確認コミット(`9e0815f`)以降 `indicators.py`/`signal_engine.py` に関連コミットなしを確認。`add_indicators()`(MA5/MA25/MA75, RSI, MACD/Signal, ATR, VOL20)、`tests/test_signal_engine.py` 経由の間接検証は変更なし。
+- シグナル: 完成 — 変化なし。`signal_engine.py` の `determine_signal()`、`src/ai_asset_platform/decision*` 系、対応テスト群(`test_signal_engine.py`/`test_signal_selector.py`/`test_final_decision.py`/`test_decision_engine.py`)に差分なし。
+- バックテスト: 完成 — 変化なし。`backtest.py`、`src/ai_asset_platform/reports/backtest_*.py`(evaluator/report/report_export/selector/statistics/summary)、対応テスト群(8ファイル)に差分なし。
+- 資産推移: 完成 — 変化なし。`equity_chart.py`/`equity_history.py`/`performance*.py`/`dashboard_core.py`、対応テスト群に差分なし。
+- リスク管理: 完成(Paper運用範囲) — 変化なし。`risk_manager.py`、`execution/shared_risk_gate.py`/`legacy_risk_gate.py`、`risk/market_sizing.py`、対応テスト群に差分なし。
+- 実運用: 一部実装 — **PR #283(release-integrity gate)が本日マージ済み**(`main` HEADは前回確認時の `0cc746b` から `9e0815f` へ前進、GitHub Actions `pytest` run #2038 はこのHEADでgreen)。追加された `scripts/live_pilot_release_gate.py`(モジュール docstring 明記)と `.github/workflows/live_pilot_release_gate.yml` は、PRのベース/ヘッドSHAに対するGitオブジェクトメタデータの読み取り専用チェック(`PlatformSettings` のLive無効デフォルト維持、`core/settings.py` 等の保護パス不変性)のみを行うadvisory・fail-closedゲートで、`LIVE_EXECUTION` は固定リテラル `NO-GO`。トレーディング実行ロジック自体への変更はなし。PR #280(2026-09-08)/#282(2026-09-10)は引き続きオープン・未マージ・`mergeable_state: dirty`(ベースが古い `c18a877` のままで `main` に対しコンフリクト)で、実質的にPR #281で先行対応済みの内容と重複している可能性が高い。新規PR #287「security: remove explicit PYTHONPATH from operational wrappers」(Issue #285 Stage 1、2026-09-15オープン)は運用ラッパー30本から明示的`PYTHONPATH`設定を削除する提案だが、**CIの`pytest`が2回とも失敗(failure)**しており(`release-integrity-gate` はsuccess)、`mergeable_state: blocked`、未マージ。Issue #255のチェックリストは引き続き0/10(全項目未チェック)で、外部前提(JPY入金決済、日本株取引許可、JASDEC登録、Live読み取り専用API疎通)もUNVERIFIED。CLAUDE.md/HANDOFF_MASTER.mdの安全不変条件どおり、現時点でも **NO-GO(実弾`placeOrder`不可)**。
+
+### 前回からの変化点
+実運用カテゴリのみ変化。PR #283(read-only advisory release-integrity gate)が本日マージされ `main` HEADが `0cc746b` → `9e0815f` に前進、CI(pytest run #2038)はgreen。これはトレーディング実行ロジックではなくCI上の保護パス改ざん検知ゲート(非ブロッキング、Live実行に影響なし)。新規PR #287(Issue #285関連、PYTHONPATH削除)が本日オープンされたが、pytest CIが失敗中で未マージ・要修正。PR #280/#282は前回から変化なく依然オープン・コンフリクト状態。他の5項目(分析/シグナル/バックテスト/資産推移/リスク管理)はコード変更なしのため判定・根拠とも前回から変化なし。Issue #255は依然0/10チェックのままでNO-GO状態を維持。
