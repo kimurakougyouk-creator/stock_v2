@@ -15,6 +15,7 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
+unset PYTHONPATH
 
 echo "pip を更新します。"
 python -m pip install --upgrade pip

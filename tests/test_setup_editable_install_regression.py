@@ -368,6 +368,34 @@ search locations are both confirmed to be exactly this checkout's
 an optional plain sanity check that it imports cleanly -- by then it has
 already been judged safe, so running it is no longer the risk the fix
 removes.
+
+Follow-up finding (P1/P2, sixteenth review / Codex, `ibkr_readonly_autopilot.sh`
++ `scripts/setup.sh`): two remaining gaps in files the earlier fixes did
+not reach.
+
+(P1) `ibkr_readonly_autopilot.sh` re-checks branch/HEAD/tracked-source
+cleanliness every cycle of its `while true` loop, but never re-verified
+`.venv`'s exact-checkout binding -- `install_ibkr_readonly_autopilot.sh`
+only does that once, before the daemon starts. Since the daemon loops
+indefinitely and spawns a fresh monitor subprocess each cycle, a `.venv`
+binding that changed after install-time (with no restart, e.g. an
+operator manually reinstalling it) would go undetected until whatever
+that subprocess actually resolved to ran. Fixed by calling
+`scripts/verify_exact_checkout_import.py` every cycle, immediately after
+`unset PYTHONPATH` and before the monitor invocation, with the monitor
+moved into the verify-negated-if's `else` branch (reached only on verify
+success) rather than running unconditionally after it. The daemon still
+never touches pip or git itself (no migration attempt on verify failure,
+matching its "never fetches, pulls, switches branches" design) --
+`_INSTALLER_GATED_EXEMPT` is unchanged.
+
+(P2) `scripts/setup.sh` activated `.venv` but left any inherited
+PYTHONPATH in place through both `pip install -e .` and the verifier that
+follows -- either could resolve against wherever that inherited
+PYTHONPATH pointed, not necessarily this checkout. Fixed by adding `unset
+PYTHONPATH` immediately after `source .venv/bin/activate`, matching every
+other wrapper/script in this repo that activates a venv before using
+`ai_asset_platform`.
 """
 import os
 import re
@@ -706,6 +734,129 @@ def test_install_autopilot_migrates_and_verifies_before_restart():
         "fail-closed verify -> restart, in that order; got "
         f"activate={activate_idx} unset={unset_idx} pip={pip_idx} "
         f"verify={verify_idx} restart={restart_idx}"
+    )
+
+
+_SETUP_SH_PATH = ROOT_DIR / "scripts" / "setup.sh"
+
+
+def test_setup_sh_unsets_pythonpath_before_editable_install_and_verify():
+    """Codex PR #287 P2, `scripts/setup.sh`: activation left an inherited
+    PYTHONPATH in place through both `pip install -e .` and the
+    exact-checkout verifier -- either could then resolve against wherever
+    the inherited PYTHONPATH pointed, not necessarily this checkout. Must
+    unset PYTHONPATH immediately after `source .venv/bin/activate`, before
+    the editable install and the verifier. The underlying
+    activate-then-unset mechanism (defeating a hostile inherited
+    PYTHONPATH) is already proven dynamically by
+    `test_wrapper_pattern_defeats_hostile_inherited_pythonpath` and
+    `test_verify_exact_checkout_import_script_is_fail_closed`; this proves
+    setup.sh is actually wired to use it in the right order. Not run
+    dynamically here: `pip install -e .` requires network for its build
+    backend (PEP 517 build isolation; see this file's P2 docstring
+    history), so exercising the real `scripts/setup.sh` is intentionally
+    left to CI/operator setup, not this offline test suite.
+    """
+    assert _SETUP_SH_PATH.is_file(), f"missing {_SETUP_SH_PATH}"
+    lines = _SETUP_SH_PATH.read_text(encoding="utf-8").splitlines()
+
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
+    pip_idx = next((i for i, l in enumerate(lines) if _PIP_EDITABLE_INSTALL_RE.search(l)), None)
+    verify_idx = next((i for i, l in enumerate(lines) if _VERIFY_SCRIPT_CALL_RE.search(l)), None)
+
+    assert activate_idx is not None, "setup.sh must source .venv/bin/activate"
+    assert unset_idx is not None, "setup.sh must unset inherited PYTHONPATH"
+    assert pip_idx is not None, "setup.sh must editable-install the current checkout"
+    assert verify_idx is not None, "setup.sh must run the exact-checkout fail-closed verifier"
+
+    assert activate_idx < unset_idx < pip_idx < verify_idx, (
+        "setup.sh must activate -> unset PYTHONPATH -> editable-install -> "
+        f"verify, in that order; got activate={activate_idx} unset={unset_idx} "
+        f"pip={pip_idx} verify={verify_idx}"
+    )
+
+
+_AUTOPILOT_LOOP_PATH = ROOT_DIR / "ibkr_readonly_autopilot.sh"
+_AUTOPILOT_VERIFY_IF_RE = re.compile(
+    r"^if\s*!\s*python\s+scripts/verify_exact_checkout_import\.py\s*;\s*then\s*$"
+)
+
+
+def test_ibkr_readonly_autopilot_verifies_exact_checkout_each_cycle():
+    """Codex PR #287 P1, `ibkr_readonly_autopilot.sh`: install-time
+    migration/verification (`install_ibkr_readonly_autopilot.sh`, proven by
+    `test_install_autopilot_migrates_and_verifies_before_restart`) is not
+    enough on its own for a daemon that loops indefinitely under `while
+    true`. `.venv`'s binding could change between cycles without a
+    restart, and each cycle spawns a fresh `python -m ai_asset_platform...`
+    subprocess that would pick up whatever is there *then* -- so this must
+    re-verify fresh every cycle, immediately before the monitor
+    invocation, and the monitor must be reachable only on the
+    verify-success path (never attempting migration itself: this daemon
+    never touches pip or git, staying in `_INSTALLER_GATED_EXEMPT`).
+
+    The verifier's own PASS/FAIL/shadow/offline behavior is already
+    proven in isolation by `test_verify_exact_checkout_import_script_is_fail_closed`
+    and `test_verify_exact_checkout_import_resolves_origin_before_executing_package`;
+    this proves it is wired into the cycle body correctly: activate <
+    unset < verify < monitor, with the monitor strictly inside the
+    verify-negated-if's `else` branch (reached only when verification
+    succeeds), not merely textually after the verify call where it could
+    run regardless of the outcome.
+    """
+    assert _AUTOPILOT_LOOP_PATH.is_file(), f"missing {_AUTOPILOT_LOOP_PATH}"
+    lines = _AUTOPILOT_LOOP_PATH.read_text(encoding="utf-8").splitlines()
+    depths = _bash_conditional_depths(lines)
+
+    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
+    unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
+    verify_idx = next((i for i, l in enumerate(lines) if _VERIFY_SCRIPT_CALL_RE.search(l)), None)
+    first_use_idx = _find_first_ai_asset_platform_invocation(lines)
+
+    assert activate_idx is not None, "must source .venv/bin/activate"
+    assert unset_idx is not None, "must unset inherited PYTHONPATH"
+    assert verify_idx is not None, (
+        "must call scripts/verify_exact_checkout_import.py every cycle, before the monitor"
+    )
+    assert first_use_idx is not None, "must invoke the read-only monitor module"
+
+    assert activate_idx < unset_idx < verify_idx < first_use_idx, (
+        "expected activate -> unset PYTHONPATH -> verify -> monitor invocation, "
+        f"in that order; got activate={activate_idx} unset={unset_idx} "
+        f"verify={verify_idx} first_use={first_use_idx}"
+    )
+
+    verify_line = lines[verify_idx].strip()
+    assert _AUTOPILOT_VERIFY_IF_RE.match(verify_line), (
+        f"expected the verify call to be the condition of a negated if; got: {verify_line!r}"
+    )
+
+    block_end = _block_end_index(lines, verify_idx, depths)
+    assert block_end is not None, "could not find the matching fi for the verify if-block"
+
+    body_depth = depths[verify_idx] + 1
+    else_idx = next(
+        (
+            i
+            for i in range(verify_idx + 1, block_end)
+            if depths[i] == body_depth and lines[i].strip() == "else"
+        ),
+        None,
+    )
+    assert else_idx is not None, (
+        "expected an else branch (reached only when verification succeeds) "
+        "containing the monitor invocation"
+    )
+    assert else_idx < first_use_idx < block_end, (
+        "expected the monitor invocation strictly inside the verify if's else branch "
+        f"(reachable only on verify success); got else={else_idx} "
+        f"first_use={first_use_idx} block_end={block_end}"
+    )
+    assert depths[first_use_idx] == body_depth, (
+        f"expected the monitor invocation at the else-branch's own depth ({body_depth}), "
+        f"got depth {depths[first_use_idx]} -- it may be further nested and skippable "
+        "independently of the verify outcome"
     )
 
 
