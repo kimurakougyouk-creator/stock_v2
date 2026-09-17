@@ -15,14 +15,15 @@ jobs:
       github.event.pull_request.state == 'open' &&
       github.event.pull_request.user.login == 'kimurakougyouk-creator' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.review.user.login == 'chatgpt-codex-connector'
+      github.event.review.user.login == 'chatgpt-codex-connector' &&
+      github.event.review.commit_id == github.event.pull_request.head.sha
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout exact PR head
+      - name: Checkout exact Codex-reviewed commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.review.commit_id }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -38,7 +39,7 @@ jobs:
           show_full_output: false
           prompt: |
             You are the primary implementation agent for stock_v2, but this workflow is deliberately repository-read-only.
-            Work only on PR #${{ github.event.pull_request.number }} at exact head ${{ github.event.pull_request.head.sha }}.
+            Work only on PR #${{ github.event.pull_request.number }} at the exact Codex-reviewed commit ${{ github.event.review.commit_id }}.
 
             Mandatory context before changing any working-tree file:
             1. Read HANDOFF_MASTER.md.
@@ -56,7 +57,7 @@ jobs:
             Hard prohibitions:
             - Do not send, cancel, modify, retry, flatten, or close any Paper or Live order.
             - Do not connect to TWS or IB Gateway.
-            - Do not change API Read-Only state, secrets, credentials, repository settings, workflows, or branch protection.
+            - Do not change API Read-Only state, secrets, credentials, repository settings, workflows, actions, Claude configuration, MCP configuration, or branch protection.
             - Do not commit, push, merge, approve, close issues, or alter GitHub metadata.
             - Do not execute shell commands, tests, package installs, web/network tools, or GitHub mutations in this automation.
             - Do not modify scripts/check_secrets.py.
@@ -65,7 +66,7 @@ jobs:
             Validation boundary:
             - Inspect code using read-only file/search tools only.
             - Leave all proposed source/test changes uncommitted in the runner working tree.
-            - Git diff capture, secret scanning, and diff validation are performed by fixed workflow steps after Claude exits.
+            - Git diff capture, trusted secret scanning, protected-path checks, and diff validation are performed by fixed workflow steps after Claude exits.
             - Tests run only after a reviewed patch is deliberately applied to a branch; normal GitHub CI is authoritative.
             - Never claim the PR is safe or merge-ready; independent Codex re-review and GitHub CI remain mandatory.
           claude_args: >-
@@ -78,41 +79,79 @@ jobs:
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEWED_SHA: ${{ github.event.review.commit_id }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/claude-remediation"
           candidate="$RUNNER_TEMP/remediation.candidate.patch"
+          trusted_scanner="$GITHUB_WORKSPACE/scripts/.trusted-check-secrets.runtime.py"
           mkdir -p "$out"
-          git add -N .
-          git status --short > "$out/status.txt"
+
           printf '%s\n' \
             "pr=${{ github.event.pull_request.number }}" \
-            "head=${{ github.event.pull_request.head.sha }}" \
+            "reviewed_head=$REVIEWED_SHA" \
             "base=$BASE_SHA" \
             "review=${{ github.event.review.id }}" \
+            "claude_outcome=$CLAUDE_OUTCOME" \
             > "$out/context.txt"
 
-          # The scanner is a security control. Refuse to execute it if either
-          # the reviewed PR or Claude changed it relative to the trusted base.
+          if [[ "$CLAUDE_OUTCOME" != "success" ]]; then
+            printf '%s\n' "artifact_patch=BLOCKED_CLAUDE_NOT_SUCCESS" >> "$out/context.txt"
+            exit 1
+          fi
+
+          # Never trust model-mutated index state. Rebuild the index from the
+          # exact commit Codex actually reviewed while preserving worktree edits.
+          if [[ "$(git rev-parse HEAD)" != "$REVIEWED_SHA" ]]; then
+            printf '%s\n' "artifact_patch=BLOCKED_HEAD_MOVED" >> "$out/context.txt"
+            exit 1
+          fi
+          git reset --mixed --quiet "$REVIEWED_SHA"
+          git add -N .
+          git status --short > "$out/status.txt"
+
+          # Do not allow the generated patch to alter automation or agent-control
+          # surfaces. Those require a separate deliberately reviewed PR.
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              .github/workflows/*|.github/actions/*|.claude/*|.mcp.json|scripts/check_secrets.py)
+                printf '%s\n' "artifact_patch=BLOCKED_PROTECTED_PATH:$changed_path" >> "$out/context.txt"
+                exit 1
+                ;;
+            esac
+          done < <(git diff --name-only "$REVIEWED_SHA" --)
+
+          # The repository scanner is a security control. Refuse any PR/model
+          # change to it relative to the trusted base, then materialize that
+          # trusted base version only after Claude has exited. Python isolated
+          # mode prevents repository files from shadowing stdlib imports.
           if ! git diff --quiet "$BASE_SHA" -- scripts/check_secrets.py; then
             printf '%s\n' "artifact_patch=BLOCKED_SCANNER_CHANGED" >> "$out/context.txt"
             exit 1
           fi
+          if [[ ! -d "$GITHUB_WORKSPACE/scripts" || -L "$GITHUB_WORKSPACE/scripts" ]]; then
+            printf '%s\n' "artifact_patch=BLOCKED_SCRIPTS_PATH" >> "$out/context.txt"
+            exit 1
+          fi
+          rm -f "$trusted_scanner"
+          trap 'rm -f "$trusted_scanner"' EXIT
+          git show "$BASE_SHA:scripts/check_secrets.py" > "$trusted_scanner"
+          chmod 0400 "$trusted_scanner"
 
-          # `git add -N` makes new files visible to check_secrets.py's
-          # `git ls-files` scan without staging their contents for commit.
-          # Never publish a generated patch if secret or diff validation fails.
-          if ! python scripts/check_secrets.py > "$out/secret-scan.txt" 2>&1; then
+          if ! python -I "$trusted_scanner" > "$out/secret-scan.txt" 2>&1; then
             printf '%s\n' "artifact_patch=BLOCKED_SECRET_SCAN" >> "$out/context.txt"
             exit 1
           fi
+          rm -f "$trusted_scanner"
+          trap - EXIT
 
-          if ! git diff --check > "$out/diff-check.txt" 2>&1; then
+          if ! git diff --check "$REVIEWED_SHA" -- > "$out/diff-check.txt" 2>&1; then
             printf '%s\n' "artifact_patch=BLOCKED_DIFF_CHECK" >> "$out/context.txt"
             exit 1
           fi
 
-          git diff --binary --no-ext-diff > "$candidate"
+          git diff --binary --no-ext-diff "$REVIEWED_SHA" -- > "$candidate"
           mv "$candidate" "$out/remediation.patch"
           printf '%s\n' "artifact_patch=CREATED" >> "$out/context.txt"
 
