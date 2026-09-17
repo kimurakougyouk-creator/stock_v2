@@ -8,7 +8,6 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
-  actions: read
 
 jobs:
   claude-remediation:
@@ -60,6 +59,7 @@ jobs:
             - Do not change API Read-Only state, secrets, credentials, repository settings, workflows, or branch protection.
             - Do not commit, push, merge, approve, close issues, or alter GitHub metadata.
             - Do not execute shell commands, tests, package installs, web/network tools, or GitHub mutations in this automation.
+            - Do not modify scripts/check_secrets.py.
             - Do not modify files unrelated to the Codex findings.
 
             Validation boundary:
@@ -76,6 +76,8 @@ jobs:
       - name: Build fail-closed patch artifact
         if: always()
         shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/claude-remediation"
@@ -86,8 +88,16 @@ jobs:
           printf '%s\n' \
             "pr=${{ github.event.pull_request.number }}" \
             "head=${{ github.event.pull_request.head.sha }}" \
+            "base=$BASE_SHA" \
             "review=${{ github.event.review.id }}" \
             > "$out/context.txt"
+
+          # The scanner is a security control. Refuse to execute it if either
+          # the reviewed PR or Claude changed it relative to the trusted base.
+          if ! git diff --quiet "$BASE_SHA" -- scripts/check_secrets.py; then
+            printf '%s\n' "artifact_patch=BLOCKED_SCANNER_CHANGED" >> "$out/context.txt"
+            exit 1
+          fi
 
           # `git add -N` makes new files visible to check_secrets.py's
           # `git ls-files` scan without staging their contents for commit.
