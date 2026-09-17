@@ -100,26 +100,43 @@ def test_format_signal_report_accepts_str_path(tmp_path):
 
 
 def test_package_import_does_not_require_repo_root_on_sys_path(tmp_path):
-    """Isolated regression, offline (no network, no venv creation): import
+    """Isolated regression, offline (no network, no venv creation, no
+    dependency reinstall): import
     `ai_asset_platform.reports.signal_report_formatter` in a subprocess
-    whose cwd is *not* the repo root and whose PYTHONPATH contains only
-    `src/` -- not the repo root itself, so root-level modules like
-    `report_formatter.py` or `signal_runner.py` are not importable at all.
-    The package module must still import and work, proving it does not
-    depend on anything at the repo root.
+    whose cwd is *not* the repo root and whose PYTHONPATH is set to
+    `src/` only -- never the repo root itself, so root-level modules like
+    `report_formatter.py` or `signal_runner.py` are never on the import
+    path at all. This proves resolution *correctness* (it resolves to
+    this checkout's own package file, not the root-level shim, regardless
+    of cwd), not resolution *mechanism*.
+
+    Deliberately does NOT assert that removing PYTHONPATH breaks the
+    import. In CI, `pip install -e .` already ran before this test suite,
+    so `ai_asset_platform` resolves via the editable install regardless
+    of PYTHONPATH -- asserting the opposite would be an environment-
+    dependent false failure there, not a real regression in this
+    checkout. (A prior version of this test asserted exactly that and
+    failed in CI for this reason.)
     """
     src_dir = ROOT_DIR / "src"
-    assert (src_dir / "ai_asset_platform" / "reports" / "signal_report_formatter.py").is_file()
+    expected_module_path = (
+        src_dir / "ai_asset_platform" / "reports" / "signal_report_formatter.py"
+    ).resolve()
+    assert expected_module_path.is_file()
 
     env = dict(os.environ)
+    # Only ever add src/ -- never the repo root -- so root-level modules
+    # stay unreachable regardless of what else this interpreter already
+    # has installed (e.g. an unrelated checkout's editable install, if
+    # this test happens to run under a borrowed/shared venv).
     env["PYTHONPATH"] = str(src_dir)
 
     script = (
         "import ai_asset_platform.reports.signal_report_formatter as m\n"
         "import sys\n"
-        "assert 'report_formatter' not in sys.modules, "
-        "'root-level report_formatter must not have been imported'\n"
-        "print('OK', m.format_signal_report)\n"
+        "assert 'report_formatter' not in sys.modules, ("
+        "'root-level report_formatter must not have been imported')\n"
+        "print(m.__file__)\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -132,24 +149,12 @@ def test_package_import_does_not_require_repo_root_on_sys_path(tmp_path):
     assert result.returncode == 0, (
         f"isolated package import failed:\nstdout={result.stdout}\nstderr={result.stderr}"
     )
-    assert result.stdout.startswith("OK")
 
-    # Sanity: without src/ on PYTHONPATH, the same import must fail --
-    # otherwise this test would not actually be proving anything about
-    # PYTHONPATH/cwd isolation.
-    env_without_src = dict(os.environ)
-    env_without_src.pop("PYTHONPATH", None)
-    negative = subprocess.run(
-        [sys.executable, "-c", "import ai_asset_platform.reports.signal_report_formatter"],
-        cwd=str(tmp_path),
-        env=env_without_src,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert negative.returncode != 0, (
-        "test setup did not isolate sys.path/cwd correctly -- the package "
-        "imported even without src/ on PYTHONPATH"
+    resolved_module_path = Path(result.stdout.strip()).resolve()
+    assert resolved_module_path == expected_module_path, (
+        "ai_asset_platform.reports.signal_report_formatter resolved to a "
+        f"different file than this checkout's own module: {resolved_module_path} "
+        f"(expected {expected_module_path})"
     )
 
 
