@@ -59,18 +59,19 @@ jobs:
             - Do not connect to TWS or IB Gateway.
             - Do not change API Read-Only state, secrets, credentials, repository settings, workflows, or branch protection.
             - Do not commit, push, merge, approve, close issues, or alter GitHub metadata.
-            - Do not use network tools or package-install commands.
+            - Do not execute shell commands, tests, package installs, network tools, or GitHub mutation tools in this automation.
             - Do not modify files unrelated to the Codex findings.
 
-            Validation:
-            - Run only repository-local tests needed to prove the remediation.
-            - Inspect git diff and git status before finishing.
+            Validation boundary:
+            - Inspect code using read-only file/search tools only.
             - Leave all proposed source/test changes uncommitted in the runner working tree.
+            - Git diff capture, secret scanning, and diff validation are performed by fixed workflow steps after Claude exits.
+            - Tests run only after a reviewed patch is deliberately applied to a branch; normal GitHub CI is authoritative.
             - Never claim the PR is safe or merge-ready; independent Codex re-review and GitHub CI remain mandatory.
           claude_args: >-
             --max-turns 24
             --allowedTools
-            "Read,Edit,Write,Glob,Grep,Bash(git diff:*),Bash(git status:*),Bash(python -m pytest:*),Bash(pytest:*)"
+            "Read,Edit,Write,Glob,Grep"
 
       - name: Build fail-closed patch artifact
         if: always()
