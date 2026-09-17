@@ -46,7 +46,7 @@ jobs:
             2. Read AI_PM_RUNBOOK.md.
             3. Read COMPLETION_ROADMAP.md.
             4. Read CLAUDE.md and AGENTS.md.
-            5. Inspect the actual PR diff and the newest unresolved Codex review findings.
+            5. Inspect the actual PR diff and the newest unresolved Codex review findings supplied in the GitHub event context.
 
             Goal:
             - Produce the smallest safe working-tree remediation for the unresolved Codex findings on this PR.
@@ -59,7 +59,7 @@ jobs:
             - Do not connect to TWS or IB Gateway.
             - Do not change API Read-Only state, secrets, credentials, repository settings, workflows, or branch protection.
             - Do not commit, push, merge, approve, close issues, or alter GitHub metadata.
-            - Do not execute shell commands, tests, package installs, network tools, or GitHub mutation tools in this automation.
+            - Do not execute shell commands, tests, package installs, web/network tools, or GitHub mutations in this automation.
             - Do not modify files unrelated to the Codex findings.
 
             Validation boundary:
@@ -70,8 +70,8 @@ jobs:
             - Never claim the PR is safe or merge-ready; independent Codex re-review and GitHub CI remain mandatory.
           claude_args: >-
             --max-turns 24
-            --allowedTools
-            "Read,Edit,Write,Glob,Grep"
+            --allowedTools "Read,Edit,Write,Glob,Grep"
+            --disallowedTools "Bash,WebFetch,WebSearch"
 
       - name: Build fail-closed patch artifact
         if: always()
@@ -79,6 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/claude-remediation"
+          candidate="$RUNNER_TEMP/remediation.candidate.patch"
           mkdir -p "$out"
           git add -N .
           git status --short > "$out/status.txt"
@@ -90,14 +91,19 @@ jobs:
 
           # `git add -N` makes new files visible to check_secrets.py's
           # `git ls-files` scan without staging their contents for commit.
-          # Never publish a generated patch if that scan detects a credential.
+          # Never publish a generated patch if secret or diff validation fails.
           if ! python scripts/check_secrets.py > "$out/secret-scan.txt" 2>&1; then
             printf '%s\n' "artifact_patch=BLOCKED_SECRET_SCAN" >> "$out/context.txt"
             exit 1
           fi
 
-          git diff --binary --no-ext-diff > "$out/remediation.patch"
-          git diff --check > "$out/diff-check.txt"
+          if ! git diff --check > "$out/diff-check.txt" 2>&1; then
+            printf '%s\n' "artifact_patch=BLOCKED_DIFF_CHECK" >> "$out/context.txt"
+            exit 1
+          fi
+
+          git diff --binary --no-ext-diff > "$candidate"
+          mv "$candidate" "$out/remediation.patch"
           printf '%s\n' "artifact_patch=CREATED" >> "$out/context.txt"
 
       - name: Upload remediation artifact
