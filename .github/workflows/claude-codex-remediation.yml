@@ -1,0 +1,97 @@
+name: Claude Codex Remediation Artifact
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  actions: read
+
+jobs:
+  claude-remediation:
+    if: >-
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.user.login == 'kimurakougyouk-creator' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.review.user.login == 'chatgpt-codex-connector'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate bounded Claude remediation patch
+        id: claude
+        uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e # v1.0.227
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_bots: chatgpt-codex-connector
+          allowed_non_write_users: chatgpt-codex-connector
+          include_comments_by_actor: kimurakougyouk-creator,chatgpt-codex-connector
+          show_full_output: false
+          prompt: |
+            You are the primary implementation agent for stock_v2, but this workflow is deliberately repository-read-only.
+            Work only on PR #${{ github.event.pull_request.number }} at exact head ${{ github.event.pull_request.head.sha }}.
+
+            Mandatory context before changing any working-tree file:
+            1. Read HANDOFF_MASTER.md.
+            2. Read AI_PM_RUNBOOK.md.
+            3. Read COMPLETION_ROADMAP.md.
+            4. Read CLAUDE.md and AGENTS.md.
+            5. Inspect the actual PR diff and the newest unresolved Codex review findings.
+
+            Goal:
+            - Produce the smallest safe working-tree remediation for the unresolved Codex findings on this PR.
+            - Add or repair targeted regression tests for every code change.
+            - Preserve all fail-closed Live/Paper boundaries and do not widen ticker, quantity, market, broker, account, or order authority.
+            - If a finding cannot be fixed safely from current evidence, do not guess; leave that part unchanged.
+
+            Hard prohibitions:
+            - Do not send, cancel, modify, retry, flatten, or close any Paper or Live order.
+            - Do not connect to TWS or IB Gateway.
+            - Do not change API Read-Only state, secrets, credentials, repository settings, workflows, or branch protection.
+            - Do not commit, push, merge, approve, close issues, or alter GitHub metadata.
+            - Do not use network tools or package-install commands.
+            - Do not modify files unrelated to the Codex findings.
+
+            Validation:
+            - Run only repository-local tests needed to prove the remediation.
+            - Inspect git diff and git status before finishing.
+            - Leave all proposed source/test changes uncommitted in the runner working tree.
+            - Never claim the PR is safe or merge-ready; independent Codex re-review and GitHub CI remain mandatory.
+          claude_args: >-
+            --max-turns 24
+            --allowedTools
+            "Read,Edit,Write,Glob,Grep,Bash(git diff:*),Bash(git status:*),Bash(python -m pytest:*),Bash(pytest:*)"
+
+      - name: Build patch artifact
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/claude-remediation"
+          git add -N .
+          git status --short > "$RUNNER_TEMP/claude-remediation/status.txt"
+          git diff --binary --no-ext-diff > "$RUNNER_TEMP/claude-remediation/remediation.patch"
+          printf '%s\n' \
+            "pr=${{ github.event.pull_request.number }}" \
+            "head=${{ github.event.pull_request.head.sha }}" \
+            "review=${{ github.event.review.id }}" \
+            > "$RUNNER_TEMP/claude-remediation/context.txt"
+
+      - name: Upload remediation artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: claude-remediation-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/claude-remediation
+          if-no-files-found: error
+          retention-days: 7
