@@ -72,20 +72,32 @@ jobs:
             --allowedTools
             "Read,Edit,Write,Glob,Grep,Bash(git diff:*),Bash(git status:*),Bash(python -m pytest:*),Bash(pytest:*)"
 
-      - name: Build patch artifact
+      - name: Build fail-closed patch artifact
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/claude-remediation"
+          out="$RUNNER_TEMP/claude-remediation"
+          mkdir -p "$out"
           git add -N .
-          git status --short > "$RUNNER_TEMP/claude-remediation/status.txt"
-          git diff --binary --no-ext-diff > "$RUNNER_TEMP/claude-remediation/remediation.patch"
+          git status --short > "$out/status.txt"
           printf '%s\n' \
             "pr=${{ github.event.pull_request.number }}" \
             "head=${{ github.event.pull_request.head.sha }}" \
             "review=${{ github.event.review.id }}" \
-            > "$RUNNER_TEMP/claude-remediation/context.txt"
+            > "$out/context.txt"
+
+          # `git add -N` makes new files visible to check_secrets.py's
+          # `git ls-files` scan without staging their contents for commit.
+          # Never publish a generated patch if that scan detects a credential.
+          if ! python scripts/check_secrets.py > "$out/secret-scan.txt" 2>&1; then
+            printf '%s\n' "artifact_patch=BLOCKED_SECRET_SCAN" >> "$out/context.txt"
+            exit 1
+          fi
+
+          git diff --binary --no-ext-diff > "$out/remediation.patch"
+          git diff --check > "$out/diff-check.txt"
+          printf '%s\n' "artifact_patch=CREATED" >> "$out/context.txt"
 
       - name: Upload remediation artifact
         if: always()
