@@ -66,3 +66,16 @@
 
 ### 前回からの変化点
 実運用カテゴリのみ変化。PR #283(read-only advisory release-integrity gate)が本日マージされ `main` HEADが `0cc746b` → `9e0815f` に前進、CI(pytest run #2038)はgreen。これはトレーディング実行ロジックではなくCI上の保護パス改ざん検知ゲート(非ブロッキング、Live実行に影響なし)。新規PR #287(Issue #285関連、PYTHONPATH削除)が本日オープンされたが、pytest CIが失敗中で未マージ・要修正。PR #280/#282は前回から変化なく依然オープン・コンフリクト状態。他の5項目(分析/シグナル/バックテスト/資産推移/リスク管理)はコード変更なしのため判定・根拠とも前回から変化なし。Issue #255は依然0/10チェックのままでNO-GO状態を維持。
+
+---
+
+## 2026-09-17 (JST)
+- 分析: 完成 — 変化なし。`git diff --stat` で前回確認コミット(`9e0815f`)以降の差分(46ファイル、主にPYTHONPATH関連スクリプト/テスト)を確認したが `indicators.py`/`signal_engine.py` は対象外。`add_indicators()`(MA5/MA25/MA75, RSI, MACD/Signal, ATR, VOL20)、`tests/test_signal_engine.py` 経由の間接検証は変更なし。
+- シグナル: 完成 — 変化なし。`signal_engine.py` の `determine_signal()`、`src/ai_asset_platform/decision*` 系、対応テスト群(`test_signal_engine.py`/`test_signal_selector.py`/`test_final_decision.py`/`test_decision_engine.py`)は差分対象外で変更なし。
+- バックテスト: 完成 — 変化なし。`backtest.py`、`src/ai_asset_platform/reports/backtest_*.py`(evaluator/report/report_export/selector/statistics/summary)、対応テスト群(8ファイル)は差分対象外で変更なし。
+- 資産推移: 完成 — 変化なし。`equity_chart.py`/`equity_history.py`/`performance*.py`/`dashboard_core.py`、対応テスト群は差分対象外で変更なし。
+- リスク管理: 完成(Paper運用範囲) — 変化なし。`risk_manager.py`、`execution/shared_risk_gate.py`/`legacy_risk_gate.py`、`risk/market_sizing.py`、対応テスト群は差分対象外で変更なし。
+- 実運用: 一部実装 — **PR #287(Issue #285 Stage 1、運用ラッパーからのPYTHONPATH除去)が本日マージ済み**(`merged_at` 2026-09-16T19:41:44Z)。`main` HEADは前回確認時の `9e0815f` から `3ccf9d0`(Merge pull request #287)に前進、GitHub Actions `pytest` run #2074 はこのHEADでgreen(success)。差分は `ibkr_*.sh`/`install_ibkr_readonly_autopilot.sh` 等の運用ラッパー30本超、`scripts/ensure_exact_checkout_runtime.sh`(新規)、`scripts/verify_exact_checkout_import.py`(新規144行)、`tests/test_setup_editable_install_regression.py`(新規2501行)で、トレーディング実行ロジック(`live_pilot_single_send.py`等)自体への変更はなし。PR本文はIssue #285が完全解決ではなく部分対応(Stage 1)である旨を明記。PR #280(2026-09-08オープン)/#282(2026-09-10オープン)は引き続きオープン・未マージ・`mergeable_state: dirty`(ベースが古いままで `main` に対しコンフリクト、直近の実CI結果もそれぞれ2026-09-08/2026-09-10時点のまま更新なし)。新規PR #289「automation: generate bounded Claude remediation artifacts from Codex reviews」が本日オープン——Codexレビュー投稿時にClaude Codeが是正パッチのartifactを自動生成する読み取り専用CI自動化(push/merge権限なし)で、`mergeable_state: clean`、CI(pytest run #2088, live_pilot_release_gate run #25)はgreen。これはトレーディング実行ロジックやLiveゲート自体への変更ではない。Issue #255は本日コメント・チェックリストとも更新なし(直近更新2026-09-07/08のまま)、チェックリストは引き続き0/10(全項目未チェック)。2026-09-07時点のオーナー記録によりLive読み取り専用TWSソケット(ポート7496)は疎通確認済みだが、資金入金(SettledCash)の着金確認は依然未確認。CLAUDE.md/HANDOFF_MASTER.mdの安全不変条件どおり、現時点でも **NO-GO(実弾`placeOrder`不可)**。
+
+### 前回からの変化点
+実運用カテゴリのみ変化。PR #287(Issue #285 Stage 1、PYTHONPATH除去、運用ラッパー/起動スクリプトが対象でトレーディング実行ロジックは対象外)が本日マージされ、`main` HEADが `9e0815f` → `3ccf9d0` に前進、CI(pytest run #2074)はgreen。新規PR #289(Codexレビュー是正artifact自動生成、読み取り専用・push権限なし)が本日オープンされ現時点でCI green・コンフリクトなし。PR #280/#282は前回から変化なく依然オープン・コンフリクト状態のまま放置。他の5項目(分析/シグナル/バックテスト/資産推移/リスク管理)はコード変更なしのため判定・根拠とも前回から変化なし。Issue #255はコメント・チェックリストとも動きがなく、依然0/10チェックでNO-GO状態を維持。
