@@ -49,7 +49,7 @@ from optimization_settings import get_ticker_settings, load_optimized_settings
 from ai_asset_platform.reports.signal_report_formatter import (
     format_signal_report,
 )
-from decision_log_report import (
+from ai_asset_platform.reports.decision_log_report import (
     REPORT_FILE as DECISION_LOG_REPORT_FILE,
     generate_decision_log_report,
 )
