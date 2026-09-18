@@ -79,3 +79,16 @@
 
 ### 前回からの変化点
 実運用カテゴリのみ変化。PR #287(Issue #285 Stage 1、PYTHONPATH除去、運用ラッパー/起動スクリプトが対象でトレーディング実行ロジックは対象外)が本日マージされ、`main` HEADが `9e0815f` → `3ccf9d0` に前進、CI(pytest run #2074)はgreen。新規PR #289(Codexレビュー是正artifact自動生成、読み取り専用・push権限なし)が本日オープンされ現時点でCI green・コンフリクトなし。PR #280/#282は前回から変化なく依然オープン・コンフリクト状態のまま放置。他の5項目(分析/シグナル/バックテスト/資産推移/リスク管理)はコード変更なしのため判定・根拠とも前回から変化なし。Issue #255はコメント・チェックリストとも動きがなく、依然0/10チェックでNO-GO状態を維持。
+
+---
+
+## 2026-09-18 (JST)
+- 分析: 完成 — 変化なし。`indicators.py`/`signal_engine.py` の最終変更コミットは `44ba033`(2026-08-27)のままで、前回確認以降のコミット履歴(`3ccf9d0..c730daf`)にも対象外。`add_indicators()`(MA5/MA25/MA75, RSI, MACD/Signal, ATR, VOL20)、`tests/test_signal_engine.py` 経由の間接検証は変更なし。
+- シグナル: 完成 — 判定は変化なし(コアロジック不変)。ただし**PR #291(Issue #285 Stage 2、シグナルレポート整形の再パッケージ化)が本日(2026-09-17T23:02:37Z)マージ**され、`main` HEADが `3ccf9d0` → `c730daf` に前進。`report_formatter.py` はルートに残るが中身は `from ai_asset_platform.reports.signal_report_formatter import format_signal_report` の互換シムのみとなり、実体は新規 `src/ai_asset_platform/reports/signal_report_formatter.py`(100行、Excel整形処理そのまま移設)に移動。`signal_runner.py` のimport文のみ更新。`tests/test_signal_report_formatter_package.py`(188行、新規)で検証済み、CIはgreen。`signal_engine.py` の `determine_signal()` 本体・`src/ai_asset_platform/decision*` 系には変更なし。新規PR #292(同Issue #285 Stage 2、`decision_log_report.py` の同様のパッケージ化)は本日オープン中(`mergeable_state: clean`)で未マージ、こちらもロジック非該当のリファクタと明記されている。
+- バックテスト: 完成 — 変化なし。`backtest.py`、`src/ai_asset_platform/reports/backtest_*.py`、対応テスト群(8ファイル)は前回確認以降のコミット範囲(`3ccf9d0..c730daf`)に含まれず変更なし。
+- 資産推移: 完成 — 変化なし。`equity_chart.py`/`equity_history.py`/`performance*.py`/`dashboard_core.py`、対応テスト群は今回のコミット範囲外で変更なし。
+- リスク管理: 完成(Paper運用範囲) — 変化なし。`risk_manager.py`、`execution/shared_risk_gate.py`/`legacy_risk_gate.py`、`risk/market_sizing.py`、対応テスト群は今回のコミット範囲外で変更なし。
+- 実運用: 一部実装 — Live実行系(`execution/live_pilot_*.py`、`brokers/ibkr_live_*.py`)自体への変更は本日もなし(最終変更コミット `98529af`、2026-09-14のまま)。PR #280(2026-09-08更新)・#282(2026-09-10更新)は引き続きオープン・未マージ・`mergeable_state: dirty`(コンフリクト)で、直近CI(いずれもpytest success)はマージ済みのPR #281以前の古い状態のまま停滞。PR #289(Codexレビュー由来の是正artifact自動生成、読み取り専用・push権限なし)は`mergeable_state: behind`(mainが先行)、CI(pytest×2, release-integrity-gate)はgreenだが`claude-remediation`ジョブはskipped。オーナーから2026-09-17に計5回`@codex review`が再要求されているが、本エージェントが確認した時点でCodexコネクタからの応答コメントは記録されておらず、独立レビューゲートは未充足のままUNVERIFIED。Issue #255は本日時点でコメント追加なし(最終コメント2026-09-07T23:42:12Z)、チェックリストは引き続き**0/10**(全項目未チェック)。外部前提(JPY入金決済のSettledCash/AvailableFunds確認、日本株取引許可、JASDEC登録)も引き続きUNVERIFIED。CLAUDE.md/HANDOFF_MASTER.mdの安全不変条件どおり、現時点でも **NO-GO(実弾`placeOrder`不可)**。
+
+### 前回からの変化点
+実運用カテゴリのみ変化。PR #291(Issue #285 Stage 2、シグナルレポート整形のパッケージ化、`report_formatter.py`→`src/ai_asset_platform/reports/signal_report_formatter.py`)が本日マージされ、`main` HEADが `3ccf9d0` → `c730daf` に前進。トレーディング実行ロジック(`live_pilot_*`/`execution/`/`brokers/ibkr_live_*`/`risk_manager.py`/`signal_engine.py`等)への変更は含まれずCIはgreen。同種の新規PR #292(`decision_log_report.py` のパッケージ化、Issue #285 Stage 2続き)が本日オープンされたが未マージ(`mergeable_state: clean`)。PR #280/#282は前回から変化なく依然オープン・コンフリクト状態のまま放置。PR #289はmainに対し`behind`となり、独立Codexレビュー(5回再要求済みだが応答未記録)待ちの状態が継続。他の4項目(分析/バックテスト/資産推移/リスク管理)はコード変更なしのため判定・根拠とも前回から変化なし。Issue #255はコメント・チェックリストとも動きがなく、依然0/10チェックでNO-GO状態を維持。
