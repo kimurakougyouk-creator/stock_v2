@@ -57,7 +57,7 @@ from ai_asset_platform.reports.decision_log_report import (
     generate_decision_log_report,
 )
 from decision_logger import log_decision
-from risk_manager import (
+from ai_asset_platform.risk.risk_manager import (
     calculate_open_position_risk,
     calculate_position_size,
 )
