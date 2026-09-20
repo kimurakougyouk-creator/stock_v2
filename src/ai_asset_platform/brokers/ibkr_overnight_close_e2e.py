@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 from config import STOP_LOSS_RATE, TRADING_CAPITAL
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr_execution_snapshot import preview_ibkr_paper_execution_snapshot
