@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 from config import TRADING_CAPITAL
 
 from ai_asset_platform.brokers.ibkr_all_open_orders_snapshot import (

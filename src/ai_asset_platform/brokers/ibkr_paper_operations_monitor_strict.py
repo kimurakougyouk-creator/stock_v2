@@ -26,7 +26,7 @@ from dataclasses import replace
 import math
 from pathlib import Path
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 
 from ai_asset_platform.brokers import ibkr_paper_operations_monitor as base
 from ai_asset_platform.brokers.ibkr_account_snapshot import (
