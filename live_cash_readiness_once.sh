@@ -15,4 +15,4 @@ unset PYTHONPATH
 bash scripts/ensure_exact_checkout_runtime.sh
 
 pytest -q tests/test_live_cash_readiness.py
-python -m ai_asset_platform.reports.live_cash_readiness
+python -P -m ai_asset_platform.reports.live_cash_readiness
