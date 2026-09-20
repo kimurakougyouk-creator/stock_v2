@@ -61,7 +61,7 @@ from ai_asset_platform.risk.risk_manager import (
     calculate_open_position_risk,
     calculate_position_size,
 )
-from signal_engine import determine_signal
+from ai_asset_platform.strategies.signal_engine import determine_signal
 
 
 def _get_result_dir() -> Path:
