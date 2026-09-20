@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 from config import STOP_LOSS_RATE, TRADING_CAPITAL
 from ai_asset_platform.brokers.ibkr_account_snapshot import (
     IbkrPaperAccountSnapshot,
