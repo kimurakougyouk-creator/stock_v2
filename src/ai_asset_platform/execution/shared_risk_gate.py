@@ -99,7 +99,10 @@ def load_legacy_risk_snapshot(
     order: OrderRequest,
     settings: PlatformSettings = SETTINGS,
 ) -> LegacyRiskSnapshot:
-    from order_manager import load_accounting_orders, load_paper_orders
+    from ai_asset_platform.execution.order_manager import (
+        load_accounting_orders,
+        load_paper_orders,
+    )
 
     raw_orders = load_paper_orders()
     accounting_orders = load_accounting_orders()
