@@ -32,7 +32,7 @@ from ai_asset_platform.execution.signal_order_bridge import (
 )
 from ai_asset_platform.strategies.indicators import add_indicators
 from ai_asset_platform.notifications.mail import send_mail
-from order_manager import (
+from ai_asset_platform.execution.order_manager import (
     calculate_available_cash,
     calculate_consecutive_losses,
     calculate_daily_buy_order_count,
