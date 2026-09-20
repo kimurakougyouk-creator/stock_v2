@@ -497,3 +497,65 @@ def test_monitor_module_has_no_broker_mutation_path():
     assert ".cancelOrder(" not in text
     assert "AI_ASSET_VERIFIED_PAPER_RUNTIME_CONFIRM" not in text
     assert "RUN_VERIFIED_PAPER_ONLY" not in text
+
+
+def test_email_alert_fallback_import_uses_package_mail_and_never_touches_network(
+    tmp_path, monkeypatch
+):
+    """When no `send_mail_fn` is injected, the monitor lazily imports
+    `send_mail` from `ai_asset_platform.notifications.mail` (Issue #285
+    Stage 2 mail package migration; previously the root-level `mail.py`).
+    This exercises that fallback branch end-to-end with a fully in-memory
+    fake smtplib.SMTP, proving no real network connection is ever made.
+    """
+    import ai_asset_platform.notifications.mail as package_mail
+
+    class _FakeSMTP:
+        instances: list["_FakeSMTP"] = []
+
+        def __init__(self, host, port):
+            self.host = host
+            self.port = port
+            self.started_tls = False
+            self.login_args = None
+            self.sent_message = None
+            _FakeSMTP.instances.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def starttls(self):
+            self.started_tls = True
+
+        def login(self, sender, app_password):
+            self.login_args = (sender, app_password)
+
+        def send_message(self, msg):
+            self.sent_message = msg
+
+    _FakeSMTP.instances = []
+    monkeypatch.setattr(package_mail.smtplib, "SMTP", _FakeSMTP)
+
+    critical = _evaluate(runtime_report=_runtime(status="ERROR", error_count=1))
+    state = tmp_path / "notification.json"
+
+    outcome = module.maybe_send_monitor_email_alert(
+        critical,
+        sender="owner@example.com",
+        app_password="secret",
+        now=NOW,
+        state_path=state,
+    )
+
+    assert outcome == "SENT"
+    assert len(_FakeSMTP.instances) == 1
+    fake = _FakeSMTP.instances[0]
+    assert fake.host == "smtp.gmail.com"
+    assert fake.port == 587
+    assert fake.started_tls is True
+    assert fake.login_args == ("owner@example.com", "secret")
+    assert fake.sent_message is not None
+    assert fake.sent_message["Subject"] == "[IBKR Paper Monitor] CRITICAL"
