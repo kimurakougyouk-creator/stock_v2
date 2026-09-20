@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 import signal_runner
 
 from ai_asset_platform.core.settings import PlatformSettings, SETTINGS

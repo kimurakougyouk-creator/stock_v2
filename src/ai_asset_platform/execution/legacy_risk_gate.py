@@ -10,7 +10,7 @@ def legacy_order_manager_risk_gate(order: OrderRequest) -> RiskGateResult:
 
     このアダプター自身は注文送信・取消・ファイル書込みを行わない。
     """
-    import order_manager
+    from ai_asset_platform.execution import order_manager
 
     if SETTINGS.emergency_stop:
         return RiskGateResult(False, "emergency stop")
