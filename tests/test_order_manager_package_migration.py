@@ -109,21 +109,34 @@ def test_root_order_manager_has_no_duplicated_implementation():
 def test_monkeypatch_on_root_is_visible_from_package(monkeypatch, tmp_path):
     """monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", ...) -- the
     exact pattern used by tests/test_order_manager_*.py -- must actually
-    redirect what the package's own functions read. Also chdir into
-    tmp_path first: create_paper_order() also touches ORDER_LOG_DIR and
-    (via save_realized_trade_pnls()) TRADE_PNL_PATH, so this isolates the
-    whole call from the real repo's results/ regardless of which of those
-    globals a given code path happens to use.
-    """
-    monkeypatch.chdir(tmp_path)
+    redirect what the package's own functions read.
 
+    create_paper_order() touches ORDER_LOG_DIR/ORDER_LOG_PATH directly and,
+    via save_realized_trade_pnls(), TRADE_PNL_PATH; other order_manager
+    functions also read TRAILING_HIGH_PATH. All four are explicitly
+    monkeypatched to tmp_path-based locations here (via the root import,
+    which -- thanks to the sys.modules aliasing shim -- is the same module
+    object the package uses), so this test's outcome depends only on
+    those patched paths, never on whether the repo's own results/
+    directory happens to already contain a Paper ledger.
+    """
     import order_manager
     import ai_asset_platform.execution.order_manager as package_order_manager
 
-    fake_log = tmp_path / "root_patched_orders.jsonl"
-    monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", fake_log)
+    fake_log_dir = tmp_path / "results"
+    fake_log = fake_log_dir / "paper_orders.jsonl"
+    fake_trade_pnl = fake_log_dir / "paper_trade_pnls.json"
+    fake_trailing_high = fake_log_dir / "trailing_high_prices.json"
 
+    monkeypatch.setattr(order_manager, "ORDER_LOG_DIR", fake_log_dir)
+    monkeypatch.setattr(order_manager, "ORDER_LOG_PATH", fake_log)
+    monkeypatch.setattr(order_manager, "TRADE_PNL_PATH", fake_trade_pnl)
+    monkeypatch.setattr(order_manager, "TRAILING_HIGH_PATH", fake_trailing_high)
+
+    assert package_order_manager.ORDER_LOG_DIR == fake_log_dir
     assert package_order_manager.ORDER_LOG_PATH == fake_log
+    assert package_order_manager.TRADE_PNL_PATH == fake_trade_pnl
+    assert package_order_manager.TRAILING_HIGH_PATH == fake_trailing_high
 
     order_manager.create_paper_order(
         ticker="TEST.T",
@@ -133,7 +146,6 @@ def test_monkeypatch_on_root_is_visible_from_package(monkeypatch, tmp_path):
     )
 
     assert fake_log.exists()
-    assert not (ROOT_DIR / "results" / "paper_orders.jsonl").exists()
 
 
 def test_monkeypatch_on_package_is_visible_from_root(monkeypatch, tmp_path):
