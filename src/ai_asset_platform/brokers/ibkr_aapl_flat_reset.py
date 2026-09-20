@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_aapl_reset_whatif import (
