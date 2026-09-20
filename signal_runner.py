@@ -31,7 +31,7 @@ from ai_asset_platform.execution.signal_order_bridge import (
     verified_paper_test_quantity_for_ticker,
 )
 from ai_asset_platform.strategies.indicators import add_indicators
-from mail import send_mail
+from ai_asset_platform.notifications.mail import send_mail
 from order_manager import (
     calculate_available_cash,
     calculate_consecutive_losses,

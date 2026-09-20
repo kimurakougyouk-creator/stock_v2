@@ -1,21 +1,24 @@
-import smtplib
-from email.mime.text import MIMEText
+"""Backward-compatibility shim for the root-level ``mail`` import path.
 
+The real implementation (``send_mail``) now lives in
+``ai_asset_platform.notifications.mail``. ``send_mail`` references
+``smtplib``/``MIMEText`` as unqualified module globals rather than
+parameters, so a plain ``from ... import send_mail`` re-export would leave
+any test/caller that monkeypatches ``mail.smtplib`` (or similar root
+attributes) unable to affect what ``send_mail`` actually uses -- it would
+silently keep using the package module's own ``smtplib`` binding.
 
-def send_mail(sender, app_password, receiver, subject, body):
-    """Gmailでメール送信"""
+Instead, this module replaces its own entry in ``sys.modules`` with the
+package module object (the same technique used by ``decision_logger.py`` in
+this Stage 2 series), so ``import mail`` resolves to the exact same module
+(same namespace) as ``ai_asset_platform.notifications.mail``. This keeps
+every existing attribute-level interaction -- reads, writes, and any
+``monkeypatch.setattr(mail, "smtplib", fake_smtplib)`` -- fully transparent
+and behavior-preserving.
+"""
 
-    if not app_password:
-        raise ValueError("APP_PASSWORD environment variable is required to send mail")
+import sys
 
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = receiver
+from ai_asset_platform.notifications import mail as _mail
 
-    with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
-        smtp.starttls()
-        smtp.login(sender, app_password)
-        smtp.send_message(msg)
-
-    print("メール送信完了")
+sys.modules[__name__] = _mail

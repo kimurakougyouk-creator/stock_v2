@@ -789,7 +789,7 @@ def maybe_send_monitor_email_alert(
         return "UNCHANGED_SUPPRESSED"
 
     if send_mail_fn is None:
-        from mail import send_mail as send_mail_fn
+        from ai_asset_platform.notifications.mail import send_mail as send_mail_fn
 
     reasons = list(result.critical_reasons) + list(result.warning_reasons)
     body_lines = [
