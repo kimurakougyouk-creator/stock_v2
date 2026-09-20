@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 
 from ai_asset_platform.brokers.ibkr_account_snapshot import (
     IbkrPaperAccountSnapshot,
