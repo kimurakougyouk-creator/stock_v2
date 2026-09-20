@@ -39,7 +39,7 @@ from ai_asset_platform.reports.multicurrency_trade_history import (
     calculate_realized_trade_history,
 )
 from ai_asset_platform.reports.paper_trading_health import evaluate_paper_trading_health
-import order_manager
+from ai_asset_platform.execution import order_manager
 import signal_runner
 
 
