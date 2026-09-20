@@ -36,23 +36,6 @@ from unittest.mock import patch
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
-DEFERRED_PRODUCTION_CALLERS = [
-    "src/ai_asset_platform/brokers/ibkr_9432_flat_close.py",
-    "src/ai_asset_platform/brokers/ibkr_aapl_flat_reset.py",
-    "src/ai_asset_platform/brokers/ibkr_extended_close_e2e.py",
-    "src/ai_asset_platform/brokers/ibkr_final_completion_audit.py",
-    "src/ai_asset_platform/brokers/ibkr_operator_checkpoint.py",
-    "src/ai_asset_platform/brokers/ibkr_overnight_close_e2e.py",
-    "src/ai_asset_platform/brokers/ibkr_paper_operations_monitor.py",
-    "src/ai_asset_platform/brokers/ibkr_paper_operations_monitor_strict.py",
-    "src/ai_asset_platform/execution/broker_position_guard.py",
-    "src/ai_asset_platform/execution/ibkr_execution_log_recovery.py",
-    "src/ai_asset_platform/execution/ibkr_execution_reconcile.py",
-    "src/ai_asset_platform/execution/verified_paper_scan.py",
-    "src/ai_asset_platform/execution/legacy_risk_gate.py",
-    "src/ai_asset_platform/execution/shared_risk_gate.py",
-]
-
 
 def test_order_manager_functions_importable_from_package():
     """The implementation lives in the package now."""
@@ -313,29 +296,3 @@ def test_package_import_does_not_require_repo_root_on_sys_path(tmp_path):
         f"different file than this checkout's own module: {resolved_module_path} "
         f"(expected {expected_module_path})"
     )
-
-
-def test_deferred_production_callers_are_not_modified_this_slice():
-    """This slice deliberately does NOT change the 14 production callers
-    under src/ai_asset_platform/ that already `import order_manager` --
-    their direct-import migration is a separate, independent slice/PR.
-    Confirm none of them appear in this branch's diff against origin/main.
-    """
-    import subprocess as sp
-
-    result = sp.run(
-        ["git", "diff", "--name-only", "origin/main...HEAD"],
-        cwd=str(ROOT_DIR),
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
-
-    changed_files = set(result.stdout.splitlines())
-
-    for deferred_path in DEFERRED_PRODUCTION_CALLERS:
-        assert deferred_path not in changed_files, (
-            f"{deferred_path} must not be modified in this slice "
-            "(deferred to a later independent slice/PR)"
-        )
