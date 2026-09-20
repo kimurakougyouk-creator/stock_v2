@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 from ai_asset_platform.brokers.ibkr_account_snapshot import (
     IbkrPaperAccountSnapshot,
     preview_ibkr_paper_account_snapshot,

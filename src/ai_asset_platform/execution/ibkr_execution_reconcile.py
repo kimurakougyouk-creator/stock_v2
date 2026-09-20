@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import order_manager
+from ai_asset_platform.execution import order_manager
 from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     IbkrExecutionEvidence, IbkrPaperExecutionSnapshot,
     preview_ibkr_paper_execution_snapshot,
