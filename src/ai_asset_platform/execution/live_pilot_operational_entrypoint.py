@@ -832,6 +832,20 @@ def _reconcile_once(
 
     _collect_post_attempt_readonly_evidence(request)
     _promote_postfill_if_proven(request)
+    terminal_status = _promote_terminal_reconciliation_if_proven(request)
+    if terminal_status is not None:
+        return LivePilotOperationalResult(
+            status=terminal_status,
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=True,
+            preflight_ready=False,
+            send_status=send_status,
+            completion_status=terminal_status,
+            complete=True,
+            blockers=(),
+            broker_connection_used=True,
+            order_transport_called=order_transport_called,
+        )
 
     completion = audit_live_pilot_completion(
         intent_id=request.intent_id,
