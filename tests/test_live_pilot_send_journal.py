@@ -40,7 +40,20 @@ def _isolated_canonical_journal_root(monkeypatch, tmp_path: Path):
 
 
 def _consumed(**overrides) -> dict:
-    payload = {"status": "CONSUMED", "intent_id": INTENT, "nonce": NONCE, "order_sent": False, "live_order_sent": False}
+    payload = {
+        "status": "CONSUMED",
+        "intent_id": INTENT,
+        "nonce": NONCE,
+        "ticker": "9432.T",
+        "side": "BUY",
+        "quantity": 100,
+        "limit_price": 400.0,
+        "estimated_notional_jpy": 40_000.0,
+        "account_fingerprint": "a" * 64,
+        "endpoint_port": 4001,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
     payload.update(overrides)
     return payload
 
@@ -660,4 +673,41 @@ def test_pretransport_sender_client_id_is_exact_and_conflict_checked(tmp_path: P
             client_id=682,
             directory=tmp_path,
             now=NOW + timedelta(seconds=4),
+        )
+
+
+
+def test_consumed_authorization_binding_is_persisted_for_recovery(tmp_path: Path):
+    created = _create(tmp_path)
+    assert created["authorized_ticker"] == "9432.T"
+    assert created["authorized_side"] == "BUY"
+    assert created["authorized_quantity"] == 100
+    assert created["authorized_limit_price"] == 400.0
+    assert created["authorized_estimated_notional_jpy"] == 40_000.0
+    assert created["authorized_account_fingerprint"] == "a" * 64
+    assert created["authorized_endpoint_port"] == 4001
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("ticker", ""),
+        ("side", "HOLD"),
+        ("quantity", "100"),
+        ("limit_price", "400"),
+        ("account_fingerprint", "bad"),
+        ("endpoint_port", 4002),
+    ],
+)
+def test_missing_or_malformed_consumed_binding_fails_closed(
+    tmp_path: Path, field, value
+):
+    consumed = _consumed(**{field: value})
+    with pytest.raises(PermissionError, match="authorization"):
+        create_consumed_authorization_journal(
+            intent_id=INTENT,
+            nonce=NONCE,
+            consumed_authorization=consumed,
+            directory=tmp_path,
+            now=NOW,
         )
