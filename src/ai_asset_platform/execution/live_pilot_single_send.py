@@ -60,6 +60,7 @@ from ai_asset_platform.reports.live_operational_pilot_readiness import (
 
 
 FINAL_SEND_CONFIRMATION_VALUE = "SEND_EXACTLY_ONE_LIVE_PILOT_NOW"
+LIVE_PILOT_CLIENT_ID = 681
 FINAL_EVIDENCE_MAX_AGE_SECONDS = 30.0
 _VALID_LIVE_PORTS = {4001, 7496}
 _ACCEPTED_STATUSES = {"PreSubmitted", "Submitted", "Filled"}
@@ -483,7 +484,7 @@ def send_exactly_one_live_pilot(
     client = client_factory()
     try:
         try:
-            client.connect("127.0.0.1", int(endpoint_port), 681)
+            client.connect("127.0.0.1", int(endpoint_port), LIVE_PILOT_CLIENT_ID)
         except OSError as exc:
             return LivePilotSendResult(
                 "BLOCKED_NOT_CONNECTED",
@@ -610,6 +611,7 @@ def send_exactly_one_live_pilot(
         record_order_id_before_transport(
             intent,
             order_id=int(order_id),
+            client_id=LIVE_PILOT_CLIENT_ID,
             directory=journal_dir,
             now=final_clock,
         )
