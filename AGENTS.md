@@ -22,6 +22,20 @@ Then verify current `main`, open PRs/issues, and current CI. Classify work as `D
 
 Do not change the primary-agent role or introduce another development process without an explicit user decision recorded in the canonical project documents.
 
+## GitHub read/write authority
+
+Repository agents may independently use GitHub read-only evidence (including local `gh` or API access) to inspect exact HEAD/base SHA, diffs, CI, review threads, Issues, workflow results, and main drift.
+
+No agent may perform a GitHub write merely because it has technical credentials. A fresh, explicit user authorization is required for the specific write action. This includes merge/auto-merge, `git push`, remote branch/tag changes, PR/Issue creation or mutation, comments/reviews/thread resolution, and repository-setting changes.
+
+A reviewer or Claude GO/NO-GO verdict is advisory evidence, not merge permission. The final merge operation requires separate explicit user authorization after the required exact-HEAD gates are verified.
+
+GitHub read access also grants no broker-write or Live-trading authority.
+
+## Independent audit minimum evidence
+
+Before any GO/NO-GO or acceptance decision, independently verify the current `main`, exact proposed HEAD, relevant diff, current exact-head CI, unresolved non-outdated review threads, governing Issue/checklist, and safety invariants. Do not treat an agent's self-report as proof. If the current session cannot directly access a required source, mark that evidence `UNVERIFIED` and state the limitation.
+
 ## Mandatory multi-agent gate
 
 For safety-critical trading changes, no single AI's self-review is final acceptance.
