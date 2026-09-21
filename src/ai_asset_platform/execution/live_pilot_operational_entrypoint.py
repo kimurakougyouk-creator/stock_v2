@@ -77,6 +77,7 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
     REPORT_SCHEMA_VERSION as SEND_JOURNAL_SCHEMA_VERSION,
     global_send_attempt_recorded,
+    load_definitive_rejection_evidence,
     load_global_send_attempt_marker,
     load_send_attempt_marker,
     load_send_journal,
@@ -670,13 +671,25 @@ def _terminal_reconciliation_is_durably_proven(
         return False
     if isinstance(journal.get("send_attempt_count"), bool):
         return False
-    if journal.get("order_id") not in {None, terminal.get("order_id")}:
+
+    order_id = _positive_exact_int(terminal.get("order_id"))
+    sender_client_id = _nonnegative_exact_int(terminal.get("sender_client_id"))
+    if order_id is None or sender_client_id is None:
         return False
-    if journal.get("sender_client_id") not in {
-        None,
-        terminal.get("sender_client_id"),
-    }:
-        return False
+    journal_order_id = journal.get("order_id")
+    journal_sender_client_id = journal.get("sender_client_id")
+    if journal_order_id is not None:
+        if (
+            _positive_exact_int(journal_order_id) is None
+            or journal_order_id != order_id
+        ):
+            return False
+    if journal_sender_client_id is not None:
+        if (
+            _nonnegative_exact_int(journal_sender_client_id) is None
+            or journal_sender_client_id != sender_client_id
+        ):
+            return False
 
     try:
         attempt = load_send_attempt_marker(
@@ -721,15 +734,10 @@ def _terminal_reconciliation_is_durably_proven(
         or global_time is None
         or terminal_attempt_time is None
         or terminal_time is None
-        or global_time > attempt_time
+        or global_time != attempt_time
         or terminal_attempt_time != attempt_time
         or terminal_time < attempt_time
     ):
-        return False
-
-    order_id = _positive_exact_int(terminal.get("order_id"))
-    sender_client_id = _nonnegative_exact_int(terminal.get("sender_client_id"))
-    if order_id is None or sender_client_id is None:
         return False
 
     expected_side = request.side.strip().upper()
@@ -777,6 +785,65 @@ def _terminal_reconciliation_is_durably_proven(
     )
     if rejection_reason is None:
         return False
+    try:
+        rejection_evidence = load_definitive_rejection_evidence(
+            request.intent_id,
+            directory=DEFAULT_JOURNAL_DIR,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(rejection_evidence, dict):
+        return False
+    rejection_attempt_time = _parse_aware_timestamp(
+        rejection_evidence.get("send_attempt_recorded_at")
+    )
+    rejection_recorded_time = _parse_aware_timestamp(
+        rejection_evidence.get("rejection_recorded_at")
+    )
+    if (
+        rejection_evidence.get("schema_version") != SEND_JOURNAL_SCHEMA_VERSION
+        or str(rejection_evidence.get("intent_id") or "") != request.intent_id
+        or str(rejection_evidence.get("nonce") or "") != request.nonce
+        or str(rejection_evidence.get("ticker") or "").strip().upper()
+        != request.ticker.strip().upper()
+        or str(rejection_evidence.get("side") or "").strip().upper()
+        != request.side.strip().upper()
+        or rejection_evidence.get("quantity") != request.quantity
+        or isinstance(rejection_evidence.get("quantity"), bool)
+        or _positive_finite_number(rejection_evidence.get("limit_price"))
+        != float(request.limit_price)
+        or _positive_finite_number(
+            rejection_evidence.get("estimated_notional_jpy")
+        )
+        != float(request.estimated_notional_jpy)
+        or str(rejection_evidence.get("account_fingerprint") or "").strip().lower()
+        != request.expected_account_fingerprint.strip().lower()
+        or rejection_evidence.get("endpoint_port") != endpoint_port
+        or isinstance(rejection_evidence.get("endpoint_port"), bool)
+        or _positive_exact_int(rejection_evidence.get("order_id")) != order_id
+        or _nonnegative_exact_int(rejection_evidence.get("sender_client_id"))
+        != sender_client_id
+        or _definitive_rejection_reason(
+            rejection_evidence.get("rejection_reason")
+        )
+        != rejection_reason
+        or rejection_attempt_time != attempt_time
+        or rejection_recorded_time is None
+        or rejection_recorded_time < attempt_time
+    ):
+        return False
+    for flag in (
+        "automatic_resend_allowed",
+        "automatic_cancel_allowed",
+        "automatic_modify_allowed",
+        "automatic_flatten_allowed",
+        "automatic_close_allowed",
+        "order_sent",
+        "live_order_sent",
+    ):
+        if rejection_evidence.get(flag) is not False:
+            return False
+
     expected_final = Decimal("0") if expected_side == "BUY" else authorized_quantity
     return final_position == expected_final
 
@@ -1003,9 +1070,66 @@ def _promote_terminal_reconciliation_if_proven(
     # No matching execution rows: only an explicit broker-side non-acceptance
     # may become REJECTED_RECONCILED. Timeout/disconnect/no-evidence remains
     # UNKNOWN by design.
-    rejection_reason = _definitive_rejection_reason(journal.get("unknown_reason"))
-    if rejection_reason is None:
+    try:
+        rejection_evidence = load_definitive_rejection_evidence(
+            request.intent_id,
+            directory=DEFAULT_JOURNAL_DIR,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return None
+    if not isinstance(rejection_evidence, dict):
+        return None
+    rejection_reason = _definitive_rejection_reason(
+        rejection_evidence.get("rejection_reason")
+    )
+    rejection_attempt_time = _parse_aware_timestamp(
+        rejection_evidence.get("send_attempt_recorded_at")
+    )
+    rejection_recorded_time = _parse_aware_timestamp(
+        rejection_evidence.get("rejection_recorded_at")
+    )
+    marker_time = _parse_aware_timestamp(attempt_marker.get("recorded_at"))
+    if (
+        rejection_reason is None
+        or rejection_evidence.get("schema_version") != SEND_JOURNAL_SCHEMA_VERSION
+        or str(rejection_evidence.get("intent_id") or "") != request.intent_id
+        or str(rejection_evidence.get("nonce") or "") != request.nonce
+        or str(rejection_evidence.get("ticker") or "").strip().upper()
+        != request.ticker.strip().upper()
+        or str(rejection_evidence.get("side") or "").strip().upper()
+        != request.side.strip().upper()
+        or rejection_evidence.get("quantity") != request.quantity
+        or isinstance(rejection_evidence.get("quantity"), bool)
+        or _positive_finite_number(rejection_evidence.get("limit_price"))
+        != float(request.limit_price)
+        or _positive_finite_number(
+            rejection_evidence.get("estimated_notional_jpy")
+        )
+        != float(request.estimated_notional_jpy)
+        or str(rejection_evidence.get("account_fingerprint") or "").strip().lower()
+        != request.expected_account_fingerprint.strip().lower()
+        or rejection_evidence.get("endpoint_port") != endpoint_port
+        or isinstance(rejection_evidence.get("endpoint_port"), bool)
+        or _positive_exact_int(rejection_evidence.get("order_id")) != order_id
+        or _nonnegative_exact_int(rejection_evidence.get("sender_client_id"))
+        != sender_client_id
+        or marker_time is None
+        or rejection_attempt_time != marker_time
+        or rejection_recorded_time is None
+        or rejection_recorded_time < marker_time
+    ):
+        return None
+    for flag in (
+        "automatic_resend_allowed",
+        "automatic_cancel_allowed",
+        "automatic_modify_allowed",
+        "automatic_flatten_allowed",
+        "automatic_close_allowed",
+        "order_sent",
+        "live_order_sent",
+    ):
+        if rejection_evidence.get(flag) is not False:
+            return None
     if persisted_perm is not None:
         return None
     if any(row.get("order_id") == order_id for row in validated_rows):
