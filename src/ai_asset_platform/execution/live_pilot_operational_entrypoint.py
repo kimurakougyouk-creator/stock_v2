@@ -952,7 +952,11 @@ def _completed_order_rejection_if_proven(
             return None
         parsed_rows.append((row, row_order, row_perm, row_client))
 
-    matching = [item for item in parsed_rows if item[1] == order_id]
+    matching = [
+        item
+        for item in parsed_rows
+        if item[1] == order_id and item[3] == sender_client_id
+    ]
     if len(matching) != 1:
         return None
     row, _, row_perm, row_client = matching[0]
