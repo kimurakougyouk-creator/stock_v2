@@ -37,7 +37,7 @@ from ai_asset_platform.execution.live_pilot_same_run_preflight import (
 )
 
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_postfill_evidence_latest.json")
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,7 @@ class LiveExecutionEvidence:
     exec_id: str
     order_id: int
     perm_id: int
+    client_id: int
     symbol: str
     sec_type: str
     currency: str
@@ -208,6 +209,10 @@ def _execution_row(contract, execution, account_id: str) -> LiveExecutionEvidenc
         perm_id = int(getattr(execution, "permId", 0) or 0)
     except (TypeError, ValueError):
         return None
+    raw_client_id = getattr(execution, "clientId", None)
+    if not isinstance(raw_client_id, int) or isinstance(raw_client_id, bool) or raw_client_id < 0:
+        return None
+    client_id = raw_client_id
     exec_id = str(getattr(execution, "execId", "") or "").strip()
     if (
         not exec_id
@@ -222,6 +227,7 @@ def _execution_row(contract, execution, account_id: str) -> LiveExecutionEvidenc
         exec_id=exec_id,
         order_id=order_id,
         perm_id=perm_id,
+        client_id=client_id,
         symbol=str(getattr(contract, "symbol", "") or "").strip().upper(),
         sec_type=str(getattr(contract, "secType", "") or "").strip().upper(),
         currency=str(getattr(contract, "currency", "") or "").strip().upper(),
@@ -234,13 +240,23 @@ def _execution_row(contract, execution, account_id: str) -> LiveExecutionEvidenc
 
 
 def preview_ibkr_live_postfill_snapshot(
-    *, timeout: float = 10.0, settle_seconds: float = 0.25, confirmation: str | None = None,
+    *,
+    timeout: float = 10.0,
+    settle_seconds: float = 0.25,
+    confirmation: str | None = None,
+    expected_client_id: int | None = None,
 ) -> IbkrLivePostFillSnapshot:
     supplied = str(confirmation).strip() if confirmation is not None else os.getenv(CONFIRMATION_ENV, "").strip()
     if supplied != CONFIRMATION_VALUE:
         return IbkrLivePostFillSnapshot(False, False, None, None, blocked_reason="exact Live read-only confirmation is missing")
     if timeout <= 0 or settle_seconds < 0 or settle_seconds > 2:
         raise ValueError("invalid timeout or settle_seconds")
+    if expected_client_id is not None and (
+        not isinstance(expected_client_id, int)
+        or isinstance(expected_client_id, bool)
+        or expected_client_id < 0
+    ):
+        raise ValueError("expected_client_id must be a non-negative exact int")
 
     errors: list[str] = []
     for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
@@ -261,7 +277,10 @@ def preview_ibkr_live_postfill_snapshot(
                 errors.append(f"{port}: expected exactly one managed Live account")
                 continue
             account_id = probe.accounts[0]
-            probe.reqExecutions(1997, ExecutionFilter())
+            execution_filter = ExecutionFilter()
+            if expected_client_id is not None:
+                execution_filter.clientId = expected_client_id
+            probe.reqExecutions(1997, execution_filter)
             if not probe.executions_ready.wait(timeout) or probe.fatal:
                 errors.extend(probe.errors)
                 continue
