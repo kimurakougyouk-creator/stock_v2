@@ -610,6 +610,67 @@ def test_fee_aware_realized_trade_serializes_commission_allocation():
     assert trade["total_commission_account"] == 10.0
     assert trade["net_realized_pnl_account"] == 990.0
     assert trade["sell_exec_ids"] == ["sell-1"]
+    assert len(trade["buy_contributions_weighted_average"]) == 1
+    assert trade["buy_contributions_weighted_average"][0]["buy_exec_ids"] == ["buy-1"]
+
+
+def test_partial_close_retains_all_weighted_average_buy_exec_provenance():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=100.0,
+            shares=100,
+            exec_ids=["buy-a"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="BUY",
+                shares=100,
+                bar_key="2026-09-01T11:00:00+09:00",
+            ),
+            side="BUY",
+            price=200.0,
+            shares=100,
+            exec_ids=["buy-b"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=180.0,
+            shares=100,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    commissions = _commission_report(
+        _commission("buy-a", 10.0, "JPY"),
+        _commission("buy-b", 20.0, "JPY"),
+        _commission("sell-1", 5.0, "JPY"),
+    )
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=commissions,
+    )
+
+    trade = result.realized_trades[0]
+    contributions = trade["buy_contributions_weighted_average"]
+    assert [c["buy_exec_ids"] for c in contributions] == [["buy-a"], ["buy-b"]]
+    assert [c["allocated_shares_weighted_average"] for c in contributions] == [50.0, 50.0]
+    assert [c["allocated_commission_account"] for c in contributions] == [5.0, 10.0]
+    assert trade["allocated_buy_commission_account"] == 15.0
+    assert trade["sell_commission_account"] == 5.0
+    assert trade["gross_realized_pnl_account"] == 3000.0
+    assert trade["net_realized_pnl_account"] == 2980.0
+    assert result.net_realized_pnl == 2980.0
+    assert result.net_profitability_proven is False
 
 
 def test_module_contains_no_broker_mutation_api_calls():
