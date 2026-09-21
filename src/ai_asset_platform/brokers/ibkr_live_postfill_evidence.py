@@ -318,7 +318,7 @@ def match_live_postfill(
     quantity: int,
     order_id: int,
     perm_id: int,
-    expected_client_id: int | None = None,
+    expected_client_id: int,
 ) -> LivePostFillMatch:
     blockers: list[str] = []
     if not snapshot.ready:
@@ -330,7 +330,7 @@ def match_live_postfill(
     symbol = "9432" if str(ticker).strip().upper() == "9432.T" else str(ticker).strip().upper()
     normalized_side = str(side).strip().upper()
     expected_quantity = _positive_decimal(quantity)
-    if expected_client_id is not None and (
+    if (
         not isinstance(expected_client_id, int)
         or isinstance(expected_client_id, bool)
         or expected_client_id < 0
@@ -349,7 +349,7 @@ def match_live_postfill(
         and row.side == normalized_side
         and row.order_id == int(order_id)
         and row.perm_id == int(perm_id)
-        and (expected_client_id is None or row.client_id == expected_client_id)
+        and row.client_id == expected_client_id
         and row.account_fingerprint == expected_fp
     ]
     if not matches:
