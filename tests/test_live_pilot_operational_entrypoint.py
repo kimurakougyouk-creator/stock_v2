@@ -146,6 +146,53 @@ def test_existing_campaign_marker_forces_recovery_only_and_sender_is_unreachable
     assert calls == [("live-pilot:9432:BUY:100:test", None, False)]
 
 
+def test_unreadable_journal_at_recovery_dispatch_blocks_before_source_or_broker(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        subject,
+        "global_send_attempt_recorded",
+        lambda **kwargs: True,
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_send_journal",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            json.JSONDecodeError("truncated journal", "{", 1)
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "audit_live_pilot_source_cutover",
+        lambda **kwargs: pytest.fail(
+            "source audit must be unreachable when durable journal is unreadable"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_reconcile_once",
+        lambda *args, **kwargs: pytest.fail(
+            "recovery dispatch must block before reconciliation"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "send_exactly_one_live_pilot",
+        lambda *args, **kwargs: pytest.fail(
+            "sender must remain unreachable after campaign marker"
+        ),
+    )
+
+    result = subject.run_live_pilot_operational_once(_request())
+
+    assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
+    assert result.recovery_only is True
+    assert result.complete is False
+    assert result.broker_connection_used is False
+    assert result.order_transport_called is False
+    assert any("journal is unreadable" in item for item in result.blockers)
+
+
 def test_blocked_same_run_preflight_never_reaches_sender(monkeypatch):
     monkeypatch.setattr(
         subject,
@@ -2539,6 +2586,38 @@ def test_persisted_rejected_terminal_requires_immutable_callback_evidence(monkey
     assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
     assert result.complete is False
     assert result.broker_connection_used is False
+
+
+def test_unreadable_journal_inside_reconcile_returns_blocked_without_broker_io(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        subject,
+        "load_send_journal",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            UnicodeError("journal bytes are unreadable")
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "broker recovery must be unreachable when journal cannot be read"
+        ),
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
+    assert result.recovery_only is True
+    assert result.complete is False
+    assert result.broker_connection_used is False
+    assert result.order_transport_called is False
+    assert any("journal is unreadable" in item for item in result.blockers)
 
 
 def test_malformed_nonterminal_recovery_binding_returns_blocked_without_broker_io(
