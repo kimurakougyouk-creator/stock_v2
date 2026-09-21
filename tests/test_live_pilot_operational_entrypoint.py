@@ -1971,6 +1971,59 @@ def _persisted_terminal_journal(terminal_state: str) -> dict:
     return data
 
 
+def _persisted_terminal_marker(terminal_state: str) -> dict:
+    journal = _persisted_terminal_journal(terminal_state)
+    marker = {
+        key: journal[key]
+        for key in (
+            "intent_id",
+            "nonce",
+            "authorized_ticker",
+            "authorized_side",
+            "authorized_quantity",
+            "authorized_limit_price",
+            "authorized_estimated_notional_jpy",
+            "authorized_account_fingerprint",
+            "authorized_endpoint_port",
+            "send_attempt_count",
+            "order_id",
+            "sender_client_id",
+            "recovery_required",
+            "automatic_resend_allowed",
+            "automatic_cancel_allowed",
+            "automatic_modify_allowed",
+            "automatic_flatten_allowed",
+            "automatic_close_allowed",
+            "order_sent",
+            "live_order_sent",
+        )
+    }
+    marker.update(
+        schema_version=subject.SEND_JOURNAL_SCHEMA_VERSION,
+        state=terminal_state,
+        send_attempt_recorded_at="2026-09-21T12:39:00+00:00",
+        terminal_recorded_at="2026-09-21T12:40:00+00:00",
+    )
+    if terminal_state == "PARTIAL_RECONCILED":
+        marker.update(
+            perm_id=880077,
+            exec_ids=["partial-1"],
+            filled_quantity=40.0,
+            commission_total=10.0,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+        )
+    else:
+        marker.update(
+            perm_id=None,
+            rejection_reason=(
+                "broker orderStatus callback reported non-accepted status: Cancelled"
+            ),
+            final_position_quantity=0.0,
+        )
+    return marker
+
+
 def _terminal_attempt_marker() -> dict:
     return {
         "schema_version": subject.SEND_JOURNAL_SCHEMA_VERSION,
@@ -2001,6 +2054,11 @@ def test_persisted_terminal_reconciliation_surfaces_without_new_broker_io(
 ):
     journal = _persisted_terminal_journal(terminal_state)
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: _persisted_terminal_marker(terminal_state),
+    )
     monkeypatch.setattr(
         subject,
         "load_send_attempt_marker",
@@ -2053,8 +2111,14 @@ def test_malformed_persisted_terminal_evidence_blocks_without_broker_io(
     monkeypatch, terminal_state, missing_key
 ):
     journal = _persisted_terminal_journal(terminal_state)
-    journal.pop(missing_key)
+    terminal = _persisted_terminal_marker(terminal_state)
+    terminal.pop(missing_key)
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: terminal,
+    )
     monkeypatch.setattr(
         subject,
         "load_send_attempt_marker",
@@ -2084,10 +2148,14 @@ def test_malformed_persisted_terminal_evidence_blocks_without_broker_io(
     assert result.broker_connection_used is False
     assert result.order_transport_called is False
 
-
 def test_terminal_reconciliation_requires_both_irreversible_markers(monkeypatch):
     journal = _persisted_terminal_journal("REJECTED_RECONCILED")
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: _persisted_terminal_marker("REJECTED_RECONCILED"),
+    )
     monkeypatch.setattr(
         subject,
         "load_send_attempt_marker",
@@ -2115,3 +2183,119 @@ def test_terminal_reconciliation_requires_both_irreversible_markers(monkeypatch)
     assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
     assert result.complete is False
     assert result.broker_connection_used is False
+
+
+def test_terminal_marker_is_authoritative_over_edited_summary_payload(monkeypatch):
+    journal = _persisted_terminal_journal("PARTIAL_RECONCILED")
+    journal["exec_ids"] = ["fabricated-summary"]
+    journal["filled_quantity"] = 99.0
+    journal["commission_total"] = 9999.0
+    journal["final_position_quantity"] = 99.0
+    terminal = _persisted_terminal_marker("PARTIAL_RECONCILED")
+
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: terminal,
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: _terminal_attempt_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_global_send_attempt_marker",
+        lambda *args, **kwargs: _terminal_global_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "valid immutable terminal proof must not reconnect"
+        ),
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == "PARTIAL_RECONCILED"
+    assert result.complete is True
+    assert result.broker_connection_used is False
+
+
+def test_terminal_marker_surfaces_after_crash_before_summary_transition(monkeypatch):
+    journal = _persisted_terminal_journal("PARTIAL_RECONCILED")
+    journal["state"] = "UNKNOWN"
+    journal["recovery_required"] = True
+    journal.pop("reconciled_at", None)
+    terminal = _persisted_terminal_marker("PARTIAL_RECONCILED")
+
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: terminal,
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: _terminal_attempt_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_global_send_attempt_marker",
+        lambda *args, **kwargs: _terminal_global_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "exclusive terminal marker must survive summary-write crash"
+        ),
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == "PARTIAL_RECONCILED"
+    assert result.complete is True
+    assert result.broker_connection_used is False
+
+
+def test_new_terminal_transition_is_revalidated_before_complete(monkeypatch):
+    journal = _terminal_journal()
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(subject, "_promote_postfill_if_proven", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        subject,
+        "_promote_terminal_reconciliation_if_proven",
+        lambda *args, **kwargs: "PARTIAL_RECONCILED",
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
+    assert result.complete is False
+    assert result.broker_connection_used is True
