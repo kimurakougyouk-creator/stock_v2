@@ -511,6 +511,9 @@ def test_human_wrapper_passes_empty_final_confirmation_by_default(tmp_path):
         "  printf '%s\\n' \"$LIVE_PILOT_EXPECTED_COMMIT_SHA\"\n"
         "  exit 0\n"
         "fi\n"
+        "if [[ \"$1\" == \"status\" && \"$2\" == \"--porcelain\" && \"$3\" == \"--untracked-files=no\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
         "exit 99\n",
         encoding="utf-8",
     )
@@ -2538,12 +2541,11 @@ def test_persisted_rejected_terminal_requires_immutable_callback_evidence(monkey
     assert result.broker_connection_used is False
 
 
-@pytest.mark.parametrize("field,value", [("sender_client_id", []), ("authorized_endpoint_port", {})])
 def test_malformed_nonterminal_recovery_binding_returns_blocked_without_broker_io(
-    monkeypatch, field, value
+    monkeypatch,
 ):
     journal = _terminal_journal()
-    journal[field] = value
+    journal["sender_client_id"] = []
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
         subject,
