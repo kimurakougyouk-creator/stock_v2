@@ -1009,6 +1009,20 @@ def mark_rejected_reconciled(
         immutable_rejection.get("schema_version") != REPORT_SCHEMA_VERSION
         or str(immutable_rejection.get("intent_id") or "") != intent_id
         or str(immutable_rejection.get("nonce") or "") != str(payload.get("nonce") or "")
+        or str(immutable_rejection.get("ticker") or "").strip().upper()
+        != str(payload.get("authorized_ticker") or "").strip().upper()
+        or str(immutable_rejection.get("side") or "").strip().upper()
+        != str(payload.get("authorized_side") or "").strip().upper()
+        or immutable_rejection.get("quantity") != payload.get("authorized_quantity")
+        or isinstance(immutable_rejection.get("quantity"), bool)
+        or immutable_rejection.get("limit_price") != payload.get("authorized_limit_price")
+        or immutable_rejection.get("estimated_notional_jpy")
+        != payload.get("authorized_estimated_notional_jpy")
+        or str(immutable_rejection.get("account_fingerprint") or "").strip().lower()
+        != str(payload.get("authorized_account_fingerprint") or "").strip().lower()
+        or immutable_rejection.get("endpoint_port")
+        != payload.get("authorized_endpoint_port")
+        or isinstance(immutable_rejection.get("endpoint_port"), bool)
         or immutable_rejection.get("order_id") != order_id
         or immutable_rejection.get("sender_client_id") != payload.get("sender_client_id")
         or immutable_rejection.get("rejection_reason") != reason
@@ -1027,6 +1041,35 @@ def mark_rejected_reconciled(
         intent_id=intent_id,
         directory=directory,
     )
+    try:
+        rejection_attempt_time = datetime.fromisoformat(
+            str(immutable_rejection.get("send_attempt_recorded_at") or "")
+        )
+        rejection_recorded_time = datetime.fromisoformat(
+            str(immutable_rejection.get("rejection_recorded_at") or "")
+        )
+        expected_attempt_time = datetime.fromisoformat(attempt_recorded_at)
+    except ValueError as exc:
+        raise PermissionError("definitive rejection evidence timestamp is invalid") from exc
+    if any(
+        observed.tzinfo is None or observed.utcoffset() is None
+        for observed in (
+            rejection_attempt_time,
+            rejection_recorded_time,
+            expected_attempt_time,
+        )
+    ):
+        raise PermissionError(
+            "definitive rejection evidence timestamp is not timezone-aware"
+        )
+    rejection_attempt_time = rejection_attempt_time.astimezone(timezone.utc)
+    rejection_recorded_time = rejection_recorded_time.astimezone(timezone.utc)
+    expected_attempt_time = expected_attempt_time.astimezone(timezone.utc)
+    if (
+        rejection_attempt_time != expected_attempt_time
+        or rejection_recorded_time < expected_attempt_time
+    ):
+        raise PermissionError("definitive rejection evidence timestamp conflicts")
     reconciled_at = _now(now)
     terminal_marker = _terminal_marker_base(
         payload,
