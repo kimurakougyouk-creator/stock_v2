@@ -20,6 +20,7 @@ def _execution(**overrides):
         exec_id="exec-1",
         order_id=77,
         perm_id=88,
+        client_id=681,
         symbol="AAPL",
         sec_type="STK",
         currency="USD",
