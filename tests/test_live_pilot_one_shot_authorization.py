@@ -72,6 +72,13 @@ def test_authorization_binds_exact_pilot_and_is_single_use(tmp_path: Path):
 
     consumed = _consume(tmp_path, authorization.nonce)
     assert consumed["status"] == "CONSUMED"
+    assert consumed["ticker"] == "AAPL"
+    assert consumed["side"] == "BUY"
+    assert consumed["quantity"] == 1
+    assert consumed["limit_price"] == 250.0
+    assert consumed["estimated_notional_jpy"] == 37_500.0
+    assert consumed["account_fingerprint"] == FINGERPRINT
+    assert consumed["endpoint_port"] == 4001
     assert authorization_consumed(authorization.nonce, authorization_dir=tmp_path) is True
 
     with pytest.raises(PermissionError, match="already been consumed"):
