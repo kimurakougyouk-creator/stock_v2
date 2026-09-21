@@ -1113,7 +1113,23 @@ def _reconcile_once(
 
     _collect_post_attempt_readonly_evidence(request)
     _promote_postfill_if_proven(request)
-    terminal_status = _promote_terminal_reconciliation_if_proven(request)
+    try:
+        terminal_status = _promote_terminal_reconciliation_if_proven(request)
+    except (PermissionError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return LivePilotOperationalResult(
+            status="BLOCKED_TERMINAL_EVIDENCE",
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=True,
+            preflight_ready=False,
+            send_status=send_status,
+            completion_status=None,
+            complete=False,
+            blockers=(
+                "terminal reconciliation transition could not prove durable marker integrity",
+            ),
+            broker_connection_used=True,
+            order_transport_called=order_transport_called,
+        )
     if terminal_status is not None:
         refreshed_journal = load_send_journal(
             request.intent_id,
