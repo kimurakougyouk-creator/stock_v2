@@ -529,3 +529,94 @@ def test_pretransport_order_id_rename_is_directory_fsynced(tmp_path: Path, monke
     persisted = load_send_journal(INTENT, directory=tmp_path)
     assert persisted is not None
     assert persisted["order_id"] == 101
+
+
+def test_postfill_proven_can_recover_directly_from_send_attempt_state(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    proven = mark_postfill_proven(
+        INTENT,
+        exec_id="exec-crash-recovery",
+        order_id=101,
+        perm_id=202,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert proven["state"] == "POSTFILL_PROVEN"
+    assert proven["order_id"] == 101
+    assert proven["perm_id"] == 202
+    assert proven["recovery_required"] is False
+    assert proven["automatic_resend_allowed"] is False
+    assert proven["automatic_cancel_allowed"] is False
+    assert proven["automatic_modify_allowed"] is False
+    assert proven["automatic_flatten_allowed"] is False
+    assert proven["automatic_close_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    ("order_id", "perm_id"),
+    [
+        ("101", 202),
+        (101.0, 202),
+        (True, 202),
+        (101, "202"),
+        (101, 202.0),
+        (101, True),
+    ],
+)
+def test_postfill_proven_rejects_non_exact_broker_ids(
+    tmp_path: Path, order_id, perm_id
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    with pytest.raises(ValueError, match="positive exact ints"):
+        mark_postfill_proven(
+            INTENT,
+            exec_id="exec-1",
+            order_id=order_id,
+            perm_id=perm_id,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+
+@pytest.mark.parametrize(
+    ("order_id", "perm_id"),
+    [
+        ("101", 202),
+        (101.0, 202),
+        (True, 202),
+        (101, "202"),
+        (101, 202.0),
+        (101, True),
+    ],
+)
+def test_order_acknowledgement_rejects_non_exact_broker_ids(
+    tmp_path: Path, order_id, perm_id
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+
+    with pytest.raises(ValueError, match="positive exact ints"):
+        mark_order_acknowledged(
+            INTENT,
+            order_id=order_id,
+            perm_id=perm_id,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=2),
+        )
