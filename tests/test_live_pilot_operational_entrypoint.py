@@ -462,6 +462,7 @@ def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkey
             "side": "BUY",
             "quantity": 100.0,
             "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
             "account_fingerprint": FINGERPRINT,
         }
     ]
@@ -538,6 +539,7 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
             "side": "BUY",
             "quantity": 50.0,
             "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
             "account_fingerprint": FINGERPRINT,
         },
         {
@@ -550,6 +552,7 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
             "side": "BUY",
             "quantity": 50.0,
             "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
             "account_fingerprint": FINGERPRINT,
         },
     ]
@@ -572,6 +575,7 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
             "side": "SELL",
             "quantity": 100.0,
             "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
             "account_fingerprint": FINGERPRINT,
         }
     ]
