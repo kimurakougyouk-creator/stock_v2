@@ -47,6 +47,7 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     create_consumed_authorization_journal,
     mark_order_acknowledged,
     mark_unknown,
+    record_order_id_before_transport,
     record_send_attempt,
 )
 from ai_asset_platform.execution.live_pilot_source_cutover import (
@@ -606,6 +607,12 @@ def send_exactly_one_live_pilot(
         )
         authorization_expires_at = consumed.get("expires_at")
         record_send_attempt(intent, directory=journal_dir, now=final_clock)
+        record_order_id_before_transport(
+            intent,
+            order_id=int(order_id),
+            directory=journal_dir,
+            now=final_clock,
+        )
 
         # Prepare the watched fields first: trivial in-memory assignments,
         # not I/O, so they cannot themselves introduce a delay between the
