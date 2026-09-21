@@ -456,6 +456,35 @@ def evaluate_live_pilot_completion(
             "different intent, or inconsistent"
         )
 
+    # All three durable records are created from the same send-attempt clock
+    # sample. Exact timestamp equality proves the per-intent marker, campaign
+    # marker, and mutable journal all refer to that same irreversible attempt.
+    marker_attempt_time = _parse_aware_timestamp(
+        send_attempt_marker.get("recorded_at")
+        if isinstance(send_attempt_marker, dict)
+        else None
+    )
+    global_attempt_time = _parse_aware_timestamp(
+        global_send_attempt_marker.get("recorded_at")
+        if isinstance(global_send_attempt_marker, dict)
+        else None
+    )
+    journal_attempt_time = _parse_aware_timestamp(
+        send_journal.get("send_attempt_recorded_at")
+        if isinstance(send_journal, dict)
+        else None
+    )
+    attempt_timestamp_chain_ready = bool(
+        marker_attempt_time is not None
+        and global_attempt_time is not None
+        and journal_attempt_time is not None
+        and marker_attempt_time == global_attempt_time == journal_attempt_time
+    )
+    if not attempt_timestamp_chain_ready:
+        blockers.append(
+            "send-attempt marker timestamps do not identify the same irreversible attempt"
+        )
+
     postfill_fresh = _fresh(postfill_report, now=current, max_age_seconds=max_age)
     account_fresh = _fresh(final_account_report, now=current, max_age_seconds=max_age)
     open_orders_fresh = _fresh(final_open_orders_report, now=current, max_age_seconds=max_age)
