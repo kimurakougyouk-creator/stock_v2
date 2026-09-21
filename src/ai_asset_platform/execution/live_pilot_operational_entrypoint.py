@@ -201,8 +201,19 @@ def _evaluate_and_persist_preflight(
 def _collect_post_attempt_readonly_evidence(
     request: LivePilotOperationalRequest,
 ) -> None:
+    journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
+    sender_client_id = (
+        journal.get("sender_client_id") if isinstance(journal, dict) else None
+    )
+    if (
+        not isinstance(sender_client_id, int)
+        or isinstance(sender_client_id, bool)
+        or sender_client_id < 0
+    ):
+        raise PermissionError("durable sender client_id is missing or invalid")
     postfill = preview_ibkr_live_postfill_snapshot(
-        confirmation=request.live_readonly_confirmation
+        confirmation=request.live_readonly_confirmation,
+        expected_client_id=sender_client_id,
     )
     persist_live_postfill_snapshot(postfill)
 
@@ -219,6 +230,12 @@ def _collect_post_attempt_readonly_evidence(
 
 def _positive_exact_int(value: object) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
+def _nonnegative_exact_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         return None
     return value
 
@@ -242,6 +259,9 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
     order_id = _positive_exact_int(journal.get("order_id"))
     if order_id is None:
         return
+    sender_client_id = _nonnegative_exact_int(journal.get("sender_client_id"))
+    if sender_client_id is None:
+        return
     raw_perm_id = journal.get("perm_id")
     if raw_perm_id is None:
         perm_id = None
@@ -264,6 +284,8 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
         if (
             _positive_exact_int(row.get("order_id")) is None
             or _positive_exact_int(row.get("perm_id")) is None
+            or _nonnegative_exact_int(row.get("client_id")) is None
+            or row.get("client_id") != sender_client_id
         ):
             return
 
@@ -273,7 +295,12 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
         for row in rows:
             row_order_id = _positive_exact_int(row.get("order_id"))
             row_perm_id = _positive_exact_int(row.get("perm_id"))
-            if row_order_id is None or row_perm_id is None:
+            row_client_id = _nonnegative_exact_int(row.get("client_id"))
+            if (
+                row_order_id is None
+                or row_perm_id is None
+                or row_client_id != sender_client_id
+            ):
                 return
             if row_order_id == order_id and row_perm_id != perm_id:
                 return
