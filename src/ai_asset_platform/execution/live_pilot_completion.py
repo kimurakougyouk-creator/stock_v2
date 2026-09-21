@@ -363,12 +363,20 @@ def evaluate_live_pilot_completion(
     order_id: int | None = None
     perm_id: int | None = None
     sender_client_id: int | None = None
+    authorized_endpoint_port: int | None = None
     exec_id: str | None = None
     journal_ready = False
     if isinstance(send_journal, dict):
         order_id = _positive_exact_int(send_journal.get("order_id"))
         perm_id = _positive_exact_int(send_journal.get("perm_id"))
         sender_client_id = _nonnegative_exact_int(send_journal.get("sender_client_id"))
+        raw_authorized_endpoint = send_journal.get("authorized_endpoint_port")
+        if (
+            isinstance(raw_authorized_endpoint, int)
+            and not isinstance(raw_authorized_endpoint, bool)
+            and raw_authorized_endpoint in _VALID_LIVE_PORTS
+        ):
+            authorized_endpoint_port = raw_authorized_endpoint
         exec_id = str(send_journal.get("exec_id") or "").strip() or None
         journal_ready = bool(
             _is_exact_int(send_journal.get("schema_version"), _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION)
@@ -380,6 +388,18 @@ def evaluate_live_pilot_completion(
             and perm_id is not None
             and perm_id > 0
             and sender_client_id is not None
+            and authorized_endpoint_port is not None
+            and str(send_journal.get("authorized_ticker") or "").strip().upper()
+            == normalized_ticker
+            and str(send_journal.get("authorized_side") or "").strip().upper()
+            == normalized_side
+            and _is_exact_int(
+                send_journal.get("authorized_quantity"), normalized_quantity
+            )
+            and str(
+                send_journal.get("authorized_account_fingerprint") or ""
+            ).strip().lower()
+            == fingerprint
             and exec_id
             and send_journal.get("recovery_required") is False
             and send_journal.get("automatic_resend_allowed") is False
@@ -519,6 +539,10 @@ def evaluate_live_pilot_completion(
     endpoint_port = ports[0] if len(ports) == 3 and len(set(ports)) == 1 else None
     if endpoint_port is None:
         blockers.append("final Live evidence is not bound to one Live endpoint")
+    elif authorized_endpoint_port is None or endpoint_port != authorized_endpoint_port:
+        blockers.append(
+            "final Live evidence endpoint does not match the consumed authorization"
+        )
 
     for label, report in (
         ("post-fill", postfill_report),
