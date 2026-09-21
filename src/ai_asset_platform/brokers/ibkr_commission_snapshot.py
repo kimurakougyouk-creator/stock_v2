@@ -272,6 +272,8 @@ def _load_commission_ledger(path: Path) -> dict[str, IbkrCommissionEvidence]:
     payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
     if not isinstance(payload, dict) or payload.get("schema_version") != LEDGER_SCHEMA_VERSION:
         raise ValueError("commission ledger schema is invalid")
+    if payload.get("paper_only") is not True:
+        raise ValueError("commission ledger is not explicitly Paper-only")
     if payload.get("order_sent") is not False or payload.get("live_order_sent") is not False:
         raise ValueError("commission ledger safety contract is invalid")
     rows = payload.get("commissions")
