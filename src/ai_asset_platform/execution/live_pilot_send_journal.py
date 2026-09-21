@@ -648,6 +648,7 @@ def record_definitive_rejection_evidence(
     order_id: int,
     client_id: int,
     rejection_reason: str,
+    perm_id: int | None = None,
     directory: Path = DEFAULT_JOURNAL_DIR,
     now: datetime | None = None,
 ) -> dict:
@@ -691,6 +692,12 @@ def record_definitive_rejection_evidence(
         raise ValueError("rejection evidence order_id must be a positive exact int")
     if not isinstance(client_id, int) or isinstance(client_id, bool) or client_id < 0:
         raise ValueError("rejection evidence client_id must be a non-negative exact int")
+    if perm_id is not None and (
+        not isinstance(perm_id, int)
+        or isinstance(perm_id, bool)
+        or perm_id <= 0
+    ):
+        raise ValueError("rejection evidence perm_id must be a positive exact int")
 
     payload = load_send_journal(intent, directory=directory)
     if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
@@ -715,6 +722,17 @@ def record_definitive_rejection_evidence(
     )
     if any(observed != expected for observed, expected in expected_pairs):
         raise PermissionError("rejection evidence does not match durable send identity")
+    persisted_perm = payload.get("perm_id")
+    if persisted_perm is not None:
+        if (
+            not isinstance(persisted_perm, int)
+            or isinstance(persisted_perm, bool)
+            or persisted_perm <= 0
+            or perm_id != persisted_perm
+        ):
+            raise PermissionError(
+                "rejection evidence perm_id conflicts with durable send identity"
+            )
 
     attempt_recorded_at = _validated_attempt_marker_timestamp(
         payload,
@@ -733,6 +751,7 @@ def record_definitive_rejection_evidence(
         "account_fingerprint": fingerprint,
         "endpoint_port": endpoint_port,
         "order_id": order_id,
+        "perm_id": perm_id,
         "sender_client_id": client_id,
         "send_attempt_recorded_at": attempt_recorded_at,
         "rejection_recorded_at": _now(now),
@@ -969,6 +988,7 @@ def mark_rejected_reconciled(
     rejection_reason: str,
     order_id: int,
     final_position_quantity: float,
+    perm_id: int | None = None,
     directory: Path = DEFAULT_JOURNAL_DIR,
     now: datetime | None = None,
 ) -> dict:
@@ -985,6 +1005,12 @@ def mark_rejected_reconciled(
         raise PermissionError("rejection reconciliation is not valid in the current state")
     if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
         raise ValueError("order_id must be a positive exact int")
+    if perm_id is not None and (
+        not isinstance(perm_id, int)
+        or isinstance(perm_id, bool)
+        or perm_id <= 0
+    ):
+        raise ValueError("perm_id must be a positive exact int when provided")
     reason = _definitive_terminal_rejection_reason(rejection_reason)
     if reason is None:
         raise ValueError("rejection_reason must prove a terminal broker rejection")
@@ -1000,6 +1026,17 @@ def mark_rejected_reconciled(
     existing_order = payload.get("order_id")
     if existing_order is not None and existing_order != order_id:
         raise PermissionError("rejection reconciliation order_id conflicts with journal")
+    existing_perm = payload.get("perm_id")
+    if existing_perm is not None:
+        if (
+            not isinstance(existing_perm, int)
+            or isinstance(existing_perm, bool)
+            or existing_perm <= 0
+            or perm_id != existing_perm
+        ):
+            raise PermissionError(
+                "rejection reconciliation perm_id conflicts with journal"
+            )
 
     try:
         immutable_rejection = load_definitive_rejection_evidence(
@@ -1029,6 +1066,7 @@ def mark_rejected_reconciled(
         != payload.get("authorized_endpoint_port")
         or isinstance(immutable_rejection.get("endpoint_port"), bool)
         or immutable_rejection.get("order_id") != order_id
+        or immutable_rejection.get("perm_id") != perm_id
         or immutable_rejection.get("sender_client_id") != payload.get("sender_client_id")
         or immutable_rejection.get("rejection_reason") != reason
         or immutable_rejection.get("automatic_resend_allowed") is not False
@@ -1085,7 +1123,7 @@ def mark_rejected_reconciled(
         reconciled_at=reconciled_at,
     )
     terminal_marker.update(
-        perm_id=None,
+        perm_id=perm_id,
         rejection_reason=reason,
         final_position_quantity=float(final_position_quantity),
     )
@@ -1099,6 +1137,7 @@ def mark_rejected_reconciled(
     payload.update(
         state="REJECTED_RECONCILED",
         order_id=order_id,
+        perm_id=perm_id,
         rejection_reason=reason,
         final_position_quantity=float(final_position_quantity),
         reconciled_at=reconciled_at,
