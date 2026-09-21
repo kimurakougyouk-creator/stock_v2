@@ -34,6 +34,12 @@ from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
     persist_live_all_open_orders,
     preview_ibkr_live_all_open_orders,
 )
+from ai_asset_platform.brokers.ibkr_live_completed_orders import (
+    DEFAULT_REPORT_PATH as DEFAULT_LIVE_COMPLETED_ORDERS_REPORT,
+    REPORT_SCHEMA_VERSION as LIVE_COMPLETED_ORDERS_SCHEMA_VERSION,
+    persist_live_completed_orders,
+    preview_ibkr_live_completed_orders,
+)
 from ai_asset_platform.brokers.ibkr_live_fx_evidence import (
     DEFAULT_REPORT_PATH as DEFAULT_LIVE_FX_REPORT,
     persist_live_fx_evidence,
@@ -85,6 +91,7 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     mark_partial_reconciled,
     mark_postfill_proven,
     mark_rejected_reconciled,
+    record_definitive_rejection_evidence,
 )
 from ai_asset_platform.execution.live_pilot_single_send import (
     LivePilotSendRequest,
@@ -297,6 +304,12 @@ def _collect_post_attempt_readonly_evidence(
         endpoint_port=authorized_endpoint_port,
     )
     persist_live_all_open_orders(open_orders)
+
+    completed_orders = preview_ibkr_live_completed_orders(
+        confirmation=request.live_readonly_confirmation,
+        endpoint_port=authorized_endpoint_port,
+    )
+    persist_live_completed_orders(completed_orders)
 
 
 def _positive_exact_int(value: object) -> int | None:
@@ -594,6 +607,7 @@ def _definitive_rejection_reason(value: object) -> str | None:
     for prefix in (
         "broker orderStatus callback reported non-accepted status:",
         "broker openOrder callback reported non-accepted status:",
+        "broker completedOrder callback reported terminal status:",
     ):
         if reason.startswith(prefix):
             status = reason[len(prefix) :].strip()
