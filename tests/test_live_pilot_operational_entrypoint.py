@@ -914,3 +914,127 @@ def test_recovery_rejects_selected_order_with_malformed_or_wrong_perm_id(
     )
 
     subject._promote_postfill_if_proven(_request())
+
+
+@pytest.mark.parametrize("raw_perm_alias", ["880077", 880077.0])
+def test_recovery_rejects_malformed_alias_of_selected_perm_id_on_other_order(
+    monkeypatch, raw_perm_alias
+):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "good",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+        {
+            "exec_id": "conflict",
+            "order_id": 78,
+            "perm_id": raw_perm_alias,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:01+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail(
+            "matcher must be unreachable for malformed alias of selected permId"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "malformed alias of broker identity must never be promoted"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+@pytest.mark.parametrize("raw_order_alias", ["77", 77.0])
+def test_recovery_rejects_malformed_alias_of_selected_order_id_even_with_matching_perm(
+    monkeypatch, raw_order_alias
+):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "good",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+        {
+            "exec_id": "malformed",
+            "order_id": raw_order_alias,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:01+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail(
+            "matcher must be unreachable for malformed alias of selected orderId"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "malformed alias of broker identity must never be promoted"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
