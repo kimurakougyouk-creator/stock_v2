@@ -272,6 +272,50 @@ def create_consumed_authorization_journal(
         "live_order_sent"
     ):
         raise PermissionError("consumed authorization record is not pre-send evidence")
+
+    ticker = str(consumed_authorization.get("ticker") or "").strip().upper()
+    side = str(consumed_authorization.get("side") or "").strip().upper()
+    quantity = consumed_authorization.get("quantity")
+    limit_price = consumed_authorization.get("limit_price")
+    estimated_notional_jpy = consumed_authorization.get("estimated_notional_jpy")
+    account_fingerprint = str(
+        consumed_authorization.get("account_fingerprint") or ""
+    ).strip().lower()
+    endpoint_port = consumed_authorization.get("endpoint_port")
+    if not ticker:
+        raise PermissionError("consumed authorization ticker binding is missing")
+    if side not in {"BUY", "SELL"}:
+        raise PermissionError("consumed authorization side binding is invalid")
+    if (
+        not isinstance(quantity, int)
+        or isinstance(quantity, bool)
+        or quantity <= 0
+    ):
+        raise PermissionError("consumed authorization quantity binding is invalid")
+    for name, value in (
+        ("limit_price", limit_price),
+        ("estimated_notional_jpy", estimated_notional_jpy),
+    ):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+            or value != value
+            or value in {float("inf"), float("-inf")}
+        ):
+            raise PermissionError(f"consumed authorization {name} binding is invalid")
+    if (
+        len(account_fingerprint) != 64
+        or any(ch not in "0123456789abcdef" for ch in account_fingerprint)
+    ):
+        raise PermissionError("consumed authorization account binding is invalid")
+    if (
+        not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in {4001, 7496}
+    ):
+        raise PermissionError("consumed authorization endpoint binding is invalid")
+
     if send_attempt_recorded(intent, directory=directory):
         raise PermissionError("a Live send attempt is already recorded for this intent")
 
@@ -281,6 +325,13 @@ def create_consumed_authorization_journal(
         "nonce": safe_nonce,
         "state": "AUTHORIZATION_CONSUMED",
         "created_at": _now(now),
+        "authorized_ticker": ticker,
+        "authorized_side": side,
+        "authorized_quantity": quantity,
+        "authorized_limit_price": float(limit_price),
+        "authorized_estimated_notional_jpy": float(estimated_notional_jpy),
+        "authorized_account_fingerprint": account_fingerprint,
+        "authorized_endpoint_port": endpoint_port,
         "send_attempt_count": 0,
         "order_id": None,
         "perm_id": None,
