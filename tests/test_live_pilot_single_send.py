@@ -86,6 +86,8 @@ class FakeClient:
         account: str = PINNED_ACCOUNT,
         ack: bool = True,
         place_error: Exception | None = None,
+        order_error: str | None = None,
+        broker_status: str | None = None,
     ):
         from threading import Event
 
@@ -103,6 +105,8 @@ class FakeClient:
         self.account = account
         self.ack = ack
         self.place_error = place_error
+        self.forced_order_error = order_error
+        self.forced_broker_status = broker_status
         self.place_calls = []
         self.connected = False
 
@@ -123,8 +127,12 @@ class FakeClient:
         if self.place_error is not None:
             raise self.place_error
         if self.ack:
-            self.broker_status = "Submitted"
-            self.ack_perm_id = 880077
+            if self.forced_order_error is not None:
+                self.broker_status = self.forced_broker_status
+                self.order_error = self.forced_order_error
+            else:
+                self.broker_status = "Submitted"
+                self.ack_perm_id = 880077
             self.ack_ready.set()
 
     def isConnected(self):
@@ -193,6 +201,11 @@ def _patch_prereqs(
         subject,
         "mark_unknown",
         lambda *args, **kwargs: events.append("unknown") or {},
+    )
+    monkeypatch.setattr(
+        subject,
+        "record_definitive_rejection_evidence",
+        lambda *args, **kwargs: events.append("rejection_evidence") or {},
     )
     return events
 
@@ -303,6 +316,43 @@ def test_ack_timeout_becomes_unknown_and_never_retries(monkeypatch):
 
     assert result.status == "UNKNOWN"
     assert len(client.place_calls) == 1
+    assert events == ["journal", "attempt", "order_id", "unknown"]
+
+
+def test_definitive_rejection_is_persisted_before_mutable_unknown(monkeypatch):
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient(
+        order_error=(
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+        broker_status="Cancelled",
+    )
+
+    result = _send(monkeypatch, client)
+
+    assert result.status == "UNKNOWN"
+    assert result.recovery_required is True
+    assert len(client.place_calls) == 1
+    assert events == [
+        "journal",
+        "attempt",
+        "order_id",
+        "rejection_evidence",
+        "unknown",
+    ]
+
+
+def test_nonterminal_or_unclassified_error_never_creates_rejection_proof(monkeypatch):
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient(
+        order_error="77:399:Order message error",
+        broker_status=None,
+    )
+
+    result = _send(monkeypatch, client)
+
+    assert result.status == "UNKNOWN"
+    assert "rejection_evidence" not in events
     assert events == ["journal", "attempt", "order_id", "unknown"]
 
 
