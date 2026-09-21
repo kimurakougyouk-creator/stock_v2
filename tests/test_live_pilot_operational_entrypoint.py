@@ -34,6 +34,15 @@ def _request(**overrides) -> subject.LivePilotOperationalRequest:
     return subject.LivePilotOperationalRequest(**data)
 
 
+@pytest.fixture(autouse=True)
+def _active_authorization_binding(monkeypatch):
+    monkeypatch.setattr(
+        subject,
+        "load_live_pilot_authorization_binding",
+        lambda **kwargs: {"endpoint_port": 4001},
+    )
+
+
 def _bound_journal(**overrides) -> dict:
     data = {
         "intent_id": _request().intent_id,
@@ -79,7 +88,9 @@ def test_missing_readonly_confirmation_blocks_before_marker_or_broker(monkeypatc
     monkeypatch.setattr(
         subject,
         "_collect_presend_readonly_evidence",
-        lambda request: pytest.fail("broker collection must not run"),
+        lambda request, *, authorized_endpoint_port: pytest.fail(
+            "broker collection must not run"
+        ),
     )
 
     result = subject.run_live_pilot_operational_once(
@@ -144,7 +155,7 @@ def test_blocked_same_run_preflight_never_reaches_sender(monkeypatch):
     monkeypatch.setattr(
         subject,
         "_collect_presend_readonly_evidence",
-        lambda request: None,
+        lambda request, *, authorized_endpoint_port: None,
     )
     preflight = SimpleNamespace(
         ready=False,
@@ -169,6 +180,67 @@ def test_blocked_same_run_preflight_never_reaches_sender(monkeypatch):
     assert result.blockers == ("same-run evidence is stale",)
 
 
+def test_invalid_active_authorization_blocks_before_presend_broker(monkeypatch):
+    monkeypatch.setattr(
+        subject,
+        "global_send_attempt_recorded",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_live_pilot_authorization_binding",
+        lambda **kwargs: (_ for _ in ()).throw(
+            PermissionError("authorization nonce has expired")
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_presend_readonly_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "broker collection must be unreachable for invalid authorization"
+        ),
+    )
+
+    result = subject.run_live_pilot_operational_once(_request())
+
+    assert result.status == "BLOCKED_AUTHORIZATION_BINDING"
+    assert result.broker_connection_used is False
+    assert result.order_transport_called is False
+    assert "authorization nonce has expired" in result.blockers[0]
+
+
+def test_presend_collection_uses_active_authorized_endpoint(monkeypatch):
+    monkeypatch.setattr(
+        subject,
+        "global_send_attempt_recorded",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_live_pilot_authorization_binding",
+        lambda **kwargs: {"endpoint_port": 7496},
+    )
+    seen = []
+
+    def fake_collect(request, *, authorized_endpoint_port):
+        seen.append(authorized_endpoint_port)
+
+    monkeypatch.setattr(subject, "_collect_presend_readonly_evidence", fake_collect)
+    monkeypatch.setattr(
+        subject,
+        "_evaluate_and_persist_preflight",
+        lambda request: (
+            {"status": "BLOCKED"},
+            SimpleNamespace(ready=False, blockers=("stop after collection",)),
+        ),
+    )
+
+    result = subject.run_live_pilot_operational_once(_request())
+
+    assert seen == [7496]
+    assert result.status == "BLOCKED_PREFLIGHT"
+
+
 def test_ready_path_delegates_to_existing_sender_exactly_once(monkeypatch):
     monkeypatch.setattr(
         subject,
@@ -178,7 +250,7 @@ def test_ready_path_delegates_to_existing_sender_exactly_once(monkeypatch):
     monkeypatch.setattr(
         subject,
         "_collect_presend_readonly_evidence",
-        lambda request: None,
+        lambda request, *, authorized_endpoint_port: None,
     )
     preflight = SimpleNamespace(ready=True, blockers=())
     readiness = {
@@ -239,7 +311,7 @@ def test_irreversible_attempt_switches_to_one_readonly_reconciliation_pass(
     monkeypatch.setattr(
         subject,
         "_collect_presend_readonly_evidence",
-        lambda request: None,
+        lambda request, *, authorized_endpoint_port: None,
     )
     preflight = SimpleNamespace(ready=True, blockers=())
     monkeypatch.setattr(
@@ -1826,3 +1898,77 @@ def test_timeout_without_definitive_rejection_remains_unknown(monkeypatch):
     )
 
     assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (
+            "broker orderStatus callback reported non-accepted status: Inactive",
+            True,
+        ),
+        (
+            "broker openOrder callback reported non-accepted status: Cancelled",
+            True,
+        ),
+        ("77:201:Order rejected - Reason: test", True),
+        ("77:202:Order cancelled - Reason: test", True),
+        ("77:399:Order message error", False),
+        ("77:2104:Market data farm connection is OK", False),
+        (
+            "broker orderStatus callback reported non-accepted status: PendingSubmit",
+            False,
+        ),
+        (
+            "broker openOrder callback reported non-accepted status: PendingCancel",
+            False,
+        ),
+    ],
+)
+def test_definitive_rejection_classifier_is_fail_closed(reason, expected):
+    observed = subject._definitive_rejection_reason(reason)
+    assert (observed is not None) is expected
+
+
+@pytest.mark.parametrize("terminal_state", ["PARTIAL_RECONCILED", "REJECTED_RECONCILED"])
+def test_persisted_terminal_reconciliation_surfaces_without_new_broker_io(
+    monkeypatch, terminal_state
+):
+    journal = _bound_journal(
+        state=terminal_state,
+        send_attempt_count=1,
+        recovery_required=False,
+        order_id=77,
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_send_journal",
+        lambda *args, **kwargs: journal,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "already terminal recovery must not reconnect to the broker"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "audit_live_pilot_completion",
+        lambda *args, **kwargs: pytest.fail(
+            "already terminal recovery must not fall through to full-fill judge"
+        ),
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == terminal_state
+    assert result.completion_status == terminal_state
+    assert result.complete is True
+    assert result.recovery_only is True
+    assert result.broker_connection_used is False
+    assert result.order_transport_called is False
