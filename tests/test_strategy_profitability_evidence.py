@@ -269,7 +269,7 @@ def test_fee_aware_jpy_roundtrip_reports_true_net_pnl():
     assert result.evidence_status == "NET_POSITIVE_AFTER_FEES"
     assert result.fees_accounted is True
     assert result.fee_aware is True
-    assert result.net_profitability_proven is True
+    assert result.net_profitability_proven is False
     assert result.live_ready is False
 
 
@@ -315,7 +315,7 @@ def test_fee_aware_cross_currency_uses_fill_fx_for_commissions():
     assert result.gross_performance["net_profit"] == 1500.0
     assert result.net_realized_pnl == 1200.0
     assert result.fees_accounted is True
-    assert result.net_profitability_proven is True
+    assert result.net_profitability_proven is False
 
 
 def test_missing_commission_evidence_fails_closed():
@@ -569,7 +569,7 @@ def test_exact_duplicate_intent_is_idempotent_for_gross_and_net():
     assert result.gross_performance["net_profit"] == 1000.0
     assert result.net_realized_pnl == 990.0
     assert result.closed_trade_count == 1
-    assert result.net_profitability_proven is True
+    assert result.net_profitability_proven is False
 
 
 def test_fee_aware_realized_trade_serializes_commission_allocation():
