@@ -19,6 +19,7 @@ def _fill(
     shares: int = 100,
     currency: str = "JPY",
     fx: float | None = 1.0,
+    exec_ids: list[str] | None = None,
 ) -> dict:
     row = {
         "created_at": "2026-09-01T10:00:00+09:00",
@@ -33,6 +34,8 @@ def _fill(
     }
     if fx is not None:
         row["fx_to_account_rate"] = fx
+    if exec_ids is not None:
+        row["broker_exec_ids"] = exec_ids
     return row
 
 
@@ -40,6 +43,26 @@ def _natural_intent(
     *, ticker: str, side: str, shares: int, bar_key: str = "2026-09-01T10:00:00+09:00"
 ) -> str:
     return f"{STRATEGY_INTENT_PREFIX}{ticker}:{side}:{shares}:{bar_key}"
+
+
+def _commission_report(*rows: dict) -> dict:
+    return {
+        "schema_version": 1,
+        "connected": True,
+        "ready": True,
+        "order_sent": False,
+        "live_order_sent": False,
+        "commissions": list(rows),
+    }
+
+
+def _commission(exec_id: str, commission: float, currency: str) -> dict:
+    return {
+        "exec_id": exec_id,
+        "commission": commission,
+        "currency": currency,
+        "realized_pnl": None,
+    }
 
 
 def test_natural_strategy_filter_matches_actual_signal_runner_intent_shape():
@@ -207,6 +230,266 @@ def test_serialized_evidence_matches_live_cash_readiness_schema_and_blocks_live(
     assert record["strategy_intent_shape"] == (
         "signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>"
     )
+
+
+def test_fee_aware_jpy_roundtrip_reports_true_net_pnl():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    commissions = _commission_report(
+        _commission("buy-1", 5.0, "JPY"),
+        _commission("sell-1", 5.0, "JPY"),
+    )
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=commissions,
+    )
+
+    assert result.gross_performance["net_profit"] == 1000.0
+    assert result.net_realized_pnl == 990.0
+    assert result.net_performance is not None
+    assert result.net_performance["net_profit"] == 990.0
+    assert result.evidence_status == "NET_POSITIVE_AFTER_FEES"
+    assert result.fees_accounted is True
+    assert result.fee_aware is True
+    assert result.net_profitability_proven is True
+    assert result.live_ready is False
+
+
+def test_fee_aware_cross_currency_uses_fill_fx_for_commissions():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="AAPL", side="BUY", shares=1),
+            side="BUY",
+            price=100.0,
+            ticker="AAPL",
+            shares=1,
+            currency="USD",
+            fx=150.0,
+            exec_ids=["buy-usd"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="AAPL",
+                side="SELL",
+                shares=1,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=110.0,
+            ticker="AAPL",
+            shares=1,
+            currency="USD",
+            fx=150.0,
+            exec_ids=["sell-usd"],
+        ),
+    ]
+    commissions = _commission_report(
+        _commission("buy-usd", 1.0, "USD"),
+        _commission("sell-usd", 1.0, "USD"),
+    )
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=commissions,
+    )
+
+    assert result.gross_performance["net_profit"] == 1500.0
+    assert result.net_realized_pnl == 1200.0
+    assert result.fees_accounted is True
+    assert result.net_profitability_proven is True
+
+
+def test_missing_commission_evidence_fails_closed():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    commissions = _commission_report(_commission("buy-1", 5.0, "JPY"))
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=commissions,
+    )
+
+    assert result.evidence_status == "BLOCKED_FEE_EVIDENCE"
+    assert result.fees_accounted is False
+    assert result.net_realized_pnl is None
+    assert result.net_profitability_proven is False
+    assert "sell-1" in result.reason
+
+
+def test_missing_exec_id_binding_fails_closed():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=None,
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(_commission("sell-1", 5.0, "JPY")),
+    )
+
+    assert result.evidence_status == "BLOCKED_FEE_EVIDENCE"
+    assert "broker_exec_ids" in result.reason
+    assert result.fees_accounted is False
+
+
+def test_reused_exec_id_across_strategy_fills_fails_closed():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["same"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["same"],
+        ),
+    ]
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(_commission("same", 5.0, "JPY")),
+    )
+
+    assert result.evidence_status == "BLOCKED_FEE_EVIDENCE"
+    assert "reused" in result.reason
+    assert result.fees_accounted is False
+
+
+def test_commission_currency_mismatch_fails_closed():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    commissions = _commission_report(
+        _commission("buy-1", 5.0, "USD"),
+        _commission("sell-1", 5.0, "JPY"),
+    )
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=commissions,
+    )
+
+    assert result.evidence_status == "BLOCKED_FEE_EVIDENCE"
+    assert "currency" in result.reason
+    assert result.fees_accounted is False
+
+
+def test_complete_fee_evidence_can_prove_non_positive_net_result_without_live_ready():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=150.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    commissions = _commission_report(
+        _commission("buy-1", 5.0, "JPY"),
+        _commission("sell-1", 5.0, "JPY"),
+    )
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=commissions,
+    )
+
+    assert result.net_realized_pnl == -10.0
+    assert result.evidence_status == "NET_NON_POSITIVE_AFTER_FEES"
+    assert result.fees_accounted is True
+    assert result.net_profitability_proven is False
+    assert result.live_ready is False
 
 
 def test_module_contains_no_broker_mutation_api_calls():
