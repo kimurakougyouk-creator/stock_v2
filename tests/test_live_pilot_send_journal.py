@@ -504,3 +504,28 @@ def test_pretransport_order_id_binding_is_fail_closed(tmp_path: Path):
             directory=tmp_path,
             now=NOW + timedelta(seconds=4),
         )
+
+
+def test_pretransport_order_id_rename_is_directory_fsynced(tmp_path: Path, monkeypatch):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+
+    calls = []
+    original = journal._fsync_parent_dir
+
+    def spy(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(journal, "_fsync_parent_dir", spy)
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert any(call.parent == tmp_path for call in calls)
+    persisted = load_send_journal(INTENT, directory=tmp_path)
+    assert persisted is not None
+    assert persisted["order_id"] == 101
