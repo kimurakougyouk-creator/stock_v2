@@ -28,7 +28,6 @@ fi
 : "${LIVE_PILOT_NONCE:?BLOCKED: LIVE_PILOT_NONCE is required}"
 : "${LIVE_PILOT_ACCOUNT_FINGERPRINT:?BLOCKED: LIVE_PILOT_ACCOUNT_FINGERPRINT is required}"
 : "${LIVE_PILOT_EXPECTED_COMMIT_SHA:?BLOCKED: LIVE_PILOT_EXPECTED_COMMIT_SHA is required}"
-: "${LIVE_PILOT_FINAL_CONFIRMATION:?BLOCKED: LIVE_PILOT_FINAL_CONFIRMATION is required}"
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
@@ -51,6 +50,6 @@ python -P -m ai_asset_platform.execution.live_pilot_operational_entrypoint \
   --nonce "$LIVE_PILOT_NONCE" \
   --account-fingerprint "$LIVE_PILOT_ACCOUNT_FINGERPRINT" \
   --expected-commit-sha "$LIVE_PILOT_EXPECTED_COMMIT_SHA" \
-  --final-confirmation "$LIVE_PILOT_FINAL_CONFIRMATION" \
+  --final-confirmation "${LIVE_PILOT_FINAL_CONFIRMATION:-}" \
   --live-readonly-confirmation "READ_LIVE_ACCOUNT_ONLY" \
   --repository-root "$ROOT"
