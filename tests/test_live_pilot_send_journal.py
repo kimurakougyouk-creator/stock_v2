@@ -10,6 +10,7 @@ import ai_asset_platform.execution.live_pilot_send_journal as journal
 from ai_asset_platform.execution.live_pilot_send_journal import (
     create_consumed_authorization_journal,
     load_send_journal,
+    load_terminal_reconciliation_marker,
     mark_order_acknowledged,
     mark_partial_reconciled,
     mark_postfill_proven,
@@ -741,6 +742,16 @@ def test_partial_reconciliation_is_durable_terminal_and_never_reenables_send(tmp
     )
 
     assert result["state"] == "PARTIAL_RECONCILED"
+    marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["state"] == "PARTIAL_RECONCILED"
+    assert marker["exec_ids"] == ["exec-1", "exec-2"]
+    assert marker["filled_quantity"] == 40.0
+    assert marker["commission_total"] == 12.5
+    assert marker["final_position_quantity"] == 40.0
+    assert marker["nonce"] == NONCE
+    assert marker["authorized_ticker"] == "9432.T"
+    assert marker["automatic_resend_allowed"] is False
     assert result["exec_ids"] == ["exec-1", "exec-2"]
     assert result["filled_quantity"] == 40.0
     assert result["recovery_required"] is False
@@ -786,6 +797,13 @@ def test_rejected_reconciliation_is_durable_terminal_and_never_retries(tmp_path:
     )
 
     assert result["state"] == "REJECTED_RECONCILED"
+    marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["state"] == "REJECTED_RECONCILED"
+    assert marker["rejection_reason"].endswith("Inactive")
+    assert marker["final_position_quantity"] == 0.0
+    assert marker["nonce"] == NONCE
+    assert marker["automatic_resend_allowed"] is False
     assert result["recovery_required"] is False
     assert result["automatic_resend_allowed"] is False
     assert result["automatic_cancel_allowed"] is False
@@ -793,3 +811,114 @@ def test_rejected_reconciliation_is_durable_terminal_and_never_retries(tmp_path:
     assert result["automatic_flatten_allowed"] is False
     assert result["automatic_close_allowed"] is False
     assert send_attempt_permitted(INTENT, directory=tmp_path) is False
+
+
+def test_terminal_marker_survives_crash_before_summary_replacement(
+    tmp_path: Path, monkeypatch
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    monkeypatch.setattr(
+        journal,
+        "_atomic_replace",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("simulated crash after terminal marker")
+        ),
+    )
+
+    with pytest.raises(OSError, match="simulated crash"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["state"] == "PARTIAL_RECONCILED"
+    assert marker["exec_ids"] == ["exec-1"]
+    assert marker["terminal_recorded_at"] == (NOW + timedelta(seconds=3)).isoformat(
+        timespec="seconds"
+    )
+
+
+def test_terminal_transition_rejects_malformed_global_attempt_marker(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    global_path = journal._global_attempt_path(tmp_path)
+    payload = journal.load_global_send_attempt_marker(directory=tmp_path)
+    assert payload is not None
+    payload["intent_id"] = "different-intent"
+    global_path.write_text(
+        __import__("json").dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PermissionError, match="marker binding"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+def test_terminal_marker_is_exclusive_and_cannot_be_replaced(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_partial_reconciled(
+        INTENT,
+        exec_ids=("exec-1",),
+        order_id=101,
+        perm_id=202,
+        filled_quantity=40.0,
+        commission_total=12.5,
+        commission_currency="JPY",
+        final_position_quantity=40.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    marker_path = journal._terminal_path(INTENT, tmp_path)
+    original = marker_path.read_bytes()
+    with pytest.raises(FileExistsError):
+        journal._atomic_new(marker_path, {"state": "FABRICATED"})
+    assert marker_path.read_bytes() == original
