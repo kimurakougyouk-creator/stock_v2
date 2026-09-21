@@ -31,6 +31,13 @@ def _journal(**overrides) -> dict:
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
         "exec_id": EXEC_ID,
         "recovery_required": False,
         "automatic_resend_allowed": False,
@@ -1322,3 +1329,30 @@ def test_completion_accepts_fresh_safe_paper_monitor_after_send_attempt():
     assert result.complete is True
     assert result.paper_monitor_safe is True
     assert result.evidence_fresh is True
+
+
+
+def test_completion_rejects_request_that_differs_from_consumed_authorization():
+    wrong_ticker = _evaluate(ticker="AAPL")
+    assert wrong_ticker.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_ticker.blockers)
+
+    wrong_side = _evaluate(side="SELL")
+    assert wrong_side.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_side.blockers)
+
+    wrong_quantity = _evaluate(quantity=99)
+    assert wrong_quantity.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_quantity.blockers)
+
+    wrong_account = _evaluate(expected_account_fingerprint="b" * 64)
+    assert wrong_account.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_account.blockers)
+
+
+def test_completion_rejects_endpoint_different_from_consumed_authorization():
+    result = _evaluate(
+        send_journal=_journal(authorized_endpoint_port=7496),
+    )
+    assert result.complete is False
+    assert any("endpoint does not match" in item for item in result.blockers)
