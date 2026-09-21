@@ -294,19 +294,36 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
             return
         perm_id = next(iter(candidate_perm_ids))
 
-    # A permId is broker-global identity evidence for the order. Reject any
-    # persisted snapshot where the chosen permId is reused by another order or
-    # attached to malformed order identity instead of silently filtering that
-    # contradiction out in the shared matcher.
+    # Broker identity must be one-to-one in both directions. Reject any
+    # contradictory or type-invalid row that claims either side of the chosen
+    # (order_id, perm_id) pair instead of letting the shared matcher filter it
+    # away. This keeps UNKNOWN/crash recovery fail-closed.
     for row in rows:
         if not isinstance(row, dict):
             continue
-        row_perm_id = _positive_exact_int(row.get("perm_id"))
-        if row_perm_id != perm_id:
-            continue
-        row_order_id = _positive_exact_int(row.get("order_id"))
-        if row_order_id is None or row_order_id != order_id:
-            return
+        raw_order_id = row.get("order_id")
+        raw_perm_id = row.get("perm_id")
+        row_order_id = _positive_exact_int(raw_order_id)
+        row_perm_id = _positive_exact_int(raw_perm_id)
+
+        # Selected permId must never appear on another/malformed order.
+        if row_perm_id == perm_id:
+            if row_order_id is None or row_order_id != order_id:
+                return
+
+        # Persisted orderId must never appear with another/malformed permId.
+        # Numeric-but-type-invalid forms (for example 77.0) are also treated as
+        # claims on the selected identity and therefore fail closed.
+        raw_order_claims_selected = (
+            raw_order_id == order_id
+            or (
+                isinstance(raw_order_id, str)
+                and raw_order_id.strip() == str(order_id)
+            )
+        )
+        if row_order_id == order_id or raw_order_claims_selected:
+            if row_perm_id is None or row_perm_id != perm_id:
+                return
 
     # Rehydrate only through the existing persisted report contract by asking
     # the shared matcher to prove the complete fill/commission/account identity
