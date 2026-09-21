@@ -370,3 +370,34 @@ def test_module_contains_no_order_transport():
     )
     for token in forbidden:
         assert token not in source
+
+
+
+def test_match_live_postfill_requires_expected_sender_client_id():
+    wrong_client = _snapshot(
+        executions=(_execution(client_id=672),),
+    )
+    result = match_live_postfill(
+        wrong_client,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+        expected_client_id=681,
+    )
+    assert result.ready is False
+    assert "no matching Live execution rows were found" in result.blockers
+
+    correct = match_live_postfill(
+        _snapshot(),
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+        expected_client_id=681,
+    )
+    assert correct.ready is True
