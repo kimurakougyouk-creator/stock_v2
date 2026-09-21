@@ -381,6 +381,7 @@ def record_order_id_before_transport(
     intent_id: str,
     *,
     order_id: int,
+    client_id: int,
     directory: Path = DEFAULT_JOURNAL_DIR,
     now: datetime | None = None,
 ) -> dict:
@@ -400,11 +401,17 @@ def record_order_id_before_transport(
         )
     if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
         raise ValueError("order_id must be a positive exact int")
+    if not isinstance(client_id, int) or isinstance(client_id, bool) or client_id < 0:
+        raise ValueError("client_id must be a non-negative exact int")
     existing = payload.get("order_id")
     if existing not in {None, order_id}:
         raise PermissionError("pre-transport broker order_id conflicts with persisted identity")
+    existing_client = payload.get("sender_client_id")
+    if existing_client not in {None, client_id}:
+        raise PermissionError("pre-transport broker client_id conflicts with persisted identity")
     payload.update(
         order_id=order_id,
+        sender_client_id=client_id,
         order_id_recorded_at=_now(now),
         recovery_required=True,
         automatic_resend_allowed=False,
