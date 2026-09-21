@@ -130,6 +130,82 @@ def test_matching_complete_exec_set_is_ready():
     assert [row.exec_id for row in result.commissions] == ["exec-2", "exec-1"]
 
 
+def test_commission_ledger_preserves_older_exec_ids_across_new_snapshots(tmp_path):
+    ledger = tmp_path / "commission_ledger.json"
+
+    first = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("old-exec", commission=1.25),),
+        order_sent=False,
+    )
+    second = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("new-exec", commission=0.75),),
+        order_sent=False,
+    )
+
+    module.persist_commission_ledger(first, ledger_path=ledger)
+    module.persist_commission_ledger(second, ledger_path=ledger)
+
+    payload = __import__("json").loads(ledger.read_text(encoding="utf-8"))
+    assert payload["paper_only"] is True
+    assert payload["order_sent"] is False
+    assert payload["live_order_sent"] is False
+    assert payload["commission_count"] == 2
+    assert [row["exec_id"] for row in payload["commissions"]] == [
+        "new-exec",
+        "old-exec",
+    ]
+
+
+def test_commission_ledger_conflicting_exec_id_fails_closed(tmp_path):
+    ledger = tmp_path / "commission_ledger.json"
+    first = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("exec-1", commission=1.25),),
+        order_sent=False,
+    )
+    conflicting = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("exec-1", commission=9.99),),
+        order_sent=False,
+    )
+
+    module.persist_commission_ledger(first, ledger_path=ledger)
+
+    import pytest
+    with pytest.raises(ValueError, match="conflict"):
+        module.persist_commission_ledger(conflicting, ledger_path=ledger)
+
+    payload = __import__("json").loads(ledger.read_text(encoding="utf-8"))
+    assert payload["commission_count"] == 1
+    assert payload["commissions"][0]["commission"] == 1.25
+
+
+def test_persist_snapshot_updates_latest_and_durable_ledger(tmp_path):
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    snapshot = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("exec-1"),),
+        order_sent=False,
+    )
+
+    module.persist_commission_snapshot(
+        snapshot,
+        report_path=latest,
+        ledger_path=ledger,
+    )
+
+    assert latest.exists()
+    assert ledger.exists()
+
+
 def test_module_is_read_only_and_contains_no_order_mutation_api():
     source = Path(
         "src/ai_asset_platform/brokers/ibkr_commission_snapshot.py"
