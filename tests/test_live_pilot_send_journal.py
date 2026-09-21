@@ -13,6 +13,7 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     mark_order_acknowledged,
     mark_postfill_proven,
     mark_unknown,
+    record_order_id_before_transport,
     record_send_attempt,
     send_attempt_permitted,
     send_attempt_recorded,
@@ -443,3 +444,63 @@ def test_module_contains_no_broker_transport_or_automatic_recovery_action():
     forbidden = (".placeOrder(", ".cancelOrder(", "reqOpenOrders(", "reqAllOpenOrders(", "reqExecutions(", "enable_live_trading = True", "automatic_resend_allowed=True", "automatic_cancel_allowed=True", "automatic_modify_allowed=True", "automatic_flatten_allowed=True", "automatic_close_allowed=True")
     for token in forbidden:
         assert token not in source
+
+
+def test_order_id_is_durably_bound_before_transport_and_survives_unknown(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    bound = record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert bound["state"] == "SEND_ATTEMPT_RECORDED"
+    assert bound["order_id"] == 101
+    assert bound["perm_id"] is None
+    assert bound["recovery_required"] is True
+
+    unknown = mark_unknown(
+        INTENT,
+        reason="acknowledgement timed out",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+    assert unknown["state"] == "UNKNOWN"
+    assert unknown["order_id"] == 101
+    assert unknown["perm_id"] is None
+    assert unknown["automatic_resend_allowed"] is False
+
+
+def test_pretransport_order_id_binding_is_fail_closed(tmp_path: Path):
+    _create(tmp_path)
+    with pytest.raises(PermissionError, match="send attempt is recorded"):
+        record_order_id_before_transport(
+            INTENT,
+            order_id=101,
+            directory=tmp_path,
+            now=NOW,
+        )
+
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    with pytest.raises(ValueError, match="positive exact int"):
+        record_order_id_before_transport(
+            INTENT,
+            order_id=True,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=2),
+        )
+
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+    with pytest.raises(PermissionError, match="conflicts"):
+        record_order_id_before_transport(
+            INTENT,
+            order_id=102,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
