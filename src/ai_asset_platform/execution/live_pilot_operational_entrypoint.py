@@ -444,6 +444,7 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
         quantity=request.quantity,
         order_id=order_id,
         perm_id=perm_id,
+        expected_client_id=sender_client_id,
     )
     if not matched.ready or not matched.executions:
         return
