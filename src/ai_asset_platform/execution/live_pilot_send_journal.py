@@ -375,6 +375,46 @@ def _require_attempt_marker(intent_id: str, directory: Path) -> None:
         raise PermissionError("irreversible Live send-attempt marker is missing")
 
 
+
+def record_order_id_before_transport(
+    intent_id: str,
+    *,
+    order_id: int,
+    directory: Path = DEFAULT_JOURNAL_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Durably bind the locally assigned broker order id before transport.
+
+    The order id is available after nextValidId and before placeOrder. Persisting
+    it while the irreversible send-attempt marker already exists gives later
+    read-only UNKNOWN recovery a stable broker key even if acknowledgement (and
+    therefore permId) never arrives. This does not authorize, transmit, retry,
+    cancel, modify, flatten, or close an order.
+    """
+    _require_attempt_marker(intent_id, directory)
+    payload = load_send_journal(intent_id, directory=directory)
+    if payload is None or payload.get("state") != "SEND_ATTEMPT_RECORDED":
+        raise PermissionError(
+            "pre-transport broker identity is only valid after the send attempt is recorded"
+        )
+    if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
+        raise ValueError("order_id must be a positive exact int")
+    existing = payload.get("order_id")
+    if existing not in {None, order_id}:
+        raise PermissionError("pre-transport broker order_id conflicts with persisted identity")
+    payload.update(
+        order_id=order_id,
+        order_id_recorded_at=_now(now),
+        recovery_required=True,
+        automatic_resend_allowed=False,
+        automatic_cancel_allowed=False,
+        automatic_modify_allowed=False,
+        automatic_flatten_allowed=False,
+        automatic_close_allowed=False,
+    )
+    _atomic_replace(_path(intent_id, directory), payload)
+    return payload
+
 def mark_order_acknowledged(
     intent_id: str,
     *,
