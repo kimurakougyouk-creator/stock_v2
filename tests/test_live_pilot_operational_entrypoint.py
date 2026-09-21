@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import os
 import subprocess
@@ -1540,3 +1541,288 @@ def test_exact_recovery_request_binding_is_accepted(monkeypatch):
         _request(),
         _bound_journal(),
     ) is True
+
+
+
+def _terminal_reports(*, executions, position):
+    checked = "2026-09-21T12:39:30+00:00"
+    postfill = {
+        "schema_version": subject.LIVE_POSTFILL_SCHEMA_VERSION,
+        "ready": True,
+        "checked_at": checked,
+        "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "executions": executions,
+        "commissions": [
+            {
+                "exec_id": row["exec_id"],
+                "commission": 10.0,
+                "currency": "JPY",
+            }
+            for row in executions
+            if row.get("order_id") == 77
+        ],
+        "order_sent": False,
+        "live_order_sent": False,
+    }
+    positions = []
+    if position != 0:
+        positions.append(
+            {
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "quantity": position,
+            }
+        )
+    account = {
+        "schema_version": subject.LIVE_ACCOUNT_SCHEMA_VERSION,
+        "ready": True,
+        "checked_at": checked,
+        "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "positions": positions,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
+    open_orders = {
+        "schema_version": subject.LIVE_OPEN_ORDERS_SCHEMA_VERSION,
+        "ready": True,
+        "checked_at": checked,
+        "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "open_order_count": 0,
+        "orders": [],
+        "order_sent": False,
+        "cancel_sent": False,
+        "live_order_sent": False,
+    }
+    paper = {
+        "schema_version": 1,
+        "status": "HEALTHY",
+        "checked_at": checked,
+        "accounting_safe": True,
+        "risk_safe": True,
+        "monitor_order_sent": False,
+        "live_order_sent": False,
+        "broker": {
+            "account_ready": True,
+            "execution_snapshot_ready": True,
+            "all_open_orders_ready": True,
+            "endpoint_port": 4002,
+            "reconciliation_next_action": "RECONCILIATION_EVIDENCE_IS_CLEAN",
+            "reconciliation_blocker_count": 0,
+            "open_order_count": 0,
+            "open_orders": [],
+        },
+    }
+    return postfill, account, open_orders, paper
+
+
+def _terminal_journal(**overrides):
+    data = {
+        "state": "UNKNOWN",
+        "intent_id": _request().intent_id,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
+        "order_id": 77,
+        "perm_id": 880077,
+        "sender_client_id": 681,
+        "unknown_reason": "broker orderStatus callback reported non-accepted status: Inactive",
+    }
+    data.update(overrides)
+    return data
+
+
+def test_recovery_collectors_use_durable_authorized_endpoint(monkeypatch):
+    journal = _terminal_journal(authorized_endpoint_port=7496)
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    seen = []
+
+    monkeypatch.setattr(
+        subject,
+        "preview_ibkr_live_postfill_snapshot",
+        lambda **kwargs: seen.append(("postfill", kwargs["endpoint_port"]))
+        or SimpleNamespace(),
+    )
+    monkeypatch.setattr(subject, "persist_live_postfill_snapshot", lambda value: None)
+    monkeypatch.setattr(
+        subject,
+        "preview_ibkr_live_readonly_account_snapshot",
+        lambda **kwargs: seen.append(("account", kwargs["endpoint_port"]))
+        or SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        subject, "persist_live_readonly_account_snapshot", lambda value: None
+    )
+    monkeypatch.setattr(
+        subject,
+        "preview_ibkr_live_all_open_orders",
+        lambda **kwargs: seen.append(("open_orders", kwargs["endpoint_port"]))
+        or SimpleNamespace(),
+    )
+    monkeypatch.setattr(subject, "persist_live_all_open_orders", lambda value: None)
+
+    subject._collect_post_attempt_readonly_evidence(_request())
+
+    assert seen == [
+        ("postfill", 7496),
+        ("account", 7496),
+        ("open_orders", 7496),
+    ]
+
+
+def test_partial_fill_becomes_terminal_reconciled_without_sending_remainder(monkeypatch):
+    journal = _terminal_journal()
+    executions = [
+        {
+            "exec_id": "partial-1",
+            "order_id": 77,
+            "perm_id": 880077,
+            "client_id": 681,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 40.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=executions, position=40.0
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    calls = []
+    monkeypatch.setattr(
+        subject,
+        "mark_partial_reconciled",
+        lambda *args, **kwargs: calls.append(kwargs) or {},
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail("rejected path must be unreachable"),
+    )
+
+    status = subject._promote_terminal_reconciliation_if_proven(_request())
+
+    assert status == "PARTIAL_RECONCILED"
+    assert len(calls) == 1
+    assert calls[0]["exec_ids"] == ("partial-1",)
+    assert calls[0]["filled_quantity"] == 40.0
+    assert calls[0]["final_position_quantity"] == 40.0
+
+
+def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch):
+    journal = _terminal_journal(perm_id=None)
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=[], position=0.0
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    calls = []
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: calls.append(kwargs) or {},
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_partial_reconciled",
+        lambda *args, **kwargs: pytest.fail("partial path must be unreachable"),
+    )
+
+    status = subject._promote_terminal_reconciliation_if_proven(_request())
+
+    assert status == "REJECTED_RECONCILED"
+    assert len(calls) == 1
+    assert calls[0]["order_id"] == 77
+    assert calls[0]["final_position_quantity"] == 0.0
+
+
+def test_timeout_without_definitive_rejection_remains_unknown(monkeypatch):
+    journal = _terminal_journal(
+        perm_id=None, unknown_reason="broker acknowledgement timed out"
+    )
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=[], position=0.0
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail("timeout must remain UNKNOWN"),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_partial_reconciled",
+        lambda *args, **kwargs: pytest.fail("no fill means no partial state"),
+    )
+
+    assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
