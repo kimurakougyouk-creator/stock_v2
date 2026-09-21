@@ -48,8 +48,7 @@ def _natural_intent(
 def _commission_report(*rows: dict) -> dict:
     return {
         "schema_version": 1,
-        "connected": True,
-        "ready": True,
+        "paper_only": True,
         "order_sent": False,
         "live_order_sent": False,
         "commissions": list(rows),
@@ -490,6 +489,127 @@ def test_complete_fee_evidence_can_prove_non_positive_net_result_without_live_re
     assert result.fees_accounted is True
     assert result.net_profitability_proven is False
     assert result.live_ready is False
+
+
+def test_conflicting_duplicate_intent_fails_closed_before_gross_or_net_diverge():
+    intent = _natural_intent(ticker="9432.T", side="BUY", shares=100)
+    records = [
+        _fill(
+            intent=intent,
+            side="BUY",
+            price=200.0,
+            exec_ids=["buy-a"],
+        ),
+        _fill(
+            intent=intent,
+            side="BUY",
+            price=100.0,
+            exec_ids=["buy-b"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-a", 5.0, "JPY"),
+            _commission("buy-b", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert result.evidence_status == "BLOCKED_ACCOUNTING_EVIDENCE"
+    assert "conflicting duplicate" in result.reason
+    assert result.net_profitability_proven is False
+
+
+def test_exact_duplicate_intent_is_idempotent_for_gross_and_net():
+    buy = _fill(
+        intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+        side="BUY",
+        price=150.0,
+        exec_ids=["buy-1"],
+    )
+    records = [
+        buy,
+        dict(buy),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert result.gross_performance["net_profit"] == 1000.0
+    assert result.net_realized_pnl == 990.0
+    assert result.closed_trade_count == 1
+    assert result.net_profitability_proven is True
+
+
+def test_fee_aware_realized_trade_serializes_commission_allocation():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert len(result.realized_trades) == 1
+    trade = result.realized_trades[0]
+    assert trade["gross_realized_pnl_account"] == 1000.0
+    assert trade["allocated_buy_commission_account"] == 5.0
+    assert trade["sell_commission_account"] == 5.0
+    assert trade["total_commission_account"] == 10.0
+    assert trade["net_realized_pnl_account"] == 990.0
+    assert trade["sell_exec_ids"] == ["sell-1"]
 
 
 def test_module_contains_no_broker_mutation_api_calls():
