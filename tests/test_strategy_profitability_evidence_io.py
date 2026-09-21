@@ -69,8 +69,7 @@ def test_audit_joins_durable_commission_report_by_exec_id(tmp_path):
         json.dumps(
             {
                 "schema_version": 1,
-                "connected": True,
-                "ready": True,
+                "paper_only": True,
                 "order_sent": False,
                 "live_order_sent": False,
                 "commissions": [
