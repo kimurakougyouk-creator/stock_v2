@@ -1166,7 +1166,24 @@ def _reconcile_once(
     send_status: str | None,
     order_transport_called: bool,
 ) -> LivePilotOperationalResult:
-    journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
+    try:
+        journal = load_send_journal(
+            request.intent_id,
+            directory=DEFAULT_JOURNAL_DIR,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        return LivePilotOperationalResult(
+            status="BLOCKED_TERMINAL_EVIDENCE",
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=True,
+            preflight_ready=False,
+            send_status=send_status,
+            completion_status=None,
+            complete=False,
+            blockers=(f"durable send journal is unreadable: {exc}",),
+            broker_connection_used=False,
+            order_transport_called=order_transport_called,
+        )
     if not _request_matches_durable_authorization(request, journal):
         return LivePilotOperationalResult(
             status="BLOCKED_AUTHORIZATION_BINDING",
@@ -1259,8 +1276,8 @@ def _reconcile_once(
             order_transport_called=order_transport_called,
         )
 
-    _promote_postfill_if_proven(request)
     try:
+        _promote_postfill_if_proven(request)
         terminal_status = _promote_terminal_reconciliation_if_proven(request)
     except (PermissionError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return LivePilotOperationalResult(
@@ -1278,16 +1295,17 @@ def _reconcile_once(
             order_transport_called=order_transport_called,
         )
     if terminal_status is not None:
-        refreshed_journal = load_send_journal(
-            request.intent_id,
-            directory=DEFAULT_JOURNAL_DIR,
-        )
         try:
+            refreshed_journal = load_send_journal(
+                request.intent_id,
+                directory=DEFAULT_JOURNAL_DIR,
+            )
             terminal = load_terminal_reconciliation_marker(
                 request.intent_id,
                 directory=DEFAULT_JOURNAL_DIR,
             )
         except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            refreshed_journal = None
             terminal = None
         if (
             not isinstance(refreshed_journal, dict)
@@ -1380,7 +1398,24 @@ def run_live_pilot_operational_once(
 
     attempt_recorded = global_send_attempt_recorded(directory=DEFAULT_JOURNAL_DIR)
     if attempt_recorded:
-        journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
+        try:
+            journal = load_send_journal(
+                request.intent_id,
+                directory=DEFAULT_JOURNAL_DIR,
+            )
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            return LivePilotOperationalResult(
+                status="BLOCKED_TERMINAL_EVIDENCE",
+                checked_at=_utc_now().isoformat(timespec="seconds"),
+                recovery_only=True,
+                preflight_ready=False,
+                send_status=None,
+                completion_status=None,
+                complete=False,
+                blockers=(f"durable send journal is unreadable: {exc}",),
+                broker_connection_used=False,
+                order_transport_called=False,
+            )
         if not _request_matches_durable_authorization(request, journal):
             return LivePilotOperationalResult(
                 status="BLOCKED_AUTHORIZATION_BINDING",
