@@ -70,6 +70,7 @@ def test_exact_execution_and_commission_prove_native_cash_effect():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is True
     assert result.execution is not None
@@ -101,6 +102,7 @@ def test_split_fill_aggregates_all_exec_ids_and_commissions():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is True
     assert result.filled_quantity == 1.0
@@ -126,6 +128,7 @@ def test_split_fill_missing_one_commission_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert result.native_cash_effect is None
@@ -151,6 +154,7 @@ def test_split_fill_under_or_over_quantity_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     ).ready is False
 
     over = _snapshot(
@@ -171,6 +175,7 @@ def test_split_fill_under_or_over_quantity_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     ).ready is False
 
 
@@ -190,6 +195,7 @@ def test_duplicate_execution_or_commission_evidence_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any("duplicate exec_id" in item for item in result.blockers)
@@ -205,6 +211,7 @@ def test_duplicate_execution_or_commission_evidence_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any("found 2" in item for item in result.blockers)
@@ -219,6 +226,7 @@ def test_wrong_order_identity_fails_closed():
         quantity=1,
         order_id=999,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert result.execution is None
@@ -233,6 +241,7 @@ def test_missing_commission_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert result.execution is not None
@@ -248,6 +257,7 @@ def test_wrong_account_fingerprint_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
 
@@ -261,6 +271,7 @@ def test_commission_currency_mismatch_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert result.native_cash_effect is None
@@ -283,6 +294,7 @@ def test_execution_currency_must_match_ticker_expected_instrument_currency():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any(
@@ -300,6 +312,7 @@ def test_unbounded_ticker_has_no_instrument_currency_mapping():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any(
@@ -331,6 +344,7 @@ def test_quantity_requires_exact_decimal_equality_not_isclose():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any("does not equal expected total" in item for item in result.blockers)
@@ -350,6 +364,7 @@ def test_non_finite_aggregate_from_extreme_values_fails_closed_not_crashes():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any(
@@ -401,3 +416,20 @@ def test_match_live_postfill_requires_expected_sender_client_id():
         expected_client_id=681,
     )
     assert correct.ready is True
+
+
+
+def test_match_live_postfill_rejects_invalid_expected_client_id():
+    for bad_client_id in (None, -1, True, 681.0, "681"):
+        result = match_live_postfill(
+            _snapshot(),
+            expected_account_fingerprint=FP,
+            ticker="AAPL",
+            side="BUY",
+            quantity=1,
+            order_id=77,
+            perm_id=88,
+            expected_client_id=bad_client_id,
+        )
+        assert result.ready is False, bad_client_id
+        assert "expected_client_id must be a non-negative exact int" in result.blockers
