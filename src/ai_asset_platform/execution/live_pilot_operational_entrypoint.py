@@ -214,50 +214,61 @@ def _collect_post_attempt_readonly_evidence(
     persist_live_all_open_orders(open_orders)
 
 
+def _positive_exact_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
 def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
     journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
     if not isinstance(journal, dict):
         return
     if journal.get("state") == "POSTFILL_PROVEN":
         return
-    if journal.get("state") not in {"ORDER_ACKNOWLEDGED", "UNKNOWN"}:
+    # SEND_ATTEMPT_RECORDED is intentionally recoverable here. A crash can
+    # occur after placeOrder returns but before ACK/UNKNOWN is durably written.
+    # The campaign marker still makes the sender unreachable; only fresh
+    # read-only execution evidence may advance the journal.
+    if journal.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
         return
 
-    try:
-        order_id = int(journal.get("order_id"))
-    except (TypeError, ValueError):
-        return
-    if order_id <= 0:
+    order_id = _positive_exact_int(journal.get("order_id"))
+    if order_id is None:
         return
 
     postfill_payload = _load_json(DEFAULT_POSTFILL_REPORT)
     if not isinstance(postfill_payload, dict):
         return
+    rows = postfill_payload.get("executions")
+    rows = rows if isinstance(rows, list) else []
 
     raw_perm_id = journal.get("perm_id")
-    try:
-        perm_id = int(raw_perm_id) if raw_perm_id is not None else 0
-    except (TypeError, ValueError):
-        return
+    if raw_perm_id is None:
+        perm_id = None
+    else:
+        perm_id = _positive_exact_int(raw_perm_id)
+        if perm_id is None:
+            return
 
-    if perm_id <= 0:
-        expected_symbol = (
-            "9432"
-            if request.ticker.strip().upper() == "9432.T"
-            else request.ticker.strip().upper()
-        )
-        expected_side = request.side.strip().upper()
-        expected_fingerprint = request.expected_account_fingerprint.strip().lower()
-        rows = postfill_payload.get("executions")
-        rows = rows if isinstance(rows, list) else []
-        same_order = []
+    expected_symbol = (
+        "9432"
+        if request.ticker.strip().upper() == "9432.T"
+        else request.ticker.strip().upper()
+    )
+    expected_side = request.side.strip().upper()
+    expected_fingerprint = request.expected_account_fingerprint.strip().lower()
+
+    if perm_id is None:
+        same_order: list[dict] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            try:
-                row_order_id = int(row.get("order_id"))
-            except (TypeError, ValueError):
-                continue
+            row_order_id = _positive_exact_int(row.get("order_id"))
             if row_order_id == order_id:
                 same_order.append(row)
 
@@ -275,37 +286,51 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
 
         candidate_perm_ids: set[int] = set()
         for row in same_order:
-            try:
-                candidate = int(row.get("perm_id"))
-            except (TypeError, ValueError):
-                return
-            if candidate <= 0:
+            candidate = _positive_exact_int(row.get("perm_id"))
+            if candidate is None:
                 return
             candidate_perm_ids.add(candidate)
         if len(candidate_perm_ids) != 1:
             return
         perm_id = next(iter(candidate_perm_ids))
 
+    # A permId is broker-global identity evidence for the order. Reject any
+    # persisted snapshot where the chosen permId is reused by another order or
+    # attached to malformed order identity instead of silently filtering that
+    # contradiction out in the shared matcher.
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_perm_id = _positive_exact_int(row.get("perm_id"))
+        if row_perm_id != perm_id:
+            continue
+        row_order_id = _positive_exact_int(row.get("order_id"))
+        if row_order_id is None or row_order_id != order_id:
+            return
+
     # Rehydrate only through the existing persisted report contract by asking
-    # the completion layer to consume the raw report.  The shared matcher is
-    # additionally used here solely to decide whether the durable journal may
-    # advance to POSTFILL_PROVEN.
+    # the shared matcher to prove the complete fill/commission/account identity
+    # before the durable journal can advance.
     from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
         IbkrLivePostFillSnapshot,
         LiveCommissionEvidence,
         LiveExecutionEvidence,
     )
 
-    executions = tuple(
-        LiveExecutionEvidence(**row)
-        for row in postfill_payload.get("executions", [])
-        if isinstance(row, dict)
-    )
-    commissions = tuple(
-        LiveCommissionEvidence(**row)
-        for row in postfill_payload.get("commissions", [])
-        if isinstance(row, dict)
-    )
+    try:
+        executions = tuple(
+            LiveExecutionEvidence(**row)
+            for row in rows
+            if isinstance(row, dict)
+        )
+        commissions = tuple(
+            LiveCommissionEvidence(**row)
+            for row in postfill_payload.get("commissions", [])
+            if isinstance(row, dict)
+        )
+    except (TypeError, ValueError):
+        return
+
     snapshot = IbkrLivePostFillSnapshot(
         attempted=postfill_payload.get("attempted") is True,
         connected=postfill_payload.get("connected") is True,
