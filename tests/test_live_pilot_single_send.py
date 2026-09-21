@@ -107,6 +107,7 @@ class FakeClient:
         self.place_error = place_error
         self.forced_order_error = order_error
         self.forced_broker_status = broker_status
+        self.definitive_rejection_recorder = None
         self.place_calls = []
         self.connected = False
 
@@ -129,6 +130,11 @@ class FakeClient:
         if self.ack:
             if self.forced_order_error is not None:
                 self.broker_status = self.forced_broker_status
+                definitive = subject._definitive_terminal_rejection_reason(
+                    self.forced_order_error
+                )
+                if definitive is not None and self.definitive_rejection_recorder is not None:
+                    self.definitive_rejection_recorder(definitive)
                 self.order_error = self.forced_order_error
             else:
                 self.broker_status = "Submitted"
@@ -725,6 +731,35 @@ def test_inactive_open_order_status_does_not_falsely_acknowledge():
     # Codex P2: the decisive rejection status must be recorded, not left
     # stuck at None.
     assert client.broker_status == "Inactive"
+
+
+def test_definitive_callback_persists_proof_before_waking_waiter():
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+    events = []
+    client.definitive_rejection_recorder = lambda reason: events.append(
+        ("proof", reason)
+    )
+    client.ack_ready = SimpleNamespace(set=lambda: events.append(("wake", None)))
+
+    client.orderStatus(
+        77,
+        "Cancelled",
+        0.0,
+        100.0,
+        0.0,
+        0,
+        0,
+        0.0,
+        0,
+        "",
+        0.0,
+    )
+
+    assert events[0][0] == "proof"
+    assert events[0][1].endswith("Cancelled")
+    assert events[1] == ("wake", None)
 
 
 def test_accepted_open_order_status_still_acknowledges():
