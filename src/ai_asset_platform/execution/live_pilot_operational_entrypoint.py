@@ -306,14 +306,24 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
         row_order_id = _positive_exact_int(raw_order_id)
         row_perm_id = _positive_exact_int(raw_perm_id)
 
-        # Selected permId must never appear on another/malformed order.
-        if row_perm_id == perm_id:
-            if row_order_id is None or row_order_id != order_id:
+        # Treat numeric-equivalent but non-exact representations as claims on
+        # the selected broker identity too. For example, "880077" or
+        # 880077.0 must not evade the reverse-identity conflict check merely
+        # because _positive_exact_int correctly rejects their type.
+        raw_perm_claims_selected = (
+            raw_perm_id == perm_id
+            or (
+                isinstance(raw_perm_id, str)
+                and raw_perm_id.strip() == str(perm_id)
+            )
+        )
+        if raw_perm_claims_selected:
+            if row_perm_id is None or row_order_id is None or row_order_id != order_id:
                 return
 
         # Persisted orderId must never appear with another/malformed permId.
-        # Numeric-but-type-invalid forms (for example 77.0) are also treated as
-        # claims on the selected identity and therefore fail closed.
+        # Numeric-but-type-invalid forms (for example 77.0 or "77") are also
+        # treated as claims on the selected identity and therefore fail closed.
         raw_order_claims_selected = (
             raw_order_id == order_id
             or (
@@ -321,8 +331,8 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
                 and raw_order_id.strip() == str(order_id)
             )
         )
-        if row_order_id == order_id or raw_order_claims_selected:
-            if row_perm_id is None or row_perm_id != perm_id:
+        if raw_order_claims_selected:
+            if row_order_id is None or row_perm_id is None or row_perm_id != perm_id:
                 return
 
     # Rehydrate only through the existing persisted report contract by asking
