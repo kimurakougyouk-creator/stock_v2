@@ -442,3 +442,142 @@ def test_human_wrapper_passes_empty_final_confirmation_by_default(tmp_path):
     assert "--live-readonly-confirmation" in args
     readonly_index = args.index("--live-readonly-confirmation")
     assert args[readonly_index + 1] == "READ_LIVE_ACCOUNT_ONLY"
+
+
+def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkeypatch):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": None,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "0001.test.01",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    payload["commissions"] = [
+        {
+            "exec_id": "0001.test.01",
+            "commission": 80.0,
+            "currency": "JPY",
+            "realized_pnl": None,
+        }
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    seen = {}
+
+    def fake_match(snapshot, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            ready=True,
+            executions=(SimpleNamespace(exec_id="0001.test.01"),),
+        )
+
+    monkeypatch.setattr(subject, "match_live_postfill", fake_match)
+    calls = []
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+    assert seen["order_id"] == 77
+    assert seen["perm_id"] == 880077
+    assert len(calls) == 1
+    assert calls[0][1]["perm_id"] == 880077
+
+
+def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monkeypatch):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": None,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail(
+            "shared matcher must be unreachable when UNKNOWN broker identity is ambiguous"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "journal must remain UNKNOWN on ambiguous broker identity"
+        ),
+    )
+
+    ambiguous = _postfill_payload()
+    ambiguous["executions"] = [
+        {
+            "exec_id": "a",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 50.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        },
+        {
+            "exec_id": "b",
+            "order_id": 77,
+            "perm_id": 990088,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 50.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        },
+    ]
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: ambiguous if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    subject._promote_postfill_if_proven(_request())
+
+    conflicting = _postfill_payload()
+    conflicting["executions"] = [
+        {
+            "exec_id": "a",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "SELL",
+            "quantity": 100.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: conflicting if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    subject._promote_postfill_if_proven(_request())
