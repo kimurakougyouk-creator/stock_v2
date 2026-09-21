@@ -887,6 +887,130 @@ def _terminal_reconciliation_is_durably_proven(
     expected_final = Decimal("0") if expected_side == "BUY" else authorized_quantity
     return final_position == expected_final
 
+def _completed_order_rejection_if_proven(
+    request: LivePilotOperationalRequest,
+    journal: dict,
+    completed: dict,
+    *,
+    endpoint_port: int,
+    order_id: int,
+    sender_client_id: int,
+    now: datetime,
+) -> tuple[str, int] | None:
+    """Return exact terminal rejection reason/permId from fresh Live history.
+
+    This is read-only recovery evidence for the case where an acknowledged
+    order is cancelled after the sender has disconnected.  Every durable and
+    broker identity field must agree; ambiguity remains UNKNOWN.
+    """
+    if not _clean_live_report(
+        completed,
+        required_schema_version=LIVE_COMPLETED_ORDERS_SCHEMA_VERSION,
+        required_false_flags=(
+            "order_sent",
+            "cancel_sent",
+            "modify_sent",
+            "live_order_sent",
+        ),
+    ):
+        return None
+    if not _fresh(
+        completed,
+        now=now,
+        max_age_seconds=DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
+    ):
+        return None
+    fingerprint = request.expected_account_fingerprint.strip().lower()
+    if (
+        completed.get("endpoint_port") != endpoint_port
+        or isinstance(completed.get("endpoint_port"), bool)
+        or str(completed.get("account_fingerprint") or "").strip().lower()
+        != fingerprint
+        or completed.get("raw_account_id_persisted") is not False
+    ):
+        return None
+
+    orders = completed.get("orders")
+    count = completed.get("completed_order_count")
+    if (
+        not isinstance(orders, list)
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or count < 0
+        or count != len(orders)
+    ):
+        return None
+
+    parsed_rows: list[tuple[dict, int, int, int]] = []
+    for row in orders:
+        if not isinstance(row, dict):
+            return None
+        row_order = _positive_exact_int(row.get("order_id"))
+        row_perm = _positive_exact_int(row.get("perm_id"))
+        row_client = _nonnegative_exact_int(row.get("client_id"))
+        if row_order is None or row_perm is None or row_client is None:
+            return None
+        parsed_rows.append((row, row_order, row_perm, row_client))
+
+    matching = [item for item in parsed_rows if item[1] == order_id]
+    if len(matching) != 1:
+        return None
+    row, _, row_perm, row_client = matching[0]
+    if row_client != sender_client_id:
+        return None
+
+    raw_persisted_perm = journal.get("perm_id")
+    if raw_persisted_perm is not None:
+        persisted_perm = _positive_exact_int(raw_persisted_perm)
+        if persisted_perm is None or persisted_perm != row_perm:
+            return None
+    if any(
+        other_perm == row_perm and other_order != order_id
+        for _, other_order, other_perm, _ in parsed_rows
+    ):
+        return None
+
+    expected_symbol = (
+        "9432"
+        if request.ticker.strip().upper() == "9432.T"
+        else request.ticker.strip().upper()
+    )
+    expected_currency = (
+        "JPY" if request.ticker.strip().upper() == "9432.T" else "USD"
+    )
+    quantity = _positive_finite_number(row.get("quantity"))
+    limit_price = _positive_finite_number(row.get("limit_price"))
+    if (
+        str(row.get("symbol") or "").strip().upper() != expected_symbol
+        or str(row.get("sec_type") or "").strip().upper() != "STK"
+        or str(row.get("currency") or "").strip().upper() != expected_currency
+        or str(row.get("action") or "").strip().upper()
+        != request.side.strip().upper()
+        or quantity != float(request.quantity)
+        or str(row.get("order_type") or "").strip().upper() != "LMT"
+        or limit_price != float(request.limit_price)
+        or str(row.get("order_ref") or "").strip() != request.intent_id
+        or str(row.get("account_fingerprint") or "").strip().lower()
+        != fingerprint
+    ):
+        return None
+
+    statuses = [
+        str(row.get(name) or "").strip()
+        for name in ("status", "completed_status")
+        if str(row.get(name) or "").strip()
+    ]
+    if not statuses or any(
+        status not in _DEFINITIVE_REJECTION_STATUSES for status in statuses
+    ):
+        return None
+    status = statuses[-1]
+    return (
+        f"broker completedOrder callback reported terminal status: {status}",
+        row_perm,
+    )
+
+
 def _promote_terminal_reconciliation_if_proven(
     request: LivePilotOperationalRequest,
 ) -> str | None:
@@ -1129,8 +1253,46 @@ def _promote_terminal_reconciliation_if_proven(
         )
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return None
+
     if not isinstance(rejection_evidence, dict):
-        return None
+        try:
+            completed = _load_json(DEFAULT_LIVE_COMPLETED_ORDERS_REPORT)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(completed, dict):
+            return None
+        completed_rejection = _completed_order_rejection_if_proven(
+            request,
+            journal,
+            completed,
+            endpoint_port=endpoint_port,
+            order_id=order_id,
+            sender_client_id=sender_client_id,
+            now=current,
+        )
+        if completed_rejection is None:
+            return None
+        completed_reason, completed_perm = completed_rejection
+        try:
+            rejection_evidence = record_definitive_rejection_evidence(
+                request.intent_id,
+                nonce=request.nonce,
+                ticker=request.ticker,
+                side=request.side,
+                quantity=request.quantity,
+                limit_price=request.limit_price,
+                estimated_notional_jpy=request.estimated_notional_jpy,
+                account_fingerprint=request.expected_account_fingerprint,
+                endpoint_port=endpoint_port,
+                order_id=order_id,
+                client_id=sender_client_id,
+                rejection_reason=completed_reason,
+                perm_id=completed_perm,
+                directory=DEFAULT_JOURNAL_DIR,
+            )
+        except (OSError, UnicodeError, ValueError, PermissionError):
+            return None
+
     rejection_reason = _definitive_rejection_reason(
         rejection_evidence.get("rejection_reason")
     )
@@ -1182,7 +1344,14 @@ def _promote_terminal_reconciliation_if_proven(
     ):
         if rejection_evidence.get(flag) is not False:
             return None
-    if persisted_perm is not None:
+    raw_rejection_perm = rejection_evidence.get("perm_id")
+    if raw_rejection_perm is None:
+        rejection_perm = None
+    else:
+        rejection_perm = _positive_exact_int(raw_rejection_perm)
+        if rejection_perm is None:
+            return None
+    if persisted_perm != rejection_perm:
         return None
     if any(row.get("order_id") == order_id for row in validated_rows):
         return None
@@ -1199,6 +1368,7 @@ def _promote_terminal_reconciliation_if_proven(
         rejection_reason=rejection_reason,
         order_id=order_id,
         final_position_quantity=final_position,
+        perm_id=rejection_perm,
         directory=DEFAULT_JOURNAL_DIR,
     )
     return "REJECTED_RECONCILED"
