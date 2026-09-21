@@ -120,6 +120,25 @@ class _LivePilotClient(EWrapper, EClient):
         self.broker_status: str | None = None
         self.order_error: str | None = None
         self.errors: list[str] = []
+        self.definitive_rejection_recorder: Callable[[str], None] | None = None
+
+    def _signal_order_error(self, reason: str) -> None:
+        """Persist definitive broker rejection proof before waking the waiter."""
+        normalized = str(reason or "").strip()
+        definitive = _definitive_terminal_rejection_reason(normalized)
+        if definitive is not None and self.definitive_rejection_recorder is not None:
+            try:
+                self.definitive_rejection_recorder(definitive)
+            except (OSError, UnicodeError, ValueError, PermissionError):
+                # Never expose a definitive rejection reason to the waiting
+                # thread unless its independent callback-time proof is already
+                # durable. The attempt remains spent and recovery stays UNKNOWN.
+                normalized = (
+                    "definitive broker rejection evidence could not be "
+                    "durably persisted"
+                )
+        self.order_error = normalized
+        self.ack_ready.set()
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.next_order_id = int(orderId)
@@ -163,15 +182,17 @@ class _LivePilotClient(EWrapper, EClient):
             # ApiCancelled, PendingCancel) must wake the waiter as a failure
             # instead of silently waiting out the full timeout for a callback
             # that will never arrive.
-            self.order_error = f"broker orderStatus callback reported non-accepted status: {normalized_status}"
-            self.ack_ready.set()
+            self._signal_order_error(
+                f"broker orderStatus callback reported non-accepted status: {normalized_status}"
+            )
 
     def openOrder(self, orderId, contract, order, orderState) -> None:  # noqa: N802
         if self.watched_order_id is None or int(orderId) != self.watched_order_id:
             return
         if str(getattr(order, "account", "") or "").strip() != str(self.watched_account or ""):
-            self.order_error = "broker acknowledgement account does not match the same-session account"
-            self.ack_ready.set()
+            self._signal_order_error(
+                "broker acknowledgement account does not match the same-session account"
+            )
             return
         status = str(getattr(orderState, "status", "") or "").strip()
         if status in _NONTERMINAL_STATUSES:
@@ -202,8 +223,9 @@ class _LivePilotClient(EWrapper, EClient):
             # PendingSubmit/PendingCancel or None) so the returned
             # broker-state evidence matches the actual rejection.
             self.broker_status = status
-            self.order_error = f"broker openOrder callback reported non-accepted status: {status}"
-            self.ack_ready.set()
+            self._signal_order_error(
+                f"broker openOrder callback reported non-accepted status: {status}"
+            )
 
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson="") -> None:  # noqa: N802
         text = f"{reqId}:{errorCode}:{errorString}"
@@ -214,8 +236,7 @@ class _LivePilotClient(EWrapper, EClient):
             except (TypeError, ValueError):
                 matching = False
             if matching and int(errorCode) not in {2104, 2106, 2158}:
-                self.order_error = text
-                self.ack_ready.set()
+                self._signal_order_error(text)
 
 
 def _instrument_for(ticker: str) -> InstrumentSpec:
@@ -618,6 +639,30 @@ def send_exactly_one_live_pilot(
             now=final_clock,
         )
 
+        # Bind callback-time definitive rejection evidence before transport.
+        # A terminal callback must fsync its independent proof before it may
+        # wake the waiting sender thread; otherwise a crash in that gap would
+        # permanently lose the only broker-side rejection evidence.
+        def _persist_callback_rejection(reason: str) -> None:
+            record_definitive_rejection_evidence(
+                intent,
+                nonce=nonce,
+                ticker=ticker,
+                side=side,
+                quantity=quantity,
+                limit_price=limit_price,
+                estimated_notional_jpy=notional,
+                account_fingerprint=fingerprint,
+                endpoint_port=int(endpoint_port),
+                order_id=int(order_id),
+                client_id=LIVE_PILOT_CLIENT_ID,
+                rejection_reason=reason,
+                directory=journal_dir,
+                now=_current_clock(),
+            )
+
+        client.definitive_rejection_recorder = _persist_callback_rejection
+
         # Prepare the watched fields first: trivial in-memory assignments,
         # not I/O, so they cannot themselves introduce a delay between the
         # final safety sequence below and transport.
@@ -754,39 +799,11 @@ def send_exactly_one_live_pilot(
                 "broker acknowledgement timed out; no retry permitted",
             )
         if client.order_error or client.ack_perm_id is None or int(client.ack_perm_id) <= 0:
+            # Any definitive rejection proof was already persisted inside the
+            # broker callback before ack_ready was signaled.
             unknown_reason = (
                 client.order_error or "broker acknowledgement lacked positive permId"
             )
-            definitive_reason = _definitive_terminal_rejection_reason(
-                client.order_error
-            )
-            if definitive_reason is not None:
-                try:
-                    record_definitive_rejection_evidence(
-                        intent,
-                        nonce=nonce,
-                        ticker=ticker,
-                        side=side,
-                        quantity=quantity,
-                        limit_price=limit_price,
-                        estimated_notional_jpy=notional,
-                        account_fingerprint=fingerprint,
-                        endpoint_port=int(endpoint_port),
-                        order_id=int(order_id),
-                        client_id=LIVE_PILOT_CLIENT_ID,
-                        rejection_reason=definitive_reason,
-                        directory=journal_dir,
-                        now=_current_clock(),
-                    )
-                except (OSError, UnicodeError, ValueError, PermissionError):
-                    # The send attempt is already permanently spent. If the
-                    # independent rejection proof cannot be durably recorded,
-                    # keep the outcome UNKNOWN so recovery can never promote a
-                    # fabricated mutable summary reason to terminal rejection.
-                    unknown_reason = (
-                        "definitive broker rejection evidence could not be "
-                        "durably persisted"
-                    )
             mark_unknown(
                 intent,
                 reason=unknown_reason,
