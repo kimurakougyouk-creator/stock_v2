@@ -36,6 +36,12 @@ def _fill(
         row["fx_to_account_rate"] = fx
     if exec_ids is not None:
         row["broker_exec_ids"] = exec_ids
+        if exec_ids:
+            per_exec = shares / len(exec_ids)
+            row["broker_exec_fills"] = [
+                {"exec_id": exec_id, "shares": per_exec}
+                for exec_id in exec_ids
+            ]
     return row
 
 
@@ -671,6 +677,79 @@ def test_partial_close_retains_all_weighted_average_buy_exec_provenance():
     assert trade["net_realized_pnl_account"] == 2980.0
     assert result.net_realized_pnl == 2980.0
     assert result.net_profitability_proven is False
+
+
+def test_incomplete_execution_quantity_coverage_fails_closed():
+    buy = _fill(
+        intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+        side="BUY",
+        price=150.0,
+        exec_ids=["buy-a", "buy-b"],
+    )
+    buy["broker_exec_fills"] = [{"exec_id": "buy-a", "shares": 40}]
+    records = [
+        buy,
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-a", 2.0, "JPY"),
+            _commission("buy-b", 3.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert result.evidence_status == "BLOCKED_FEE_EVIDENCE"
+    assert "execution quantity" in result.reason
+    assert result.fees_accounted is False
+    assert result.net_realized_pnl is None
+
+
+def test_execution_quantity_ids_must_match_commission_bound_exec_ids():
+    buy = _fill(
+        intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+        side="BUY",
+        price=150.0,
+        exec_ids=["buy-a"],
+    )
+    buy["broker_exec_fills"] = [{"exec_id": "different", "shares": 100}]
+    result = build_strategy_profitability_evidence(
+        [
+            buy,
+            _fill(
+                intent=_natural_intent(
+                    ticker="9432.T",
+                    side="SELL",
+                    shares=100,
+                    bar_key="2026-09-02T10:00:00+09:00",
+                ),
+                side="SELL",
+                price=160.0,
+                exec_ids=["sell-1"],
+            ),
+        ],
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-a", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert result.evidence_status == "BLOCKED_FEE_EVIDENCE"
+    assert "do not match broker_exec_ids" in result.reason
 
 
 def test_module_contains_no_broker_mutation_api_calls():
