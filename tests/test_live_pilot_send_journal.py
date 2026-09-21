@@ -11,7 +11,9 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     create_consumed_authorization_journal,
     load_send_journal,
     mark_order_acknowledged,
+    mark_partial_reconciled,
     mark_postfill_proven,
+    mark_rejected_reconciled,
     mark_unknown,
     record_order_id_before_transport,
     record_send_attempt,
@@ -711,3 +713,83 @@ def test_missing_or_malformed_consumed_binding_fails_closed(
             directory=tmp_path,
             now=NOW,
         )
+
+
+
+def test_partial_reconciliation_is_durable_terminal_and_never_reenables_send(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    result = mark_partial_reconciled(
+        INTENT,
+        exec_ids=("exec-1", "exec-2"),
+        order_id=101,
+        perm_id=202,
+        filled_quantity=40.0,
+        commission_total=12.5,
+        commission_currency="JPY",
+        final_position_quantity=40.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert result["state"] == "PARTIAL_RECONCILED"
+    assert result["exec_ids"] == ["exec-1", "exec-2"]
+    assert result["filled_quantity"] == 40.0
+    assert result["recovery_required"] is False
+    assert result["automatic_resend_allowed"] is False
+    assert result["automatic_cancel_allowed"] is False
+    assert result["automatic_modify_allowed"] is False
+    assert result["automatic_flatten_allowed"] is False
+    assert result["automatic_close_allowed"] is False
+    assert send_attempt_permitted(INTENT, directory=tmp_path) is False
+    with pytest.raises(PermissionError, match="reconciled evidence"):
+        mark_unknown(
+            INTENT,
+            reason="later timeout",
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
+
+
+def test_rejected_reconciliation_is_durable_terminal_and_never_retries(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason="broker orderStatus callback reported non-accepted status: Inactive",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    result = mark_rejected_reconciled(
+        INTENT,
+        rejection_reason="broker orderStatus callback reported non-accepted status: Inactive",
+        order_id=101,
+        final_position_quantity=0.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+
+    assert result["state"] == "REJECTED_RECONCILED"
+    assert result["recovery_required"] is False
+    assert result["automatic_resend_allowed"] is False
+    assert result["automatic_cancel_allowed"] is False
+    assert result["automatic_modify_allowed"] is False
+    assert result["automatic_flatten_allowed"] is False
+    assert result["automatic_close_allowed"] is False
+    assert send_attempt_permitted(INTENT, directory=tmp_path) is False
