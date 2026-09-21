@@ -292,6 +292,17 @@ def consume_live_pilot_authorization(
         "status": "CONSUMED",
         "nonce": str(nonce),
         "intent_id": expected["intent_id"],
+        # Preserve the exact approved order binding for durable recovery.
+        # Recovery must never be able to replace these values with fresh
+        # caller-controlled CLI arguments after the one-shot authorization
+        # has been consumed.
+        "ticker": expected["ticker"],
+        "side": expected["side"],
+        "quantity": expected["quantity"],
+        "limit_price": expected["limit_price"],
+        "estimated_notional_jpy": expected["estimated_notional_jpy"],
+        "account_fingerprint": expected["account_fingerprint"],
+        "endpoint_port": expected["endpoint_port"],
         "consumed_at": current.isoformat(timespec="seconds"),
         # Preserved so a caller can re-validate expiry after this call, e.g.
         # if durable writes between consumption and transport stall long
