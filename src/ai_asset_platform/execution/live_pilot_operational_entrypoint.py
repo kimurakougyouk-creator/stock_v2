@@ -149,12 +149,14 @@ def _collect_presend_readonly_evidence(
     request: LivePilotOperationalRequest,
 ) -> None:
     account = preview_ibkr_live_readonly_account_snapshot(
-        confirmation=request.live_readonly_confirmation
+        confirmation=request.live_readonly_confirmation,
+        endpoint_port=authorized_endpoint_port,
     )
     persist_live_readonly_account_snapshot(account)
 
     open_orders = preview_ibkr_live_all_open_orders(
-        confirmation=request.live_readonly_confirmation
+        confirmation=request.live_readonly_confirmation,
+        endpoint_port=authorized_endpoint_port,
     )
     persist_live_all_open_orders(open_orders)
 
@@ -206,15 +208,25 @@ def _collect_post_attempt_readonly_evidence(
     sender_client_id = (
         journal.get("sender_client_id") if isinstance(journal, dict) else None
     )
+    authorized_endpoint_port = (
+        journal.get("authorized_endpoint_port") if isinstance(journal, dict) else None
+    )
     if (
         not isinstance(sender_client_id, int)
         or isinstance(sender_client_id, bool)
         or sender_client_id < 0
     ):
         raise PermissionError("durable sender client_id is missing or invalid")
+    if (
+        not isinstance(authorized_endpoint_port, int)
+        or isinstance(authorized_endpoint_port, bool)
+        or authorized_endpoint_port not in {4001, 7496}
+    ):
+        raise PermissionError("durable authorized Live endpoint is missing or invalid")
     postfill = preview_ibkr_live_postfill_snapshot(
         confirmation=request.live_readonly_confirmation,
         expected_client_id=sender_client_id,
+        endpoint_port=authorized_endpoint_port,
     )
     persist_live_postfill_snapshot(postfill)
 
