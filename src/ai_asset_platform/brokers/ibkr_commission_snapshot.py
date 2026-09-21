@@ -412,7 +412,9 @@ def _load_prior_latest_snapshot_for_ledger(
 
 def persist_commission_snapshot(
     snapshot: IbkrPaperCommissionSnapshot,
-    *, report_path: Path = DEFAULT_REPORT_PATH,
+    *,
+    report_path: Path = DEFAULT_REPORT_PATH,
+    ledger_path: Path = DEFAULT_LEDGER_PATH,
 ) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     prior = _load_prior_latest_snapshot_for_ledger(report_path)
