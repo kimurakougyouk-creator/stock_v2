@@ -695,7 +695,11 @@ def record_definitive_rejection_evidence(
     payload = load_send_journal(intent, directory=directory)
     if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("rejection evidence requires the recorded send attempt")
-    if payload.get("state") not in {"SEND_ATTEMPT_RECORDED", "ORDER_ACKNOWLEDGED"}:
+    if payload.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
         raise PermissionError("rejection evidence is not valid in the current state")
     expected_pairs = (
         (payload.get("nonce"), safe_nonce),
@@ -943,6 +947,7 @@ def _definitive_terminal_rejection_reason(value: object) -> str | None:
     for prefix in (
         "broker orderStatus callback reported non-accepted status:",
         "broker openOrder callback reported non-accepted status:",
+        "broker completedOrder callback reported terminal status:",
     ):
         if reason.startswith(prefix):
             status = reason[len(prefix) :].strip()
