@@ -452,6 +452,7 @@ def test_order_id_is_durably_bound_before_transport_and_survives_unknown(tmp_pat
     bound = record_order_id_before_transport(
         INTENT,
         order_id=101,
+        client_id=681,
         directory=tmp_path,
         now=NOW + timedelta(seconds=2),
     )
@@ -478,6 +479,7 @@ def test_pretransport_order_id_binding_is_fail_closed(tmp_path: Path):
         record_order_id_before_transport(
             INTENT,
             order_id=101,
+        client_id=681,
             directory=tmp_path,
             now=NOW,
         )
@@ -487,6 +489,7 @@ def test_pretransport_order_id_binding_is_fail_closed(tmp_path: Path):
         record_order_id_before_transport(
             INTENT,
             order_id=True,
+        client_id=681,
             directory=tmp_path,
             now=NOW + timedelta(seconds=2),
         )
@@ -494,6 +497,7 @@ def test_pretransport_order_id_binding_is_fail_closed(tmp_path: Path):
     record_order_id_before_transport(
         INTENT,
         order_id=101,
+        client_id=681,
         directory=tmp_path,
         now=NOW + timedelta(seconds=3),
     )
@@ -501,6 +505,7 @@ def test_pretransport_order_id_binding_is_fail_closed(tmp_path: Path):
         record_order_id_before_transport(
             INTENT,
             order_id=102,
+        client_id=681,
             directory=tmp_path,
             now=NOW + timedelta(seconds=4),
         )
@@ -521,6 +526,7 @@ def test_pretransport_order_id_rename_is_directory_fsynced(tmp_path: Path, monke
     record_order_id_before_transport(
         INTENT,
         order_id=101,
+        client_id=681,
         directory=tmp_path,
         now=NOW + timedelta(seconds=2),
     )
@@ -537,6 +543,7 @@ def test_postfill_proven_can_recover_directly_from_send_attempt_state(tmp_path: 
     record_order_id_before_transport(
         INTENT,
         order_id=101,
+        client_id=681,
         directory=tmp_path,
         now=NOW + timedelta(seconds=2),
     )
@@ -580,6 +587,7 @@ def test_postfill_proven_rejects_non_exact_broker_ids(
     record_order_id_before_transport(
         INTENT,
         order_id=101,
+        client_id=681,
         directory=tmp_path,
         now=NOW + timedelta(seconds=2),
     )
