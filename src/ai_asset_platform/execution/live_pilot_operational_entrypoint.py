@@ -228,10 +228,31 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
     if not isinstance(journal, dict):
         return
 
-    # Every fresh recovery report must first pass exact broker-identity typing,
-    # even when the journal is already POSTFILL_PROVEN. Completion must never
-    # accept a later malformed execution report merely because an earlier pass
-    # had already promoted the journal.
+    state = journal.get("state")
+    if state not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+        "POSTFILL_PROVEN",
+    }:
+        return
+
+    # Persisted broker identity is itself a safety boundary. Reject malformed
+    # journal values before reading any post-fill evidence.
+    order_id = _positive_exact_int(journal.get("order_id"))
+    if order_id is None:
+        return
+    raw_perm_id = journal.get("perm_id")
+    if raw_perm_id is None:
+        perm_id = None
+    else:
+        perm_id = _positive_exact_int(raw_perm_id)
+        if perm_id is None:
+            return
+
+    # Every fresh recovery report must pass exact broker-identity typing even
+    # after POSTFILL_PROVEN. A later malformed report must never become
+    # COMPLETE merely because an earlier pass had already promoted the journal.
     postfill_payload = _load_json(DEFAULT_POSTFILL_REPORT)
     if not isinstance(postfill_payload, dict):
         return
@@ -246,30 +267,13 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
         ):
             return
 
-    if journal.get("state") == "POSTFILL_PROVEN":
+    if state == "POSTFILL_PROVEN":
         return
+
     # SEND_ATTEMPT_RECORDED is intentionally recoverable here. A crash can
     # occur after placeOrder returns but before ACK/UNKNOWN is durably written.
     # The campaign marker still makes the sender unreachable; only fresh
     # read-only execution evidence may advance the journal.
-    if journal.get("state") not in {
-        "SEND_ATTEMPT_RECORDED",
-        "ORDER_ACKNOWLEDGED",
-        "UNKNOWN",
-    }:
-        return
-
-    order_id = _positive_exact_int(journal.get("order_id"))
-    if order_id is None:
-        return
-
-    raw_perm_id = journal.get("perm_id")
-    if raw_perm_id is None:
-        perm_id = None
-    else:
-        perm_id = _positive_exact_int(raw_perm_id)
-        if perm_id is None:
-            return
 
     expected_symbol = (
         "9432"
