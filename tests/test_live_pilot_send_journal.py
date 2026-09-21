@@ -9,6 +9,7 @@ import pytest
 import ai_asset_platform.execution.live_pilot_send_journal as journal
 from ai_asset_platform.execution.live_pilot_send_journal import (
     create_consumed_authorization_journal,
+    load_definitive_rejection_evidence,
     load_send_journal,
     load_terminal_reconciliation_marker,
     mark_order_acknowledged,
@@ -16,6 +17,7 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     mark_postfill_proven,
     mark_rejected_reconciled,
     mark_unknown,
+    record_definitive_rejection_evidence,
     record_order_id_before_transport,
     record_send_attempt,
     send_attempt_permitted,
@@ -63,6 +65,29 @@ def _consumed(**overrides) -> dict:
 
 def _create(tmp_path: Path):
     return create_consumed_authorization_journal(intent_id=INTENT, nonce=NONCE, consumed_authorization=_consumed(), directory=tmp_path, now=NOW)
+
+
+def _record_rejection_evidence(
+    tmp_path: Path,
+    *,
+    reason: str = "broker orderStatus callback reported non-accepted status: Cancelled",
+):
+    return record_definitive_rejection_evidence(
+        INTENT,
+        nonce=NONCE,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        account_fingerprint="a" * 64,
+        endpoint_port=4001,
+        order_id=101,
+        client_id=681,
+        rejection_reason=reason,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
 
 
 def test_unconsumed_or_mismatched_authorization_cannot_create_journal(tmp_path: Path):
@@ -780,6 +805,10 @@ def test_rejected_reconciliation_is_durable_terminal_and_never_retries(tmp_path:
         directory=tmp_path,
         now=NOW + timedelta(seconds=2),
     )
+    rejection = _record_rejection_evidence(tmp_path)
+    assert rejection["rejection_reason"].endswith("Cancelled")
+    assert load_definitive_rejection_evidence(INTENT, directory=tmp_path) == rejection
+
     mark_unknown(
         INTENT,
         reason="broker orderStatus callback reported non-accepted status: Cancelled",
@@ -1000,3 +1029,104 @@ def test_rejected_terminal_marker_requires_definitive_broker_rejection(
         )
 
     assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+def test_terminal_transition_requires_exact_global_attempt_timestamp(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    global_path = journal._global_attempt_path(tmp_path)
+    global_marker = journal.load_global_send_attempt_marker(directory=tmp_path)
+    assert global_marker is not None
+    global_marker["recorded_at"] = NOW.isoformat(timespec="seconds")
+    global_path.write_text(
+        __import__("json").dumps(global_marker),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PermissionError, match="timestamps conflict"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+def test_rejected_transition_cannot_be_created_from_mutable_unknown_reason_alone(
+    tmp_path: Path,
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason="101:201:fabricated mutable rejection",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    with pytest.raises(PermissionError, match="rejection evidence is missing"):
+        mark_rejected_reconciled(
+            INTENT,
+            rejection_reason="101:201:fabricated mutable rejection",
+            order_id=101,
+            final_position_quantity=0.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
+
+    assert load_definitive_rejection_evidence(INTENT, directory=tmp_path) is None
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+def test_broker_identity_corruption_fails_closed_without_typeerror(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    journal_path = journal._path(INTENT, tmp_path)
+    payload = load_send_journal(INTENT, directory=tmp_path)
+    assert payload is not None
+    payload["order_id"] = []
+    journal_path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="conflicts"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
