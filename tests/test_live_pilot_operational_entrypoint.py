@@ -2952,3 +2952,66 @@ def test_malformed_nonterminal_recovery_binding_returns_blocked_without_broker_i
     assert result.broker_connection_used is False
     assert result.order_transport_called is False
     assert any("recovery broker identity is invalid" in item for item in result.blockers)
+
+
+def test_completed_order_recovery_matches_order_id_with_sender_client():
+    journal = _terminal_journal(
+        state="ORDER_ACKNOWLEDGED",
+        perm_id=880077,
+        unknown_reason=None,
+    )
+    request = _request()
+    base_row = {
+        "order_id": 77,
+        "perm_id": 880077,
+        "client_id": 681,
+        "symbol": "9432",
+        "sec_type": "STK",
+        "currency": "JPY",
+        "exchange": "TSEJ",
+        "action": "BUY",
+        "quantity": 100.0,
+        "order_type": "LMT",
+        "limit_price": 400.0,
+        "status": "Cancelled",
+        "completed_status": "Cancelled",
+        "completed_time": "20260921 12:39:20 UTC",
+        "order_ref": request.intent_id,
+        "account_fingerprint": FINGERPRINT,
+    }
+    other_client_row = {
+        **base_row,
+        "perm_id": 990077,
+        "client_id": 999,
+        "completed_time": "20260921 12:39:19 UTC",
+    }
+    completed = {
+        "schema_version": subject.LIVE_COMPLETED_ORDERS_SCHEMA_VERSION,
+        "ready": True,
+        "checked_at": "2026-09-21T12:39:30+00:00",
+        "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "raw_account_id_persisted": False,
+        "completed_order_count": 2,
+        "orders": [other_client_row, base_row],
+        "order_sent": False,
+        "cancel_sent": False,
+        "modify_sent": False,
+        "live_order_sent": False,
+    }
+
+    observed = subject._completed_order_rejection_if_proven(
+        request,
+        journal,
+        completed,
+        endpoint_port=4001,
+        order_id=77,
+        sender_client_id=681,
+        now=datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+
+    assert observed is not None
+    reason, perm_id = observed
+    assert reason.endswith("Cancelled")
+    assert perm_id == 880077
