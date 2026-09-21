@@ -66,7 +66,6 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     mark_postfill_proven,
 )
 from ai_asset_platform.execution.live_pilot_single_send import (
-    FINAL_SEND_CONFIRMATION_VALUE,
     LivePilotSendRequest,
     LivePilotSendResult,
     send_exactly_one_live_pilot,
@@ -443,7 +442,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--nonce", required=True)
     parser.add_argument("--account-fingerprint", required=True)
     parser.add_argument("--expected-commit-sha", required=True)
-    parser.add_argument("--final-confirmation", required=True)
+    parser.add_argument("--final-confirmation", default="")
     parser.add_argument("--live-readonly-confirmation", required=True)
     parser.add_argument("--repository-root", default=".")
     return parser
