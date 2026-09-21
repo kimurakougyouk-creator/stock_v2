@@ -208,6 +208,17 @@ def _commission_index(commission_report: dict) -> dict[str, tuple[Decimal, str]]
 def _strategy_fill_signature(record: dict) -> tuple:
     raw_exec_ids = record.get("broker_exec_ids")
     exec_ids = tuple(str(value or "").strip() for value in raw_exec_ids) if isinstance(raw_exec_ids, list) else ()
+    raw_exec_fills = record.get("broker_exec_fills")
+    exec_fills = ()
+    if isinstance(raw_exec_fills, list):
+        exec_fills = tuple(
+            (
+                str(row.get("exec_id", "")).strip(),
+                str(row.get("shares", "")),
+            )
+            for row in raw_exec_fills
+            if isinstance(row, dict)
+        )
     return (
         str(record.get("ticker", "")).strip().upper(),
         str(record.get("side", "")).strip().upper(),
@@ -216,6 +227,7 @@ def _strategy_fill_signature(record: dict) -> tuple:
         str(record.get("currency", "")).strip().upper(),
         str(record.get("fx_to_account_rate", "")),
         exec_ids,
+        exec_fills,
     )
 
 
@@ -318,6 +330,38 @@ def _net_realized_trades_with_commissions(
                     f"broker exec_id={exec_id} is reused by multiple strategy fills"
                 )
             exec_ids.append(exec_id)
+
+        raw_exec_fills = record.get("broker_exec_fills")
+        if not isinstance(raw_exec_fills, list) or not raw_exec_fills:
+            raise StrategyProfitabilityEvidenceError(
+                f"strategy fill #{position} is missing broker_exec_fills quantity evidence"
+            )
+        exec_fill_ids: list[str] = []
+        exec_fill_total = Decimal("0")
+        for fill_index, raw_fill in enumerate(raw_exec_fills, start=1):
+            if not isinstance(raw_fill, dict):
+                raise StrategyProfitabilityEvidenceError(
+                    f"strategy fill #{position} broker_exec_fills row #{fill_index} is invalid"
+                )
+            exec_id = str(raw_fill.get("exec_id", "")).strip()
+            if not exec_id or exec_id in exec_fill_ids:
+                raise StrategyProfitabilityEvidenceError(
+                    f"strategy fill #{position} has invalid/duplicate execution quantity identity"
+                )
+            fill_shares = _positive_decimal(
+                raw_fill.get("shares"),
+                field=f"strategy fill #{position} execution shares[{exec_id}]",
+            )
+            exec_fill_ids.append(exec_id)
+            exec_fill_total += fill_shares
+        if set(exec_fill_ids) != set(exec_ids):
+            raise StrategyProfitabilityEvidenceError(
+                f"strategy fill #{position} execution quantity IDs do not match broker_exec_ids"
+            )
+        if exec_fill_total != Decimal(shares):
+            raise StrategyProfitabilityEvidenceError(
+                f"strategy fill #{position} execution quantities do not cover the full fill"
+            )
 
         fee_local = Decimal("0")
         for exec_id in exec_ids:
