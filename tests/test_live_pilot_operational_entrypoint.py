@@ -1842,6 +1842,36 @@ def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch
         "_utc_now",
         lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
     )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: {
+            "schema_version": subject.SEND_JOURNAL_SCHEMA_VERSION,
+            "intent_id": _request().intent_id,
+            "nonce": _request().nonce,
+            "ticker": "9432.T",
+            "side": "BUY",
+            "quantity": 100,
+            "limit_price": 400.0,
+            "estimated_notional_jpy": 40_000.0,
+            "account_fingerprint": FINGERPRINT,
+            "endpoint_port": 4001,
+            "order_id": 77,
+            "sender_client_id": 681,
+            "send_attempt_recorded_at": "2026-09-21T12:39:00+00:00",
+            "rejection_recorded_at": "2026-09-21T12:39:30+00:00",
+            "rejection_reason": (
+                "broker orderStatus callback reported non-accepted status: Cancelled"
+            ),
+            "automatic_resend_allowed": False,
+            "automatic_cancel_allowed": False,
+            "automatic_modify_allowed": False,
+            "automatic_flatten_allowed": False,
+            "automatic_close_allowed": False,
+            "order_sent": False,
+            "live_order_sent": False,
+        },
+    )
     calls = []
     monkeypatch.setattr(
         subject,
@@ -2024,6 +2054,35 @@ def _persisted_terminal_marker(terminal_state: str) -> dict:
     return marker
 
 
+def _persisted_rejection_evidence() -> dict:
+    return {
+        "schema_version": subject.SEND_JOURNAL_SCHEMA_VERSION,
+        "intent_id": _request().intent_id,
+        "nonce": _request().nonce,
+        "ticker": "9432.T",
+        "side": "BUY",
+        "quantity": 100,
+        "limit_price": 400.0,
+        "estimated_notional_jpy": 40_000.0,
+        "account_fingerprint": FINGERPRINT,
+        "endpoint_port": 4001,
+        "order_id": 77,
+        "sender_client_id": 681,
+        "send_attempt_recorded_at": "2026-09-21T12:39:00+00:00",
+        "rejection_recorded_at": "2026-09-21T12:39:30+00:00",
+        "rejection_reason": (
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+        "automatic_resend_allowed": False,
+        "automatic_cancel_allowed": False,
+        "automatic_modify_allowed": False,
+        "automatic_flatten_allowed": False,
+        "automatic_close_allowed": False,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
+
+
 def _terminal_attempt_marker() -> dict:
     return {
         "schema_version": subject.SEND_JOURNAL_SCHEMA_VERSION,
@@ -2068,6 +2127,11 @@ def test_persisted_terminal_reconciliation_surfaces_without_new_broker_io(
         subject,
         "load_global_send_attempt_marker",
         lambda *args, **kwargs: _terminal_global_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: _persisted_rejection_evidence(),
     )
     monkeypatch.setattr(
         subject,
@@ -2131,6 +2195,11 @@ def test_malformed_persisted_terminal_evidence_blocks_without_broker_io(
     )
     monkeypatch.setattr(
         subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: _persisted_rejection_evidence(),
+    )
+    monkeypatch.setattr(
+        subject,
         "_collect_post_attempt_readonly_evidence",
         lambda *args, **kwargs: pytest.fail(
             "invalid terminal evidence must fail before broker recovery"
@@ -2155,6 +2224,11 @@ def test_terminal_reconciliation_requires_both_irreversible_markers(monkeypatch)
         subject,
         "load_terminal_reconciliation_marker",
         lambda *args, **kwargs: _persisted_terminal_marker("REJECTED_RECONCILED"),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: _persisted_rejection_evidence(),
     )
     monkeypatch.setattr(
         subject,
@@ -2333,3 +2407,132 @@ def test_terminal_transition_marker_failure_returns_blocked_result(monkeypatch):
     assert result.complete is False
     assert result.broker_connection_used is True
     assert result.order_transport_called is False
+
+
+def test_mutable_unknown_reason_cannot_manufacture_rejection_without_immutable_proof(
+    monkeypatch,
+):
+    journal = _terminal_journal(
+        perm_id=None,
+        unknown_reason="77:201:fabricated mutable rejection",
+    )
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=[], position=0.0
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {"recorded_at": "2026-09-21T12:39:00+00:00"},
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "mutable unknown_reason must never create terminal rejection"
+        ),
+    )
+
+    assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
+
+
+@pytest.mark.parametrize("field", ["order_id", "sender_client_id"])
+def test_unhashable_terminal_broker_identity_blocks_instead_of_raising(
+    monkeypatch, field
+):
+    journal = _persisted_terminal_journal("PARTIAL_RECONCILED")
+    terminal = _persisted_terminal_marker("PARTIAL_RECONCILED")
+    terminal[field] = []
+
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: terminal,
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: _terminal_attempt_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_global_send_attempt_marker",
+        lambda *args, **kwargs: _terminal_global_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "malformed terminal identity must block before broker recovery"
+        ),
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
+    assert result.complete is False
+    assert result.broker_connection_used is False
+
+
+def test_persisted_rejected_terminal_requires_immutable_callback_evidence(monkeypatch):
+    journal = _persisted_terminal_journal("REJECTED_RECONCILED")
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: _persisted_terminal_marker("REJECTED_RECONCILED"),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: _terminal_attempt_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_global_send_attempt_marker",
+        lambda *args, **kwargs: _terminal_global_marker(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "missing immutable rejection proof must block before broker recovery"
+        ),
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
+    assert result.complete is False
+    assert result.broker_connection_used is False
