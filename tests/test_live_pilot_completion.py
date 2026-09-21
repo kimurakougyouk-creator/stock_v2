@@ -28,6 +28,7 @@ def _journal(**overrides) -> dict:
         "nonce": NONCE,
         "state": "POSTFILL_PROVEN",
         "send_attempt_count": 1,
+        "send_attempt_recorded_at": _stamp(-1),
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
@@ -71,7 +72,7 @@ def _global_attempt_marker(**overrides) -> dict:
     data = {
         "schema_version": 2,
         "intent_id": INTENT,
-        "recorded_at": _stamp(),
+        "recorded_at": _stamp(-1),
         "automatic_resend_allowed": False,
     }
     data.update(overrides)
@@ -214,6 +215,26 @@ def test_exact_complete_buy_evidence_is_complete():
     assert result.final_position_quantity == 100.0
     assert result.final_open_order_count == 0
     assert result.endpoint_port == 4001
+
+
+def test_full_fill_completion_requires_exact_attempt_timestamp_chain():
+    stale_global = _evaluate(
+        global_send_attempt_marker=_global_attempt_marker(recorded_at=_stamp(-2))
+    )
+    assert stale_global.complete is False
+    assert any(
+        "timestamps" in item and "irreversible attempt" in item
+        for item in stale_global.blockers
+    )
+
+    mismatched_journal = _evaluate(
+        send_journal=_journal(send_attempt_recorded_at=_stamp(-2))
+    )
+    assert mismatched_journal.complete is False
+    assert any(
+        "timestamps" in item and "irreversible attempt" in item
+        for item in mismatched_journal.blockers
+    )
 
 
 def test_split_fill_completion_aggregates_exec_ids_vwap_and_commissions():
