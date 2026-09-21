@@ -170,6 +170,12 @@ def _positive_exact_int(value: object) -> int | None:
     return value
 
 
+def _nonnegative_exact_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    return value
+
+
 def _paper_safe(report: dict | None) -> bool:
     """Require an exact HEALTHY, schema-current, fully-explicit Paper evidence contract.
 
@@ -262,6 +268,7 @@ def _execution_identity(row: dict) -> tuple:
     return (
         _lenient_int(row.get("order_id")),
         _lenient_int(row.get("perm_id")),
+        _lenient_int(row.get("client_id")),
         str(row.get("symbol") or "").strip().upper(),
         str(row.get("sec_type") or "").strip().upper(),
         str(row.get("side") or "").strip().upper(),
@@ -345,11 +352,13 @@ def evaluate_live_pilot_completion(
 
     order_id: int | None = None
     perm_id: int | None = None
+    sender_client_id: int | None = None
     exec_id: str | None = None
     journal_ready = False
     if isinstance(send_journal, dict):
         order_id = _positive_exact_int(send_journal.get("order_id"))
         perm_id = _positive_exact_int(send_journal.get("perm_id"))
+        sender_client_id = _nonnegative_exact_int(send_journal.get("sender_client_id"))
         exec_id = str(send_journal.get("exec_id") or "").strip() or None
         journal_ready = bool(
             _is_exact_int(send_journal.get("schema_version"), _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION)
@@ -360,6 +369,7 @@ def evaluate_live_pilot_completion(
             and order_id > 0
             and perm_id is not None
             and perm_id > 0
+            and sender_client_id is not None
             and exec_id
             and send_journal.get("recovery_required") is False
             and send_journal.get("automatic_resend_allowed") is False
@@ -496,6 +506,7 @@ def evaluate_live_pilot_completion(
         expected_identity = (
             order_id,
             perm_id,
+            sender_client_id,
             expected_symbol,
             "STK",
             normalized_side,
@@ -507,9 +518,15 @@ def evaluate_live_pilot_completion(
                 continue
             row_order = _positive_exact_int(row.get("order_id"))
             row_perm = _positive_exact_int(row.get("perm_id"))
-            if row_order is None or row_perm is None:
+            row_client = _nonnegative_exact_int(row.get("client_id"))
+            if row_order is None or row_perm is None or row_client is None:
                 blockers.append(
-                    "final Live execution contains type-invalid or non-positive broker identity"
+                    "final Live execution contains type-invalid broker identity"
+                )
+                continue
+            if row_client != sender_client_id:
+                blockers.append(
+                    "final Live execution client_id does not match the durable sender client_id"
                 )
                 continue
             if row_order == order_id and row_perm != perm_id:
@@ -532,6 +549,7 @@ def evaluate_live_pilot_completion(
             if (
                 row_order == order_id
                 and row_perm == perm_id
+                and row_client == sender_client_id
                 and str(row.get("symbol") or "").strip().upper() == expected_symbol
                 and str(row.get("sec_type") or "").strip().upper() == "STK"
                 and str(row.get("side") or "").strip().upper() == normalized_side
