@@ -75,7 +75,9 @@ from ai_asset_platform.execution.live_pilot_one_shot_authorization import (
 )
 from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
+    REPORT_SCHEMA_VERSION as SEND_JOURNAL_SCHEMA_VERSION,
     global_send_attempt_recorded,
+    load_global_send_attempt_marker,
     load_send_attempt_marker,
     load_send_journal,
     mark_partial_reconciled,
@@ -208,6 +210,7 @@ def _collect_presend_readonly_evidence(
             base_currency="USD",
             quote_currency="JPY",
             confirmation=request.live_readonly_confirmation,
+            endpoint_port=authorized_endpoint_port,
         )
         persist_live_fx_evidence(fx)
 
@@ -594,6 +597,136 @@ def _definitive_rejection_reason(value: object) -> str | None:
     return None
 
 
+def _terminal_reconciliation_is_durably_proven(
+    request: LivePilotOperationalRequest,
+    journal: dict,
+) -> bool:
+    """Validate a persisted terminal outcome before surfacing COMPLETE.
+
+    The mutable summary journal is not sufficient by itself.  Require the
+    campaign-wide and per-intent irreversible markers plus the state-specific
+    payload written by the reconciliation transition.
+    """
+    state = journal.get("state")
+    if state not in {"PARTIAL_RECONCILED", "REJECTED_RECONCILED"}:
+        return False
+    if journal.get("schema_version") != SEND_JOURNAL_SCHEMA_VERSION:
+        return False
+    if (
+        not isinstance(journal.get("send_attempt_count"), int)
+        or isinstance(journal.get("send_attempt_count"), bool)
+        or journal.get("send_attempt_count") != 1
+        or journal.get("recovery_required") is not False
+        or journal.get("order_sent") is not False
+        or journal.get("live_order_sent") is not False
+    ):
+        return False
+    for flag in (
+        "automatic_resend_allowed",
+        "automatic_cancel_allowed",
+        "automatic_modify_allowed",
+        "automatic_flatten_allowed",
+        "automatic_close_allowed",
+    ):
+        if journal.get(flag) is not False:
+            return False
+
+    attempt = load_send_attempt_marker(
+        request.intent_id,
+        directory=DEFAULT_JOURNAL_DIR,
+    )
+    global_attempt = load_global_send_attempt_marker(directory=DEFAULT_JOURNAL_DIR)
+    if not isinstance(attempt, dict) or not isinstance(global_attempt, dict):
+        return False
+    if (
+        attempt.get("schema_version") != SEND_JOURNAL_SCHEMA_VERSION
+        or global_attempt.get("schema_version") != SEND_JOURNAL_SCHEMA_VERSION
+        or attempt.get("state") != "SEND_ATTEMPT_RECORDED"
+        or str(attempt.get("intent_id") or "") != request.intent_id
+        or str(global_attempt.get("intent_id") or "") != request.intent_id
+        or str(attempt.get("nonce") or "") != request.nonce
+        or attempt.get("automatic_resend_allowed") is not False
+        or global_attempt.get("automatic_resend_allowed") is not False
+    ):
+        return False
+    for flag in (
+        "automatic_cancel_allowed",
+        "automatic_modify_allowed",
+        "automatic_flatten_allowed",
+        "automatic_close_allowed",
+    ):
+        if attempt.get(flag) is not False:
+            return False
+
+    attempt_time = _parse_aware_timestamp(attempt.get("recorded_at"))
+    global_time = _parse_aware_timestamp(global_attempt.get("recorded_at"))
+    journal_attempt_time = _parse_aware_timestamp(
+        journal.get("send_attempt_recorded_at")
+    )
+    reconciled_time = _parse_aware_timestamp(journal.get("reconciled_at"))
+    if (
+        attempt_time is None
+        or global_time is None
+        or journal_attempt_time is None
+        or reconciled_time is None
+        or global_time > attempt_time
+        or journal_attempt_time != attempt_time
+        or reconciled_time < attempt_time
+    ):
+        return False
+
+    order_id = _positive_exact_int(journal.get("order_id"))
+    sender_client_id = _nonnegative_exact_int(journal.get("sender_client_id"))
+    if order_id is None or sender_client_id is None:
+        return False
+
+    expected_side = request.side.strip().upper()
+    authorized_quantity = Decimal(request.quantity)
+    final_position = _finite_decimal(journal.get("final_position_quantity"))
+    if final_position is None:
+        return False
+
+    if state == "PARTIAL_RECONCILED":
+        perm_id = _positive_exact_int(journal.get("perm_id"))
+        exec_ids = journal.get("exec_ids")
+        filled_quantity = _finite_decimal(journal.get("filled_quantity"))
+        commission_total = _finite_decimal(journal.get("commission_total"))
+        expected_currency = (
+            "JPY" if request.ticker.strip().upper() == "9432.T" else "USD"
+        )
+        if (
+            perm_id is None
+            or not isinstance(exec_ids, list)
+            or not exec_ids
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in exec_ids
+            )
+            or len(exec_ids) != len(set(exec_ids))
+            or filled_quantity is None
+            or filled_quantity <= 0
+            or filled_quantity >= authorized_quantity
+            or commission_total is None
+            or str(journal.get("commission_currency") or "").strip().upper()
+            != expected_currency
+        ):
+            return False
+        expected_final = (
+            filled_quantity
+            if expected_side == "BUY"
+            else authorized_quantity - filled_quantity
+        )
+        return final_position == expected_final
+
+    if journal.get("perm_id") is not None:
+        return False
+    rejection_reason = _definitive_rejection_reason(journal.get("rejection_reason"))
+    if rejection_reason is None:
+        return False
+    expected_final = Decimal("0") if expected_side == "BUY" else authorized_quantity
+    return final_position == expected_final
+
+
 def _promote_terminal_reconciliation_if_proven(
     request: LivePilotOperationalRequest,
 ) -> str | None:
@@ -866,13 +999,22 @@ def _reconcile_once(
         )
 
     terminal_state = journal.get("state") if isinstance(journal, dict) else None
-    if (
-        terminal_state in {"PARTIAL_RECONCILED", "REJECTED_RECONCILED"}
-        and journal.get("recovery_required") is False
-        and isinstance(journal.get("send_attempt_count"), int)
-        and not isinstance(journal.get("send_attempt_count"), bool)
-        and journal.get("send_attempt_count") == 1
-    ):
+    if terminal_state in {"PARTIAL_RECONCILED", "REJECTED_RECONCILED"}:
+        if not _terminal_reconciliation_is_durably_proven(request, journal):
+            return LivePilotOperationalResult(
+                status="BLOCKED_TERMINAL_EVIDENCE",
+                checked_at=_utc_now().isoformat(timespec="seconds"),
+                recovery_only=True,
+                preflight_ready=False,
+                send_status=send_status,
+                completion_status=terminal_state,
+                complete=False,
+                blockers=(
+                    "persisted terminal reconciliation evidence is incomplete or invalid",
+                ),
+                broker_connection_used=False,
+                order_transport_called=order_transport_called,
+            )
         return LivePilotOperationalResult(
             status=terminal_state,
             checked_at=_utc_now().isoformat(timespec="seconds"),
