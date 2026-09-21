@@ -803,8 +803,22 @@ def _terminal_reconciliation_is_durably_proven(
         )
         return final_position == expected_final
 
-    if terminal.get("perm_id") is not None:
-        return False
+    raw_terminal_perm = terminal.get("perm_id")
+    if raw_terminal_perm is None:
+        terminal_perm = None
+    else:
+        terminal_perm = _positive_exact_int(raw_terminal_perm)
+        if terminal_perm is None:
+            return False
+    raw_journal_perm = journal.get("perm_id")
+    if raw_journal_perm is None:
+        if terminal_perm is not None:
+            return False
+    else:
+        journal_perm = _positive_exact_int(raw_journal_perm)
+        if journal_perm is None or journal_perm != terminal_perm:
+            return False
+
     rejection_reason = _definitive_rejection_reason(
         terminal.get("rejection_reason")
     )
@@ -846,6 +860,7 @@ def _terminal_reconciliation_is_durably_proven(
         or rejection_evidence.get("endpoint_port") != endpoint_port
         or isinstance(rejection_evidence.get("endpoint_port"), bool)
         or _positive_exact_int(rejection_evidence.get("order_id")) != order_id
+        or rejection_evidence.get("perm_id") != terminal_perm
         or _nonnegative_exact_int(rejection_evidence.get("sender_client_id"))
         != sender_client_id
         or _definitive_rejection_reason(
