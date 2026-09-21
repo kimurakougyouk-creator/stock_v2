@@ -23,12 +23,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import math
 from pathlib import Path
 
 from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
     DEFAULT_REPORT_PATH as DEFAULT_LIVE_OPEN_ORDERS_REPORT,
+    REPORT_SCHEMA_VERSION as LIVE_OPEN_ORDERS_SCHEMA_VERSION,
     persist_live_all_open_orders,
     preview_ibkr_live_all_open_orders,
 )
@@ -39,6 +41,7 @@ from ai_asset_platform.brokers.ibkr_live_fx_evidence import (
 )
 from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
     DEFAULT_REPORT_PATH as DEFAULT_POSTFILL_REPORT,
+    REPORT_SCHEMA_VERSION as LIVE_POSTFILL_SCHEMA_VERSION,
     match_live_postfill,
     persist_live_postfill_snapshot,
     preview_ibkr_live_postfill_snapshot,
@@ -46,12 +49,19 @@ from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
 from ai_asset_platform.brokers.ibkr_live_readonly_account import (
     CONFIRMATION_VALUE as LIVE_READONLY_CONFIRMATION_VALUE,
     DEFAULT_REPORT_PATH as DEFAULT_LIVE_ACCOUNT_REPORT,
+    REPORT_SCHEMA_VERSION as LIVE_ACCOUNT_SCHEMA_VERSION,
     persist_live_readonly_account_snapshot,
     preview_ibkr_live_readonly_account_snapshot,
 )
 from ai_asset_platform.execution.live_pilot_completion import (
     DEFAULT_COMPLETION_REPORT,
+    DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
     DEFAULT_OPERATOR_ALERT,
+    _clean_live_report,
+    _fresh,
+    _paper_safe,
+    _parse_aware_timestamp,
+    _target_position_quantity,
     audit_live_pilot_completion,
     persist_live_pilot_completion,
 )
@@ -63,8 +73,11 @@ from ai_asset_platform.execution.live_pilot_same_run_preflight import (
 from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
     global_send_attempt_recorded,
+    load_send_attempt_marker,
     load_send_journal,
+    mark_partial_reconciled,
     mark_postfill_proven,
+    mark_rejected_reconciled,
 )
 from ai_asset_platform.execution.live_pilot_single_send import (
     LivePilotSendRequest,
