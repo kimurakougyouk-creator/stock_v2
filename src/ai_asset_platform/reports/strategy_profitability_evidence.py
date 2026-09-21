@@ -156,6 +156,14 @@ def _fill_fx_rate(record: dict, *, fill_currency: str, account_currency: str) ->
 
 
 def _commission_index(commission_report: dict) -> dict[str, tuple[Decimal, str]]:
+    if type(commission_report.get("schema_version")) is not int or commission_report.get("schema_version") != 1:
+        raise StrategyProfitabilityEvidenceError(
+            "commission evidence report schema_version is not the current exact integer"
+        )
+    if commission_report.get("connected") is not True:
+        raise StrategyProfitabilityEvidenceError(
+            "commission evidence report is not connected evidence"
+        )
     if commission_report.get("ready") is not True:
         raise StrategyProfitabilityEvidenceError(
             "commission evidence report is not ready"
@@ -163,6 +171,10 @@ def _commission_index(commission_report: dict) -> dict[str, tuple[Decimal, str]]
     if commission_report.get("order_sent") is not False:
         raise StrategyProfitabilityEvidenceError(
             "commission evidence report unexpectedly indicates an order send"
+        )
+    if commission_report.get("live_order_sent") is not False:
+        raise StrategyProfitabilityEvidenceError(
+            "commission evidence report unexpectedly indicates a Live order send"
         )
     rows = commission_report.get("commissions")
     if not isinstance(rows, list):
