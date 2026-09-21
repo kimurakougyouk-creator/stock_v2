@@ -398,6 +398,7 @@ def _net_realized_trades_with_commissions(
 
         sale_ratio = Decimal(shares) / Decimal(held)
         buy_contributions: list[dict] = []
+        allocated_buy_fee_from_sources = Decimal("0")
         for row in source_rows:
             remaining_before = row["remaining_shares"]
             allocated_shares = remaining_before * sale_ratio
@@ -408,6 +409,7 @@ def _net_realized_trades_with_commissions(
                 else Decimal("0")
             )
             allocated_commission = commission_per_remaining_share * allocated_shares
+            allocated_buy_fee_from_sources += allocated_commission
             buy_contributions.append(
                 {
                     "order_intent_id": row["order_intent_id"],
@@ -425,6 +427,11 @@ def _net_realized_trades_with_commissions(
                 source_commission_total - allocated_commission
             )
             row["remaining_shares"] = remaining_before - allocated_shares
+
+        if allocated_buy_fee_from_sources != allocated_buy_fee:
+            raise StrategyProfitabilityEvidenceError(
+                f"BUY commission provenance for {ticker} does not reconcile"
+            )
 
         net_pnl = gross_pnl - allocated_buy_fee - fee_account
         if not net_pnl.is_finite():
