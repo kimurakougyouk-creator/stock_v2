@@ -428,12 +428,19 @@ def mark_order_acknowledged(
     payload = load_send_journal(intent_id, directory=directory)
     if payload is None or payload.get("state") != "SEND_ATTEMPT_RECORDED":
         raise PermissionError("order acknowledgement is not valid in the current state")
-    if int(order_id) <= 0 or int(perm_id) <= 0:
-        raise ValueError("order_id and perm_id must be positive")
+    if (
+        not isinstance(order_id, int)
+        or isinstance(order_id, bool)
+        or order_id <= 0
+        or not isinstance(perm_id, int)
+        or isinstance(perm_id, bool)
+        or perm_id <= 0
+    ):
+        raise ValueError("order_id and perm_id must be positive exact ints")
     payload.update(
         state="ORDER_ACKNOWLEDGED",
-        order_id=int(order_id),
-        perm_id=int(perm_id),
+        order_id=order_id,
+        perm_id=perm_id,
         acknowledged_at=_now(now),
         recovery_required=True,
     )
@@ -485,16 +492,27 @@ def mark_postfill_proven(
     payload = load_send_journal(intent_id, directory=directory)
     if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("post-fill proof requires the single recorded send attempt")
-    if payload.get("state") not in {"ORDER_ACKNOWLEDGED", "UNKNOWN"}:
+    if payload.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
         raise PermissionError("post-fill proof is not valid in the current state")
     execution = _safe(exec_id, "exec_id")
-    if int(order_id) <= 0 or int(perm_id) <= 0:
-        raise ValueError("order_id and perm_id must be positive")
+    if (
+        not isinstance(order_id, int)
+        or isinstance(order_id, bool)
+        or order_id <= 0
+        or not isinstance(perm_id, int)
+        or isinstance(perm_id, bool)
+        or perm_id <= 0
+    ):
+        raise ValueError("order_id and perm_id must be positive exact ints")
     existing_order = payload.get("order_id")
     existing_perm = payload.get("perm_id")
-    if existing_order not in {None, int(order_id)} or existing_perm not in {
+    if existing_order not in {None, order_id} or existing_perm not in {
         None,
-        int(perm_id),
+        perm_id,
     }:
         raise PermissionError("post-fill broker identity conflicts with acknowledged order")
     payload.update(
