@@ -30,6 +30,7 @@ AUDITED_PATHS: tuple[str, ...] = (
     "pyproject.toml",
     "pytest.ini",
     ".github/workflows/pytest.yml",
+    "live_pilot_operational_once.sh",
 )
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REPORT_SCHEMA_VERSION = 1
