@@ -167,3 +167,16 @@ def test_tracked_edit_in_human_wrapper_fails_closed(tmp_path: Path):
     assert result.ready is False
     assert result.audited_paths_clean is False
     assert result.dirty_entries == (" M live_pilot_operational_once.sh",)
+
+
+def test_human_wrapper_checks_tracked_cleanliness_before_any_python_launch():
+    source = Path("live_pilot_operational_once.sh").read_text(encoding="utf-8")
+    cleanliness = source.index("git status --porcelain --untracked-files=no")
+    runtime_gate = source.index("bash scripts/ensure_exact_checkout_runtime.sh")
+    operational_python = source.index(
+        "python -P -m ai_asset_platform.execution.live_pilot_operational_entrypoint"
+    )
+
+    assert cleanliness < runtime_gate
+    assert cleanliness < operational_python
+    assert source.index('ACTUAL_SHA="$(git rev-parse HEAD)"') < runtime_gate
