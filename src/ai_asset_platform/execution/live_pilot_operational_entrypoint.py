@@ -314,7 +314,10 @@ def _nonnegative_exact_int(value: object) -> int | None:
 def _positive_finite_number(value: object) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
-    parsed = float(value)
+    try:
+        parsed = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
     if not math.isfinite(parsed) or parsed <= 0:
         return None
     return parsed
@@ -983,7 +986,13 @@ def _promote_terminal_reconciliation_if_proven(
     selected_rows = [
         row for row in validated_rows if row.get("order_id") == order_id
     ]
-    persisted_perm = _positive_exact_int(journal.get("perm_id"))
+    raw_persisted_perm = journal.get("perm_id")
+    if raw_persisted_perm is None:
+        persisted_perm = None
+    else:
+        persisted_perm = _positive_exact_int(raw_persisted_perm)
+        if persisted_perm is None:
+            return None
     if selected_rows:
         selected_perm_ids = {row.get("perm_id") for row in selected_rows}
         if len(selected_perm_ids) != 1:
@@ -1028,7 +1037,10 @@ def _promote_terminal_reconciliation_if_proven(
                 or not exec_id
             ):
                 return None
-            total_quantity += quantity
+            try:
+                total_quantity += quantity
+            except ArithmeticError:
+                return None
             exec_ids.append(exec_id)
 
         if len(exec_ids) != len(set(exec_ids)):
@@ -1051,7 +1063,10 @@ def _promote_terminal_reconciliation_if_proven(
             currency = str(commission_row.get("currency") or "").strip().upper()
             if value is None or currency != expected_currency:
                 return None
-            commission_total += value
+            try:
+                commission_total += value
+            except ArithmeticError:
+                return None
 
         final_position = _target_position_quantity(account, request.ticker)
         expected_final_position = (
