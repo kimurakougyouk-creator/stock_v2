@@ -521,7 +521,7 @@ def evaluate_live_pilot_completion(
             row_client = _nonnegative_exact_int(row.get("client_id"))
             if row_order is None or row_perm is None or row_client is None:
                 blockers.append(
-                    "final Live execution contains type-invalid broker identity"
+                    "final Live execution contains type-invalid or non-positive broker identity"
                 )
                 continue
             if row_client != sender_client_id:
