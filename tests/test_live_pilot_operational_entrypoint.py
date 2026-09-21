@@ -1806,6 +1806,13 @@ def test_recovery_collectors_use_durable_authorized_endpoint(monkeypatch):
         or SimpleNamespace(),
     )
     monkeypatch.setattr(subject, "persist_live_all_open_orders", lambda value: None)
+    monkeypatch.setattr(
+        subject,
+        "preview_ibkr_live_completed_orders",
+        lambda **kwargs: seen.append(("completed_orders", kwargs["endpoint_port"]))
+        or SimpleNamespace(),
+    )
+    monkeypatch.setattr(subject, "persist_live_completed_orders", lambda value: None)
 
     subject._collect_post_attempt_readonly_evidence(_request())
 
@@ -1813,6 +1820,7 @@ def test_recovery_collectors_use_durable_authorized_endpoint(monkeypatch):
         ("postfill", 7496),
         ("account", 7496),
         ("open_orders", 7496),
+        ("completed_orders", 7496),
     ]
 
 
@@ -1934,6 +1942,181 @@ def test_partial_reconciliation_decimal_overflow_fails_closed(monkeypatch):
     )
 
     assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
+
+
+def test_post_ack_cancelled_order_is_reconciled_from_completed_order_history(
+    monkeypatch,
+):
+    journal = _terminal_journal(
+        state="ORDER_ACKNOWLEDGED",
+        perm_id=880077,
+        unknown_reason=None,
+    )
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=[], position=0.0
+    )
+    completed = {
+        "schema_version": subject.LIVE_COMPLETED_ORDERS_SCHEMA_VERSION,
+        "ready": True,
+        "checked_at": "2026-09-21T12:39:30+00:00",
+        "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "raw_account_id_persisted": False,
+        "completed_order_count": 1,
+        "orders": [
+            {
+                "order_id": 77,
+                "perm_id": 880077,
+                "client_id": 681,
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "exchange": "TSEJ",
+                "action": "BUY",
+                "quantity": 100.0,
+                "order_type": "LMT",
+                "limit_price": 400.0,
+                "status": "Cancelled",
+                "completed_status": "Cancelled",
+                "completed_time": "20260921 12:39:20 UTC",
+                "order_ref": _request().intent_id,
+                "account_fingerprint": FINGERPRINT,
+            }
+        ],
+        "order_sent": False,
+        "cancel_sent": False,
+        "modify_sent": False,
+        "live_order_sent": False,
+    }
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_LIVE_COMPLETED_ORDERS_REPORT: completed,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: None,
+    )
+
+    persisted = {}
+
+    def fake_record(*args, **kwargs):
+        persisted.update(kwargs)
+        return {
+            "schema_version": subject.SEND_JOURNAL_SCHEMA_VERSION,
+            "intent_id": _request().intent_id,
+            "nonce": _request().nonce,
+            "ticker": "9432.T",
+            "side": "BUY",
+            "quantity": 100,
+            "limit_price": 400.0,
+            "estimated_notional_jpy": 40_000.0,
+            "account_fingerprint": FINGERPRINT,
+            "endpoint_port": 4001,
+            "order_id": 77,
+            "perm_id": 880077,
+            "sender_client_id": 681,
+            "send_attempt_recorded_at": "2026-09-21T12:39:00+00:00",
+            "rejection_recorded_at": "2026-09-21T12:39:30+00:00",
+            "rejection_reason": (
+                "broker completedOrder callback reported terminal status: Cancelled"
+            ),
+            "automatic_resend_allowed": False,
+            "automatic_cancel_allowed": False,
+            "automatic_modify_allowed": False,
+            "automatic_flatten_allowed": False,
+            "automatic_close_allowed": False,
+            "order_sent": False,
+            "live_order_sent": False,
+        }
+
+    monkeypatch.setattr(subject, "record_definitive_rejection_evidence", fake_record)
+    reconciled = []
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: reconciled.append(kwargs) or {},
+    )
+
+    result = subject._promote_terminal_reconciliation_if_proven(_request())
+
+    assert result == "REJECTED_RECONCILED"
+    assert persisted["perm_id"] == 880077
+    assert persisted["rejection_reason"].endswith("Cancelled")
+    assert reconciled[0]["perm_id"] == 880077
+
+
+def test_post_ack_completed_order_identity_mismatch_stays_unknown(monkeypatch):
+    journal = _terminal_journal(
+        state="ORDER_ACKNOWLEDGED",
+        perm_id=880077,
+        unknown_reason=None,
+    )
+    completed = {
+        "schema_version": subject.LIVE_COMPLETED_ORDERS_SCHEMA_VERSION,
+        "ready": True,
+        "checked_at": "2026-09-21T12:39:30+00:00",
+        "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "raw_account_id_persisted": False,
+        "completed_order_count": 1,
+        "orders": [
+            {
+                "order_id": 77,
+                "perm_id": 880077,
+                "client_id": 999,
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "exchange": "TSEJ",
+                "action": "BUY",
+                "quantity": 100.0,
+                "order_type": "LMT",
+                "limit_price": 400.0,
+                "status": "Cancelled",
+                "completed_status": "Cancelled",
+                "completed_time": "20260921 12:39:20 UTC",
+                "order_ref": _request().intent_id,
+                "account_fingerprint": FINGERPRINT,
+            }
+        ],
+        "order_sent": False,
+        "cancel_sent": False,
+        "modify_sent": False,
+        "live_order_sent": False,
+    }
+
+    assert (
+        subject._completed_order_rejection_if_proven(
+            _request(),
+            journal,
+            completed,
+            endpoint_port=4001,
+            order_id=77,
+            sender_client_id=681,
+            now=datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+        )
+        is None
+    )
 
 
 def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch):
