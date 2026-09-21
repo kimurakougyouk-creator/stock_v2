@@ -226,6 +226,78 @@ def _load_authorization(path: Path) -> dict:
     return payload
 
 
+def load_live_pilot_authorization_binding(
+    *,
+    nonce: str,
+    intent_id: str,
+    ticker: str,
+    side: str,
+    quantity: int,
+    limit_price: float,
+    estimated_notional_jpy: float,
+    account_fingerprint: str,
+    authorization_dir: Path = DEFAULT_AUTHORIZATION_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Read and validate one active authorization without consuming it.
+
+    The operational wrapper uses this only to bind pre-send read-only evidence
+    collection to the exact Live endpoint the operator already authorized.
+    This function never connects to a broker and never creates a consumed
+    marker or any permission to send.
+    """
+    current = _aware_utc(now)
+    auth_path = _authorization_path(authorization_dir, nonce)
+    consumed_path = _consumed_path(authorization_dir, nonce)
+    if consumed_path.exists():
+        raise PermissionError("authorization nonce has already been consumed")
+    if not auth_path.exists():
+        raise PermissionError("authorization nonce is missing")
+
+    payload = _load_authorization(auth_path)
+    try:
+        expires = datetime.fromisoformat(str(payload.get("expires_at") or ""))
+    except ValueError as exc:
+        raise PermissionError("authorization expiry is invalid") from exc
+    if expires.tzinfo is None or expires.utcoffset() is None:
+        raise PermissionError("authorization expiry is not timezone-aware")
+    if current > expires.astimezone(timezone.utc):
+        raise PermissionError("authorization nonce has expired")
+
+    expected = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "status": "AUTHORIZED_ONCE",
+        "nonce": str(nonce),
+        "intent_id": _normalized_text(intent_id, name="intent_id"),
+        "ticker": _normalized_text(ticker, name="ticker").upper(),
+        "side": _normalized_text(side, name="side").upper(),
+        "quantity": int(quantity),
+        "limit_price": _positive_finite(limit_price, name="limit_price"),
+        "estimated_notional_jpy": _positive_finite(
+            estimated_notional_jpy, name="estimated_notional_jpy"
+        ),
+        "account_fingerprint": _normalized_text(
+            account_fingerprint, name="account_fingerprint"
+        ).lower(),
+        "raw_account_id_persisted": False,
+        "broker_connection_used": False,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            raise PermissionError(f"authorization binding mismatch: {key}")
+
+    endpoint_port = payload.get("endpoint_port")
+    if (
+        not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in _VALID_LIVE_ENDPOINT_PORTS
+    ):
+        raise PermissionError("authorization endpoint binding is invalid")
+    return dict(payload)
+
+
 def consume_live_pilot_authorization(
     *,
     nonce: str,
