@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -273,3 +275,170 @@ def test_operational_result_persists_no_future_send_authorization(tmp_path):
     assert payload["automatic_modify_allowed"] is False
     assert payload["automatic_flatten_allowed"] is False
     assert payload["automatic_close_allowed"] is False
+
+
+def _postfill_payload() -> dict:
+    return {
+        "attempted": True,
+        "connected": True,
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "executions": [],
+        "commissions": [],
+        "blocked_reason": None,
+        "errors": [],
+    }
+
+
+def test_postfill_promotion_requires_shared_matcher_ready(monkeypatch):
+    journal = {
+        "state": "ORDER_ACKNOWLEDGED",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: _postfill_payload()
+        if path == subject.DEFAULT_POSTFILL_REPORT
+        else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: SimpleNamespace(ready=False, executions=()),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "journal must not advance when shared post-fill matching is not ready"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+def test_postfill_promotion_uses_proven_broker_identity_once(monkeypatch):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: _postfill_payload()
+        if path == subject.DEFAULT_POSTFILL_REPORT
+        else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: SimpleNamespace(
+            ready=True,
+            executions=(SimpleNamespace(exec_id="0001.test.01"),),
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == (_request().intent_id,)
+    assert kwargs["exec_id"] == "0001.test.01"
+    assert kwargs["order_id"] == 77
+    assert kwargs["perm_id"] == 880077
+
+
+def test_human_wrapper_has_valid_bash_syntax():
+    root = Path(__file__).resolve().parents[1]
+    script = root / "live_pilot_operational_once.sh"
+    completed = subprocess.run(
+        ["bash", "-n", str(script)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_human_wrapper_passes_empty_final_confirmation_by_default(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "live_pilot_operational_once.sh"
+    fake_root = tmp_path / "runtime"
+    (fake_root / ".venv" / "bin").mkdir(parents=True)
+    (fake_root / ".venv" / "bin" / "activate").write_text("", encoding="utf-8")
+    (fake_root / "scripts").mkdir()
+    ensure = fake_root / "scripts" / "ensure_exact_checkout_runtime.sh"
+    ensure.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    ensure.chmod(0o755)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"rev-parse\" && \"$2\" == \"HEAD\" ]]; then\n"
+        "  printf '%s\\n' \"$LIVE_PILOT_EXPECTED_COMMIT_SHA\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+
+    captured = tmp_path / "python-args.txt"
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$@\" > \"$WRAPPER_CAPTURE\"\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+            "AI_ASSET_PLATFORM_ROOT": str(fake_root),
+            "LIVE_PILOT_INTENT_ID": _request().intent_id,
+            "LIVE_PILOT_TICKER": "9432.T",
+            "LIVE_PILOT_SIDE": "BUY",
+            "LIVE_PILOT_QUANTITY": "100",
+            "LIVE_PILOT_LIMIT_PRICE": "400",
+            "LIVE_PILOT_NOTIONAL_JPY": "40000",
+            "LIVE_PILOT_NONCE": "nonce-test",
+            "LIVE_PILOT_ACCOUNT_FINGERPRINT": FINGERPRINT,
+            "LIVE_PILOT_EXPECTED_COMMIT_SHA": SHA,
+            "WRAPPER_CAPTURE": str(captured),
+        }
+    )
+    env.pop("LIVE_PILOT_FINAL_CONFIRMATION", None)
+
+    completed = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    args = captured.read_text(encoding="utf-8").splitlines()
+    flag_index = args.index("--final-confirmation")
+    assert args[flag_index + 1] == ""
+    assert "--live-readonly-confirmation" in args
+    readonly_index = args.index("--live-readonly-confirmation")
+    assert args[readonly_index + 1] == "READ_LIVE_ACCOUNT_ONLY"
