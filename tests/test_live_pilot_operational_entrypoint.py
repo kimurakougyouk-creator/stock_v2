@@ -585,3 +585,211 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
         lambda path: conflicting if path == subject.DEFAULT_POSTFILL_REPORT else None,
     )
     subject._promote_postfill_if_proven(_request())
+
+
+@pytest.mark.parametrize("bad_order_id", ["77", 77.0, True, 77.5])
+def test_recovery_rejects_non_exact_persisted_order_identity(monkeypatch, bad_order_id):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": bad_order_id,
+        "perm_id": None,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: pytest.fail("postfill must not be read for malformed persisted order id"),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail("malformed identity must never be promoted"),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+@pytest.mark.parametrize("bad_perm_id", ["880077", 880077.0, True, 880077.5])
+def test_recovery_rejects_non_exact_persisted_perm_identity(monkeypatch, bad_perm_id):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": bad_perm_id,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: _postfill_payload(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail("matcher must not run for malformed perm id"),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail("malformed identity must never be promoted"),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+def test_send_attempt_recorded_crash_state_can_reconcile_without_sender(monkeypatch):
+    journal = {
+        "state": "SEND_ATTEMPT_RECORDED",
+        "order_id": 77,
+        "perm_id": None,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "0001.crash.01",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    payload["commissions"] = [
+        {
+            "exec_id": "0001.crash.01",
+            "commission": 80.0,
+            "currency": "JPY",
+            "realized_pnl": None,
+        }
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: SimpleNamespace(
+            ready=True,
+            executions=(SimpleNamespace(exec_id="0001.crash.01"),),
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+    assert len(calls) == 1
+    assert calls[0][1]["order_id"] == 77
+    assert calls[0][1]["perm_id"] == 880077
+
+
+def test_recovery_rejects_perm_id_reused_by_another_order(monkeypatch):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": None,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "good",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+        {
+            "exec_id": "conflict",
+            "order_id": 78,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:01+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail(
+            "shared matcher must be unreachable for contradictory permId evidence"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "contradictory broker identity must not be promoted"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+def test_recovery_rejects_non_exact_execution_identity(monkeypatch):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": None,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "bad",
+            "order_id": "77",
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail("matcher must not run on type-invalid identity"),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail("type-invalid identity must not be promoted"),
+    )
+
+    subject._promote_postfill_if_proven(_request())
