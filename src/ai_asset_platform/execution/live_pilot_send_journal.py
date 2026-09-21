@@ -625,28 +625,63 @@ def _terminal_marker_base(
     reconciled_at: str,
 ) -> dict:
     sender_client_id = payload.get("sender_client_id")
+    ticker = str(payload.get("authorized_ticker") or "").strip().upper()
+    side = str(payload.get("authorized_side") or "").strip().upper()
+    quantity = payload.get("authorized_quantity")
+    limit_price = payload.get("authorized_limit_price")
+    notional = payload.get("authorized_estimated_notional_jpy")
+    fingerprint = str(
+        payload.get("authorized_account_fingerprint") or ""
+    ).strip().lower()
+    endpoint_port = payload.get("authorized_endpoint_port")
     if (
         not isinstance(sender_client_id, int)
         or isinstance(sender_client_id, bool)
         or sender_client_id < 0
     ):
         raise PermissionError("terminal reconciliation sender client_id is invalid")
+    if not ticker or side not in {"BUY", "SELL"}:
+        raise PermissionError("terminal reconciliation authorization binding is invalid")
+    if (
+        not isinstance(quantity, int)
+        or isinstance(quantity, bool)
+        or quantity <= 0
+    ):
+        raise PermissionError("terminal reconciliation quantity binding is invalid")
+    for name, value in (("limit_price", limit_price), ("notional", notional)):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+            or value != value
+            or value in {float("inf"), float("-inf")}
+        ):
+            raise PermissionError(
+                f"terminal reconciliation {name} binding is invalid"
+            )
+    if (
+        len(fingerprint) != 64
+        or any(ch not in "0123456789abcdef" for ch in fingerprint)
+    ):
+        raise PermissionError("terminal reconciliation account binding is invalid")
+    if (
+        not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in {4001, 7496}
+    ):
+        raise PermissionError("terminal reconciliation endpoint binding is invalid")
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "intent_id": intent_id,
         "nonce": str(payload.get("nonce") or ""),
         "state": state,
-        "authorized_ticker": payload.get("authorized_ticker"),
-        "authorized_side": payload.get("authorized_side"),
-        "authorized_quantity": payload.get("authorized_quantity"),
-        "authorized_limit_price": payload.get("authorized_limit_price"),
-        "authorized_estimated_notional_jpy": payload.get(
-            "authorized_estimated_notional_jpy"
-        ),
-        "authorized_account_fingerprint": payload.get(
-            "authorized_account_fingerprint"
-        ),
-        "authorized_endpoint_port": payload.get("authorized_endpoint_port"),
+        "authorized_ticker": ticker,
+        "authorized_side": side,
+        "authorized_quantity": quantity,
+        "authorized_limit_price": float(limit_price),
+        "authorized_estimated_notional_jpy": float(notional),
+        "authorized_account_fingerprint": fingerprint,
+        "authorized_endpoint_port": endpoint_port,
         "send_attempt_count": 1,
         "send_attempt_recorded_at": recorded_at,
         "terminal_recorded_at": reconciled_at,
