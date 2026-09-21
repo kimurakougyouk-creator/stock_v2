@@ -2536,3 +2536,29 @@ def test_persisted_rejected_terminal_requires_immutable_callback_evidence(monkey
     assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
     assert result.complete is False
     assert result.broker_connection_used is False
+
+
+@pytest.mark.parametrize("field,value", [("sender_client_id", []), ("authorized_endpoint_port", {})])
+def test_malformed_nonterminal_recovery_binding_returns_blocked_without_broker_io(
+    monkeypatch, field, value
+):
+    journal = _terminal_journal()
+    journal[field] = value
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: None,
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
+    assert result.complete is False
+    assert result.broker_connection_used is False
+    assert result.order_transport_called is False
+    assert any("recovery broker identity is invalid" in item for item in result.blockers)
