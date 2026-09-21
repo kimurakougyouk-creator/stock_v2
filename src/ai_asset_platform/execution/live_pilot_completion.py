@@ -164,6 +164,12 @@ def _is_exact_zero_int(value: object) -> bool:
     return _is_exact_int(value, 0)
 
 
+def _positive_exact_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
 def _paper_safe(report: dict | None) -> bool:
     """Require an exact HEALTHY, schema-current, fully-explicit Paper evidence contract.
 
@@ -342,11 +348,8 @@ def evaluate_live_pilot_completion(
     exec_id: str | None = None
     journal_ready = False
     if isinstance(send_journal, dict):
-        try:
-            order_id = int(send_journal.get("order_id"))
-            perm_id = int(send_journal.get("perm_id"))
-        except (TypeError, ValueError):
-            order_id = perm_id = None
+        order_id = _positive_exact_int(send_journal.get("order_id"))
+        perm_id = _positive_exact_int(send_journal.get("perm_id"))
         exec_id = str(send_journal.get("exec_id") or "").strip() or None
         journal_ready = bool(
             _is_exact_int(send_journal.get("schema_version"), _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION)
@@ -500,11 +503,14 @@ def evaluate_live_pilot_completion(
         )
         for row in executions:
             if not isinstance(row, dict):
+                blockers.append("final Live executions contain a non-object row")
                 continue
-            try:
-                row_order = int(row.get("order_id"))
-                row_perm = int(row.get("perm_id"))
-            except (TypeError, ValueError):
+            row_order = _positive_exact_int(row.get("order_id"))
+            row_perm = _positive_exact_int(row.get("perm_id"))
+            if row_order is None or row_perm is None:
+                blockers.append(
+                    "final Live execution contains type-invalid or non-positive broker identity"
+                )
                 continue
             if (
                 row_order == order_id
