@@ -249,6 +249,10 @@ def _evaluate_and_persist_preflight(
     return readiness_payload, preflight
 
 
+class _RecoveryEvidenceBindingError(PermissionError):
+    """Persisted recovery identity is invalid before any broker collection."""
+
+
 def _collect_post_attempt_readonly_evidence(
     request: LivePilotOperationalRequest,
 ) -> None:
@@ -264,13 +268,17 @@ def _collect_post_attempt_readonly_evidence(
         or isinstance(sender_client_id, bool)
         or sender_client_id < 0
     ):
-        raise PermissionError("durable sender client_id is missing or invalid")
+        raise _RecoveryEvidenceBindingError(
+            "durable sender client_id is missing or invalid"
+        )
     if (
         not isinstance(authorized_endpoint_port, int)
         or isinstance(authorized_endpoint_port, bool)
         or authorized_endpoint_port not in {4001, 7496}
     ):
-        raise PermissionError("durable authorized Live endpoint is missing or invalid")
+        raise _RecoveryEvidenceBindingError(
+            "durable authorized Live endpoint is missing or invalid"
+        )
     postfill = preview_ibkr_live_postfill_snapshot(
         confirmation=request.live_readonly_confirmation,
         expected_client_id=sender_client_id,
@@ -1235,7 +1243,22 @@ def _reconcile_once(
             order_transport_called=order_transport_called,
         )
 
-    _collect_post_attempt_readonly_evidence(request)
+    try:
+        _collect_post_attempt_readonly_evidence(request)
+    except _RecoveryEvidenceBindingError as exc:
+        return LivePilotOperationalResult(
+            status="BLOCKED_TERMINAL_EVIDENCE",
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=True,
+            preflight_ready=False,
+            send_status=send_status,
+            completion_status=None,
+            complete=False,
+            blockers=(f"recovery broker identity is invalid: {exc}",),
+            broker_connection_used=False,
+            order_transport_called=order_transport_called,
+        )
+
     _promote_postfill_if_proven(request)
     try:
         terminal_status = _promote_terminal_reconciliation_if_proven(request)
