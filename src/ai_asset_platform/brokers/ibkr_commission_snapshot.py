@@ -364,6 +364,15 @@ def _load_prior_latest_snapshot_for_ledger(
         raise ValueError("existing commission latest report safety contract is invalid")
     if payload.get("ready") is not True:
         return None
+    if payload.get("connected") is not True:
+        raise ValueError("existing commission latest report is not connected Paper evidence")
+    if payload.get("broker_connection_used") is not True:
+        raise ValueError("existing commission latest report lacks broker collector provenance")
+    endpoint_port = payload.get("endpoint_port")
+    if type(endpoint_port) is not int or endpoint_port not in {4002, 7497}:
+        raise ValueError("existing commission latest report is not from an approved Paper endpoint")
+    if payload.get("live_trading") != "PROHIBITED":
+        raise ValueError("existing commission latest report lacks Paper-only Live prohibition")
     rows = payload.get("commissions")
     if not isinstance(rows, list):
         raise ValueError("existing commission latest report commissions must be a list")
