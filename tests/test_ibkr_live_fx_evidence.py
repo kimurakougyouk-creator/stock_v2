@@ -101,6 +101,100 @@ def test_live_market_data_is_preferred_over_account_fallback(monkeypatch):
     assert result.endpoint_port == 4001
 
 
+def test_authorized_endpoint_is_forwarded_to_market_and_account_fallback(monkeypatch):
+    market_ports = []
+    account_ports = []
+
+    def market(**kwargs):
+        market_ports.append(kwargs["endpoint_port"])
+        return IbkrFxSnapshotResult(
+            connected=False,
+            endpoint_port=None,
+            base_currency="USD",
+            quote_currency="JPY",
+            exchange="IDEALPRO",
+            bid=None,
+            ask=None,
+            rate=None,
+            source="NO_DATA",
+            order_sent=False,
+            errors=("no quote",),
+        )
+
+    def account(**kwargs):
+        account_ports.append(kwargs["endpoint_port"])
+        return IbkrFxSnapshotResult(
+            connected=True,
+            endpoint_port=7496,
+            base_currency="USD",
+            quote_currency="JPY",
+            exchange="ACCOUNT",
+            bid=None,
+            ask=None,
+            rate=149.8,
+            source="LIVE_ACCOUNT_EXCHANGE_RATE",
+            order_sent=False,
+            errors=(),
+        )
+
+    monkeypatch.setattr(module, "_request_live_market_snapshot", market)
+    monkeypatch.setattr(module, "_request_live_account_fx", account)
+
+    result = module.resolve_ibkr_live_fx_evidence(
+        base_currency="USD",
+        quote_currency="JPY",
+        confirmation=module.CONFIRMATION_VALUE,
+        endpoint_port=7496,
+    )
+
+    assert market_ports == [7496, 7496, 7496]
+    assert account_ports == [7496]
+    assert result.ready is True
+    assert result.endpoint_port == 7496
+
+
+def test_account_fx_snapshot_uses_only_authorized_endpoint(monkeypatch):
+    seen = []
+
+    monkeypatch.setattr(
+        module,
+        "preview_ibkr_live_readonly_account_snapshot",
+        lambda **kwargs: seen.append(("account", kwargs["endpoint_port"]))
+        or SimpleNamespace(
+            ready=False,
+            connected=False,
+            endpoint_port=None,
+            base_currency=None,
+            errors=("stop after pinned account snapshot",),
+        ),
+    )
+
+    result = module._request_live_account_fx(
+        base_currency="USD",
+        quote_currency="JPY",
+        timeout=1.0,
+        confirmation=module.CONFIRMATION_VALUE,
+        endpoint_port=7496,
+    )
+
+    assert seen == [("account", 7496)]
+    assert result.ready is False
+
+
+def test_invalid_explicit_live_endpoint_is_rejected():
+    try:
+        module.resolve_ibkr_live_fx_evidence(
+            base_currency="USD",
+            quote_currency="JPY",
+            confirmation=module.CONFIRMATION_VALUE,
+            endpoint_port=4002,
+        )
+    except ValueError as exc:
+        assert "audited Live endpoint" in str(exc)
+    else:
+        raise AssertionError("Paper endpoint must never be accepted for Live FX evidence")
+
+
 def test_missing_market_data_uses_live_account_exchange_rate(monkeypatch):
     monkeypatch.setattr(
         module,
