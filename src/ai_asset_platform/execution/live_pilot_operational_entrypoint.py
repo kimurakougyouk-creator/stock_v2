@@ -306,6 +306,16 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
         row_order_id = _positive_exact_int(raw_order_id)
         row_perm_id = _positive_exact_int(raw_perm_id)
 
+        # Broker execution identity is a safety boundary. Any type-invalid or
+        # non-positive order_id/perm_id anywhere in the read-only execution
+        # evidence makes the whole reconciliation ambiguous and therefore
+        # fails closed, even when the malformed row would otherwise be
+        # unrelated to the selected pair. This deliberately avoids trying to
+        # enumerate every numeric string/float alias such as "+77",
+        # "880077.0", scientific notation, or booleans.
+        if row_order_id is None or row_perm_id is None:
+            return
+
         # Treat numeric-equivalent but non-exact representations as claims on
         # the selected broker identity too. For example, "880077" or
         # 880077.0 must not evade the reverse-identity conflict check merely
