@@ -130,6 +130,376 @@ def test_matching_complete_exec_set_is_ready():
     assert [row.exec_id for row in result.commissions] == ["exec-2", "exec-1"]
 
 
+def test_commission_ledger_preserves_older_exec_ids_across_new_snapshots(tmp_path):
+    ledger = tmp_path / "commission_ledger.json"
+
+    first = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("old-exec", commission=1.25),),
+        order_sent=False,
+    )
+    second = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("new-exec", commission=0.75),),
+        order_sent=False,
+    )
+
+    module.persist_commission_ledger(first, ledger_path=ledger)
+    module.persist_commission_ledger(second, ledger_path=ledger)
+
+    payload = __import__("json").loads(ledger.read_text(encoding="utf-8"))
+    assert payload["paper_only"] is True
+    assert payload["order_sent"] is False
+    assert payload["live_order_sent"] is False
+    assert payload["commission_count"] == 2
+    assert [row["exec_id"] for row in payload["commissions"]] == [
+        "new-exec",
+        "old-exec",
+    ]
+
+
+def test_commission_ledger_conflicting_exec_id_fails_closed(tmp_path):
+    ledger = tmp_path / "commission_ledger.json"
+    first = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("exec-1", commission=1.25),),
+        order_sent=False,
+    )
+    conflicting = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("exec-1", commission=9.99),),
+        order_sent=False,
+    )
+
+    module.persist_commission_ledger(first, ledger_path=ledger)
+
+    import pytest
+    with pytest.raises(ValueError, match="conflict"):
+        module.persist_commission_ledger(conflicting, ledger_path=ledger)
+
+    payload = __import__("json").loads(ledger.read_text(encoding="utf-8"))
+    assert payload["commission_count"] == 1
+    assert payload["commissions"][0]["commission"] == 1.25
+
+
+def test_persist_snapshot_updates_latest_and_durable_ledger(tmp_path):
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    snapshot = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("exec-1"),),
+        order_sent=False,
+    )
+
+    module.persist_commission_snapshot(
+        snapshot,
+        report_path=latest,
+        ledger_path=ledger,
+    )
+
+    assert latest.exists()
+    assert ledger.exists()
+
+
+def test_first_ledger_write_migrates_prior_latest_before_replacement(tmp_path):
+    import json
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": True,
+                "endpoint_port": 4002,
+                "ready": True,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "old-exec",
+                        "commission": 1.25,
+                        "currency": "USD",
+                        "realized_pnl": 10.0,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "duplicate_conflicts": [],
+                "errors": [],
+                "broker_connection_used": True,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    current = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("new-exec", commission=0.75),),
+        order_sent=False,
+    )
+
+    module.persist_commission_snapshot(
+        current,
+        report_path=latest,
+        ledger_path=ledger,
+    )
+
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert [row["exec_id"] for row in payload["commissions"]] == [
+        "new-exec",
+        "old-exec",
+    ]
+
+
+def test_failed_refresh_still_migrates_prior_latest_to_ledger(tmp_path):
+    import json
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": True,
+                "endpoint_port": 4002,
+                "ready": True,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "old-exec",
+                        "commission": 1.25,
+                        "currency": "USD",
+                        "realized_pnl": 10.0,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "duplicate_conflicts": [],
+                "errors": [],
+                "broker_connection_used": True,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failed = module.IbkrPaperCommissionSnapshot(
+        connected=False,
+        endpoint_port=None,
+        commissions=(),
+        order_sent=False,
+        errors=("connection failed",),
+    )
+
+    module.persist_commission_snapshot(
+        failed,
+        report_path=latest,
+        ledger_path=ledger,
+    )
+
+    ledger_payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert ledger_payload["commission_count"] == 1
+    assert ledger_payload["commissions"][0]["exec_id"] == "old-exec"
+
+
+def test_successful_refresh_recovers_after_prior_unready_latest(tmp_path):
+    import json
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": False,
+                "endpoint_port": None,
+                "ready": False,
+                "commission_count": 0,
+                "commissions": [],
+                "duplicate_conflicts": [],
+                "errors": ["temporary connection failure"],
+                "broker_connection_used": True,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    recovered = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("exec-recovered", commission=0.5),),
+        order_sent=False,
+    )
+
+    module.persist_commission_snapshot(
+        recovered,
+        report_path=latest,
+        ledger_path=ledger,
+    )
+
+    ledger_payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert ledger_payload["commission_count"] == 1
+    assert ledger_payload["commissions"][0]["exec_id"] == "exec-recovered"
+    latest_payload = json.loads(latest.read_text(encoding="utf-8"))
+    assert latest_payload["ready"] is True
+
+
+def test_existing_ledger_without_explicit_paper_only_is_rejected(tmp_path):
+    import json
+    import pytest
+
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_only": False,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "unverified-exec",
+                        "commission": 1.0,
+                        "currency": "USD",
+                        "realized_pnl": None,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("paper-exec", commission=0.5),),
+        order_sent=False,
+    )
+
+    with pytest.raises(ValueError, match="Paper-only"):
+        module.persist_commission_ledger(snapshot, ledger_path=ledger)
+
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert payload["paper_only"] is False
+    assert payload["commissions"][0]["exec_id"] == "unverified-exec"
+
+
+def test_latest_snapshot_from_live_endpoint_is_rejected_before_ledger_migration(tmp_path):
+    import json
+    import pytest
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": True,
+                "endpoint_port": 4001,
+                "ready": True,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "live-exec",
+                        "commission": 1.0,
+                        "currency": "USD",
+                        "realized_pnl": None,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "duplicate_conflicts": [],
+                "errors": [],
+                "broker_connection_used": True,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper_snapshot = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("paper-exec", commission=0.5),),
+        order_sent=False,
+    )
+
+    with pytest.raises(ValueError, match="Paper endpoint"):
+        module.persist_commission_snapshot(
+            paper_snapshot,
+            report_path=latest,
+            ledger_path=ledger,
+        )
+
+    assert not ledger.exists()
+
+
+def test_latest_snapshot_without_collector_provenance_is_rejected(tmp_path):
+    import json
+    import pytest
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": True,
+                "endpoint_port": 4002,
+                "ready": True,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "unknown-exec",
+                        "commission": 1.0,
+                        "currency": "USD",
+                        "realized_pnl": None,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "duplicate_conflicts": [],
+                "errors": [],
+                "broker_connection_used": False,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper_snapshot = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("paper-exec", commission=0.5),),
+        order_sent=False,
+    )
+
+    with pytest.raises(ValueError, match="collector provenance"):
+        module.persist_commission_snapshot(
+            paper_snapshot,
+            report_path=latest,
+            ledger_path=ledger,
+        )
+
+    assert not ledger.exists()
+
+
 def test_module_is_read_only_and_contains_no_order_mutation_api():
     source = Path(
         "src/ai_asset_platform/brokers/ibkr_commission_snapshot.py"

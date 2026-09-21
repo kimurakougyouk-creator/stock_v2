@@ -39,6 +39,7 @@ def record_confirmed_fill(
     order_log_path: Path,
     fx_to_account_rate: float | None = None,
     broker_exec_ids: Iterable[object] | None = None,
+    broker_exec_fills: Iterable[object] | None = None,
     broker_order_id: int | None = None,
 ) -> dict[str, Any]:
     normalized_side = str(side).upper()
@@ -67,6 +68,22 @@ def record_confirmed_fill(
             raise ValueError("fx_to_account_rate must be positive when provided")
 
     exec_ids = _normalized_exec_ids(broker_exec_ids)
+    exec_fills: list[dict[str, Any]] = []
+    seen_exec_fill_ids: set[str] = set()
+    for raw_fill in list(broker_exec_fills or []):
+        if not isinstance(raw_fill, dict):
+            continue
+        exec_id = str(raw_fill.get("exec_id", "")).strip()
+        if not exec_id or exec_id in seen_exec_fill_ids:
+            continue
+        try:
+            exec_shares = float(raw_fill.get("shares"))
+        except (TypeError, ValueError):
+            continue
+        if exec_shares <= 0:
+            continue
+        seen_exec_fill_ids.add(exec_id)
+        exec_fills.append({"exec_id": exec_id, "shares": exec_shares})
     normalized_order_id: int | None = None
     if broker_order_id is not None:
         normalized_order_id = int(broker_order_id)
@@ -101,6 +118,8 @@ def record_confirmed_fill(
         record["fx_to_account_rate"] = normalized_fx
     if exec_ids:
         record["broker_exec_ids"] = exec_ids
+    if exec_fills:
+        record["broker_exec_fills"] = exec_fills
     if normalized_order_id is not None:
         record["broker_order_id"] = normalized_order_id
 

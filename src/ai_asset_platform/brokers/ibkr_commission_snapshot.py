@@ -24,7 +24,9 @@ from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_
 
 
 DEFAULT_REPORT_PATH = Path("results/ibkr_paper_commission_evidence_latest.json")
+DEFAULT_LEDGER_PATH = Path("results/ibkr_paper_commission_evidence_ledger.json")
 REPORT_SCHEMA_VERSION = 1
+LEDGER_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -263,11 +265,175 @@ def match_commissions_to_exec_ids(
     )
 
 
+
+def _load_commission_ledger(path: Path) -> dict[str, IbkrCommissionEvidence]:
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != LEDGER_SCHEMA_VERSION:
+        raise ValueError("commission ledger schema is invalid")
+    if payload.get("paper_only") is not True:
+        raise ValueError("commission ledger is not explicitly Paper-only")
+    if payload.get("order_sent") is not False or payload.get("live_order_sent") is not False:
+        raise ValueError("commission ledger safety contract is invalid")
+    rows = payload.get("commissions")
+    if not isinstance(rows, list):
+        raise ValueError("commission ledger commissions must be a list")
+
+    result: dict[str, IbkrCommissionEvidence] = {}
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"commission ledger row #{index} is invalid")
+        try:
+            evidence = IbkrCommissionEvidence(
+                exec_id=str(row["exec_id"]).strip(),
+                commission=float(row["commission"]),
+                currency=str(row["currency"]).strip().upper(),
+                realized_pnl=_finite_or_none(row.get("realized_pnl")),
+                yield_value=_finite_or_none(row.get("yield_value")),
+                yield_redemption_date=(
+                    int(row["yield_redemption_date"])
+                    if row.get("yield_redemption_date") not in (None, "")
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"commission ledger row #{index} is malformed") from exc
+        if not evidence.exec_id:
+            raise ValueError(f"commission ledger row #{index} is missing exec_id")
+        if not math.isfinite(evidence.commission):
+            raise ValueError(f"commission ledger row #{index} has invalid commission")
+        if len(evidence.currency) != 3 or not evidence.currency.isalpha():
+            raise ValueError(f"commission ledger row #{index} has invalid currency")
+        previous = result.get(evidence.exec_id)
+        if previous is not None and previous != evidence:
+            raise ValueError(
+                f"commission ledger has conflicting rows for exec_id={evidence.exec_id}"
+            )
+        result[evidence.exec_id] = evidence
+    return result
+
+
+def persist_commission_ledger(
+    snapshot: IbkrPaperCommissionSnapshot,
+    *,
+    ledger_path: Path = DEFAULT_LEDGER_PATH,
+) -> None:
+    if not snapshot.ready:
+        raise ValueError("refusing to persist an unready commission snapshot to ledger")
+
+    existing = _load_commission_ledger(ledger_path)
+    merged = dict(existing)
+    for row in snapshot.commissions:
+        previous = merged.get(row.exec_id)
+        if previous is not None and previous != row:
+            raise ValueError(
+                f"commission ledger conflict for exec_id={row.exec_id}"
+            )
+        merged[row.exec_id] = row
+
+    payload = {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "paper_only": True,
+        "commission_count": len(merged),
+        "commissions": [
+            asdict(merged[exec_id]) for exec_id in sorted(merged)
+        ],
+        "order_sent": False,
+        "live_order_sent": False,
+        "live_trading": "PROHIBITED",
+    }
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = ledger_path.with_suffix(ledger_path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(ledger_path)
+
+
+def _load_prior_latest_snapshot_for_ledger(
+    report_path: Path,
+) -> IbkrPaperCommissionSnapshot | None:
+    if not report_path.exists():
+        return None
+    payload = json.loads(report_path.read_text(encoding="utf-8", errors="strict"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != REPORT_SCHEMA_VERSION:
+        raise ValueError("existing commission latest report schema is invalid")
+    if payload.get("order_sent") is not False or payload.get("live_order_sent") is not False:
+        raise ValueError("existing commission latest report safety contract is invalid")
+    if payload.get("ready") is not True:
+        return None
+    if payload.get("connected") is not True:
+        raise ValueError("existing commission latest report is not connected Paper evidence")
+    if payload.get("broker_connection_used") is not True:
+        raise ValueError("existing commission latest report lacks broker collector provenance")
+    endpoint_port = payload.get("endpoint_port")
+    if type(endpoint_port) is not int or endpoint_port not in {4002, 7497}:
+        raise ValueError("existing commission latest report is not from an approved Paper endpoint")
+    if payload.get("live_trading") != "PROHIBITED":
+        raise ValueError("existing commission latest report lacks Paper-only Live prohibition")
+    rows = payload.get("commissions")
+    if not isinstance(rows, list):
+        raise ValueError("existing commission latest report commissions must be a list")
+
+    parsed: list[IbkrCommissionEvidence] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"existing commission latest row #{index} is invalid")
+        try:
+            evidence = IbkrCommissionEvidence(
+                exec_id=str(row["exec_id"]).strip(),
+                commission=float(row["commission"]),
+                currency=str(row["currency"]).strip().upper(),
+                realized_pnl=_finite_or_none(row.get("realized_pnl")),
+                yield_value=_finite_or_none(row.get("yield_value")),
+                yield_redemption_date=(
+                    int(row["yield_redemption_date"])
+                    if row.get("yield_redemption_date") not in (None, "")
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"existing commission latest row #{index} is malformed"
+            ) from exc
+        if not evidence.exec_id or not math.isfinite(evidence.commission):
+            raise ValueError(
+                f"existing commission latest row #{index} has invalid identity/commission"
+            )
+        if len(evidence.currency) != 3 or not evidence.currency.isalpha():
+            raise ValueError(
+                f"existing commission latest row #{index} has invalid currency"
+            )
+        parsed.append(evidence)
+
+    commissions, conflicts = _dedupe_commissions(parsed)
+    if conflicts:
+        raise ValueError("existing commission latest report has conflicting exec_id rows")
+    return IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=payload.get("endpoint_port"),
+        commissions=commissions,
+        duplicate_conflicts=(),
+        order_sent=False,
+        errors=(),
+    )
+
+
 def persist_commission_snapshot(
     snapshot: IbkrPaperCommissionSnapshot,
-    *, report_path: Path = DEFAULT_REPORT_PATH,
+    *,
+    report_path: Path = DEFAULT_REPORT_PATH,
+    ledger_path: Path = DEFAULT_LEDGER_PATH,
 ) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    prior = _load_prior_latest_snapshot_for_ledger(report_path)
+    if prior is not None:
+        persist_commission_ledger(prior, ledger_path=ledger_path)
+    if snapshot.ready:
+        persist_commission_ledger(snapshot, ledger_path=ledger_path)
+
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "connected": snapshot.connected,
@@ -303,6 +469,7 @@ def main() -> int:
     print("LIVE ORDER SENT  : False")
     print("LIVE TRADING     : PROHIBITED")
     print("REPORT           :", DEFAULT_REPORT_PATH)
+    print("LEDGER           :", DEFAULT_LEDGER_PATH)
     return 0 if snapshot.ready else 1
 
 
