@@ -300,6 +300,7 @@ def test_postfill_promotion_requires_shared_matcher_ready(monkeypatch):
         "state": "ORDER_ACKNOWLEDGED",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -330,6 +331,7 @@ def test_postfill_promotion_uses_proven_broker_identity_once(monkeypatch):
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -454,6 +456,7 @@ def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkey
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": None,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -461,6 +464,7 @@ def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkey
             "exec_id": "0001.test.01",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -515,6 +519,7 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": None,
+        "sender_client_id": 681,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -538,6 +543,7 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
             "exec_id": "a",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -551,6 +557,7 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
             "exec_id": "b",
             "order_id": 77,
             "perm_id": 990088,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -574,6 +581,7 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
             "exec_id": "a",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -598,6 +606,7 @@ def test_recovery_rejects_non_exact_persisted_order_identity(monkeypatch, bad_or
         "state": "UNKNOWN",
         "order_id": bad_order_id,
         "perm_id": None,
+        "sender_client_id": 681,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -620,6 +629,7 @@ def test_recovery_rejects_non_exact_persisted_perm_identity(monkeypatch, bad_per
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": bad_perm_id,
+        "sender_client_id": 681,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -646,6 +656,7 @@ def test_send_attempt_recorded_crash_state_can_reconcile_without_sender(monkeypa
         "state": "SEND_ATTEMPT_RECORDED",
         "order_id": 77,
         "perm_id": None,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -653,6 +664,7 @@ def test_send_attempt_recorded_crash_state_can_reconcile_without_sender(monkeypa
             "exec_id": "0001.crash.01",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -704,6 +716,7 @@ def test_recovery_rejects_perm_id_reused_by_another_order(monkeypatch):
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": None,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -711,6 +724,7 @@ def test_recovery_rejects_perm_id_reused_by_another_order(monkeypatch):
             "exec_id": "good",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -724,6 +738,7 @@ def test_recovery_rejects_perm_id_reused_by_another_order(monkeypatch):
             "exec_id": "conflict",
             "order_id": 78,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -763,6 +778,7 @@ def test_recovery_rejects_non_exact_execution_identity(monkeypatch):
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": None,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -770,6 +786,7 @@ def test_recovery_rejects_non_exact_execution_identity(monkeypatch):
             "exec_id": "bad",
             "order_id": "77",
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -805,6 +822,7 @@ def test_recovery_rejects_order_id_reused_with_another_perm_id(monkeypatch):
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -812,6 +830,7 @@ def test_recovery_rejects_order_id_reused_with_another_perm_id(monkeypatch):
             "exec_id": "good",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -825,6 +844,7 @@ def test_recovery_rejects_order_id_reused_with_another_perm_id(monkeypatch):
             "exec_id": "conflict",
             "order_id": 77,
             "perm_id": 990088,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -867,6 +887,7 @@ def test_recovery_rejects_selected_order_with_malformed_or_wrong_perm_id(
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -874,6 +895,7 @@ def test_recovery_rejects_selected_order_with_malformed_or_wrong_perm_id(
             "exec_id": "good",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -887,6 +909,7 @@ def test_recovery_rejects_selected_order_with_malformed_or_wrong_perm_id(
             "exec_id": "bad",
             "order_id": "77",
             "perm_id": bad_perm_id,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -929,6 +952,7 @@ def test_recovery_rejects_malformed_alias_of_selected_perm_id_on_other_order(
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -936,6 +960,7 @@ def test_recovery_rejects_malformed_alias_of_selected_perm_id_on_other_order(
             "exec_id": "good",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -949,6 +974,7 @@ def test_recovery_rejects_malformed_alias_of_selected_perm_id_on_other_order(
             "exec_id": "conflict",
             "order_id": 78,
             "perm_id": raw_perm_alias,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -991,6 +1017,7 @@ def test_recovery_rejects_malformed_alias_of_selected_order_id_even_with_matchin
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -998,6 +1025,7 @@ def test_recovery_rejects_malformed_alias_of_selected_order_id_even_with_matchin
             "exec_id": "good",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -1011,6 +1039,7 @@ def test_recovery_rejects_malformed_alias_of_selected_order_id_even_with_matchin
             "exec_id": "malformed",
             "order_id": raw_order_alias,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -1060,6 +1089,7 @@ def test_recovery_fails_closed_on_any_type_invalid_broker_identity_row(
         "state": "UNKNOWN",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1067,6 +1097,7 @@ def test_recovery_fails_closed_on_any_type_invalid_broker_identity_row(
             "exec_id": "good",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -1080,6 +1111,7 @@ def test_recovery_fails_closed_on_any_type_invalid_broker_identity_row(
             "exec_id": "malformed",
             "order_id": bad_order_id,
             "perm_id": bad_perm_id,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -1149,6 +1181,7 @@ def test_postfill_proven_still_revalidates_fresh_execution_identity(monkeypatch)
         "state": "POSTFILL_PROVEN",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1156,6 +1189,7 @@ def test_postfill_proven_still_revalidates_fresh_execution_identity(monkeypatch)
             "exec_id": "malformed",
             "order_id": "+77",
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
@@ -1188,6 +1222,7 @@ def test_postfill_proven_accepts_only_exact_int_fresh_execution_identity(monkeyp
         "state": "POSTFILL_PROVEN",
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1195,6 +1230,7 @@ def test_postfill_proven_accepts_only_exact_int_fresh_execution_identity(monkeyp
             "exec_id": "good",
             "order_id": 77,
             "perm_id": 880077,
+            "client_id": 681,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",
