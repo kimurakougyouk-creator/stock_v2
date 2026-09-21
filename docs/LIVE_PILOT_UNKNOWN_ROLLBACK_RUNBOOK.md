@@ -64,8 +64,9 @@ Treat the pilot as UNKNOWN when any of the following occurs:
    Evidence from another account, order, instrument, or stale run must not be substituted.
 
 5. **Classify the state.**
-   - **PROVEN_FILLED:** complete execution evidence proves the intended fill.
-   - **PROVEN_REJECTED/CANCELLED:** definitive broker evidence proves no fill is outstanding.
+   - **PROVEN_FILLED:** complete execution evidence proves the full intended quantity filled and post-fill state reconciles.
+   - **PARTIAL_RECONCILED:** broker evidence proves that only part of the intended quantity filled and the remainder is definitively cancelled/rejected/inactive. Preserve the real partial position exactly as observed. Do not send the unfilled remainder, do not "top up" to the intended quantity, and do not flatten merely to restore the planned size.
+   - **PROVEN_REJECTED/CANCELLED:** definitive broker evidence proves zero quantity filled, no matching order remains active, and no unexpected position exists.
    - **OPEN/PENDING:** a matching broker order is still active; keep the pilot blocked.
    - **UNKNOWN:** evidence is still incomplete or contradictory.
 
@@ -111,8 +112,9 @@ Retain, without altering:
 
 This runbook is complete only when the operator can determine one of the following from explicit evidence:
 
-- the intended order filled and the post-fill state reconciles;
-- the intended order was definitively rejected/cancelled and no unexpected position exists;
+- the intended order fully filled and the post-fill state reconciles;
+- the order partially filled, the remainder is terminal/inactive, and the actual partial position is reconciled as **PARTIAL_RECONCILED** without resending the remainder;
+- the intended order was definitively rejected/cancelled with zero fill and no unexpected position exists;
 - the order remains open/pending and requires continued read-only observation;
 - the state remains UNKNOWN, in which case Live execution stays blocked.
 
