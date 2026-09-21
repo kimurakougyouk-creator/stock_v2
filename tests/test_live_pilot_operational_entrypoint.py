@@ -1038,3 +1038,72 @@ def test_recovery_rejects_malformed_alias_of_selected_order_id_even_with_matchin
     )
 
     subject._promote_postfill_if_proven(_request())
+
+
+@pytest.mark.parametrize("bad_order_id,bad_perm_id", [
+    ("+77", 880077),
+    ("77.0", 880077),
+    ("7.7e1", 880077),
+    (77, "+880077"),
+    (77, "880077.0"),
+    (77, "8.80077e5"),
+])
+def test_recovery_fails_closed_on_any_type_invalid_broker_identity_row(
+    monkeypatch, bad_order_id, bad_perm_id
+):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "good",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+        {
+            "exec_id": "malformed",
+            "order_id": bad_order_id,
+            "perm_id": bad_perm_id,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:01+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail(
+            "matcher must be unreachable when any execution identity row is type-invalid"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "type-invalid broker execution evidence must never be promoted"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
