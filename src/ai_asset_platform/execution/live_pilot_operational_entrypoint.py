@@ -631,11 +631,16 @@ def _terminal_reconciliation_is_durably_proven(
         if journal.get(flag) is not False:
             return False
 
-    attempt = load_send_attempt_marker(
-        request.intent_id,
-        directory=DEFAULT_JOURNAL_DIR,
-    )
-    global_attempt = load_global_send_attempt_marker(directory=DEFAULT_JOURNAL_DIR)
+    try:
+        attempt = load_send_attempt_marker(
+            request.intent_id,
+            directory=DEFAULT_JOURNAL_DIR,
+        )
+        global_attempt = load_global_send_attempt_marker(
+            directory=DEFAULT_JOURNAL_DIR
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return False
     if not isinstance(attempt, dict) or not isinstance(global_attempt, dict):
         return False
     if (
