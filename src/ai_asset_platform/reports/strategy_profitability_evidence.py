@@ -39,7 +39,7 @@ from ai_asset_platform.reports.performance import (
 
 STRATEGY_INTENT_PREFIX = "signal-runner:"
 DEFAULT_ORDER_LOG_PATH = Path("results/paper_orders.jsonl")
-DEFAULT_COMMISSION_REPORT_PATH = Path("results/ibkr_paper_commission_evidence_latest.json")
+DEFAULT_COMMISSION_REPORT_PATH = Path("results/ibkr_paper_commission_evidence_ledger.json")
 DEFAULT_REPORT_PATH = Path("results/strategy_profitability_evidence_latest.json")
 REPORT_SCHEMA_VERSION = 3
 
@@ -158,15 +158,11 @@ def _fill_fx_rate(record: dict, *, fill_currency: str, account_currency: str) ->
 def _commission_index(commission_report: dict) -> dict[str, tuple[Decimal, str]]:
     if type(commission_report.get("schema_version")) is not int or commission_report.get("schema_version") != 1:
         raise StrategyProfitabilityEvidenceError(
-            "commission evidence report schema_version is not the current exact integer"
+            "commission evidence ledger schema_version is not the current exact integer"
         )
-    if commission_report.get("connected") is not True:
+    if commission_report.get("paper_only") is not True:
         raise StrategyProfitabilityEvidenceError(
-            "commission evidence report is not connected evidence"
-        )
-    if commission_report.get("ready") is not True:
-        raise StrategyProfitabilityEvidenceError(
-            "commission evidence report is not ready"
+            "commission evidence ledger is not explicitly Paper-only"
         )
     if commission_report.get("order_sent") is not False:
         raise StrategyProfitabilityEvidenceError(
@@ -209,19 +205,58 @@ def _commission_index(commission_report: dict) -> dict[str, tuple[Decimal, str]]
     return index
 
 
-def _net_realized_pnls_with_commissions(
+def _strategy_fill_signature(record: dict) -> tuple:
+    raw_exec_ids = record.get("broker_exec_ids")
+    exec_ids = tuple(str(value or "").strip() for value in raw_exec_ids) if isinstance(raw_exec_ids, list) else ()
+    return (
+        str(record.get("ticker", "")).strip().upper(),
+        str(record.get("side", "")).strip().upper(),
+        str(record.get("shares", "")),
+        str(record.get("reference_price", "")),
+        str(record.get("currency", "")).strip().upper(),
+        str(record.get("fx_to_account_rate", "")),
+        exec_ids,
+    )
+
+
+def _dedupe_strategy_fills_by_intent(
+    strategy_fills: Iterable[dict],
+) -> list[dict]:
+    deduped: list[dict] = []
+    seen: dict[str, tuple] = {}
+    for record in strategy_fills:
+        intent = str(record.get("order_intent_id", "")).strip()
+        if not intent:
+            raise StrategyProfitabilityEvidenceError(
+                "natural strategy fill is missing order_intent_id"
+            )
+        signature = _strategy_fill_signature(record)
+        previous = seen.get(intent)
+        if previous is None:
+            seen[intent] = signature
+            deduped.append(record)
+            continue
+        if previous != signature:
+            raise StrategyProfitabilityEvidenceError(
+                f"conflicting duplicate natural strategy fill for order_intent_id={intent}"
+            )
+    return deduped
+
+
+def _net_realized_trades_with_commissions(
     strategy_fills: Iterable[dict],
     *,
     commission_report: dict,
     account_currency: str,
-) -> list[float]:
+) -> list[dict]:
     account = _currency(account_currency, field="account_currency")
     commissions = _commission_index(commission_report)
     used_exec_ids: set[str] = set()
     quantities: dict[str, int] = {}
-    average_cost_account: dict[str, Decimal] = {}
+    average_gross_cost_account: dict[str, Decimal] = {}
+    average_buy_fee_account: dict[str, Decimal] = {}
     symbol_currency: dict[str, str] = {}
-    net_realized: list[float] = []
+    net_realized: list[dict] = []
 
     for position, record in enumerate(strategy_fills, start=1):
         ticker = str(record.get("ticker", "")).strip().upper()
@@ -304,40 +339,66 @@ def _net_realized_pnls_with_commissions(
         held = quantities.get(ticker, 0)
 
         if side == "BUY":
-            prior_avg = average_cost_account.get(ticker, Decimal("0"))
+            prior_gross = average_gross_cost_account.get(ticker, Decimal("0"))
+            prior_fee = average_buy_fee_account.get(ticker, Decimal("0"))
             new_qty = held + shares
-            total_cost = (
-                prior_avg * Decimal(held)
-                + unit_account * Decimal(shares)
-                + fee_account
-            )
+            average_gross_cost_account[ticker] = (
+                prior_gross * Decimal(held) + unit_account * Decimal(shares)
+            ) / Decimal(new_qty)
+            average_buy_fee_account[ticker] = (
+                prior_fee * Decimal(held) + fee_account
+            ) / Decimal(new_qty)
             quantities[ticker] = new_qty
-            average_cost_account[ticker] = total_cost / Decimal(new_qty)
             continue
 
         if shares > held:
             raise StrategyProfitabilityEvidenceError(
                 f"confirmed SELL for {ticker} exceeds fee-aware accounted holdings"
             )
-        avg = average_cost_account.get(ticker)
-        if avg is None:
+        gross_avg = average_gross_cost_account.get(ticker)
+        buy_fee_avg = average_buy_fee_account.get(ticker)
+        if gross_avg is None or buy_fee_avg is None:
             raise StrategyProfitabilityEvidenceError(
                 f"confirmed SELL for {ticker} has no fee-aware cost basis"
             )
-        net_proceeds = unit_account * Decimal(shares) - fee_account
-        pnl = net_proceeds - avg * Decimal(shares)
-        if not pnl.is_finite():
+
+        gross_pnl = (unit_account - gross_avg) * Decimal(shares)
+        allocated_buy_fee = buy_fee_avg * Decimal(shares)
+        net_pnl = gross_pnl - allocated_buy_fee - fee_account
+        if not net_pnl.is_finite():
             raise StrategyProfitabilityEvidenceError(
                 f"fee-aware realized PnL for {ticker} is non-finite"
             )
-        net_realized.append(float(pnl))
+        net_realized.append(
+            {
+                "ticker": ticker,
+                "shares": shares,
+                "order_intent_id": str(record.get("order_intent_id") or ""),
+                "sell_exec_ids": list(exec_ids),
+                "fill_currency": fill_currency,
+                "account_currency": account,
+                "sell_price_local": float(price),
+                "sell_fx_to_account_rate": float(fx_rate),
+                "gross_average_cost_account": float(gross_avg),
+                "gross_realized_pnl_account": float(gross_pnl),
+                "allocated_buy_commission_account": float(allocated_buy_fee),
+                "sell_commission_account": float(fee_account),
+                "total_commission_account": float(allocated_buy_fee + fee_account),
+                "net_realized_pnl_account": float(net_pnl),
+                "sold_at": (
+                    str(record.get("created_at"))
+                    if record.get("created_at")
+                    else None
+                ),
+            }
+        )
         remaining = held - shares
         quantities[ticker] = remaining
         if remaining == 0:
-            average_cost_account.pop(ticker, None)
+            average_gross_cost_account.pop(ticker, None)
+            average_buy_fee_account.pop(ticker, None)
 
     return net_realized
-
 
 def _is_confirmed_ibkr_fill(record: dict) -> bool:
     return (
@@ -440,10 +501,26 @@ def build_strategy_profitability_evidence(
     instead of manufacturing a result.
     """
     rows = [record for record in records if isinstance(record, dict)]
-    strategy_fills = select_natural_strategy_fills(rows)
+    raw_strategy_fills = select_natural_strategy_fills(rows)
     all_ibkr_fills = [record for record in rows if _is_confirmed_ibkr_fill(record)]
-    excluded = len(all_ibkr_fills) - len(strategy_fills)
+    excluded = len(all_ibkr_fills) - len(raw_strategy_fills)
     account = str(account_currency).strip().upper()
+    try:
+        strategy_fills = _dedupe_strategy_fills_by_intent(raw_strategy_fills)
+    except StrategyProfitabilityEvidenceError as exc:
+        performance, health = _empty_metrics()
+        return StrategyProfitabilityEvidence(
+            evidence_status="BLOCKED_ACCOUNTING_EVIDENCE",
+            gross_result="UNKNOWN",
+            reason=f"Natural strategy accounting failed closed: {exc}",
+            account_currency=account,
+            strategy_fill_count=len(raw_strategy_fills),
+            closed_trade_count=0,
+            excluded_ibkr_fill_count=excluded,
+            gross_performance=performance,
+            performance_health=health,
+            realized_trades=(),
+        )
 
     if not strategy_fills:
         performance, health = _empty_metrics()
@@ -530,11 +607,15 @@ def build_strategy_profitability_evidence(
         )
 
     try:
-        net_pnls = _net_realized_pnls_with_commissions(
+        fee_aware_trades = _net_realized_trades_with_commissions(
             strategy_fills,
             commission_report=commission_report,
             account_currency=account,
         )
+        net_pnls = [
+            float(trade["net_realized_pnl_account"])
+            for trade in fee_aware_trades
+        ]
     except StrategyProfitabilityEvidenceError as exc:
         return StrategyProfitabilityEvidence(
             evidence_status="BLOCKED_FEE_EVIDENCE",
@@ -586,7 +667,7 @@ def build_strategy_profitability_evidence(
         excluded_ibkr_fill_count=excluded,
         gross_performance=performance_record,
         performance_health=health_record,
-        realized_trades=tuple(trade.as_record() for trade in realized),
+        realized_trades=tuple(fee_aware_trades),
         net_performance=net_record,
         fees_accounted=True,
         fee_aware=True,
