@@ -782,14 +782,14 @@ def test_rejected_reconciliation_is_durable_terminal_and_never_retries(tmp_path:
     )
     mark_unknown(
         INTENT,
-        reason="broker orderStatus callback reported non-accepted status: Inactive",
+        reason="broker orderStatus callback reported non-accepted status: Cancelled",
         directory=tmp_path,
         now=NOW + timedelta(seconds=3),
     )
 
     result = mark_rejected_reconciled(
         INTENT,
-        rejection_reason="broker orderStatus callback reported non-accepted status: Inactive",
+        rejection_reason="broker orderStatus callback reported non-accepted status: Cancelled",
         order_id=101,
         final_position_quantity=0.0,
         directory=tmp_path,
@@ -800,7 +800,7 @@ def test_rejected_reconciliation_is_durable_terminal_and_never_retries(tmp_path:
     marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
     assert marker is not None
     assert marker["state"] == "REJECTED_RECONCILED"
-    assert marker["rejection_reason"].endswith("Inactive")
+    assert marker["rejection_reason"].endswith("Cancelled")
     assert marker["final_position_quantity"] == 0.0
     assert marker["nonce"] == NONCE
     assert marker["automatic_resend_allowed"] is False
@@ -956,6 +956,47 @@ def test_terminal_marker_rejects_corrupted_authorization_binding(tmp_path: Path)
             final_position_quantity=40.0,
             directory=tmp_path,
             now=NOW + timedelta(seconds=3),
+        )
+
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "broker orderStatus callback reported non-accepted status: Inactive",
+        "broker acknowledgement timed out",
+        "77:399:Order message error",
+        "77:2104:Market data farm connection is OK",
+    ],
+)
+def test_rejected_terminal_marker_requires_definitive_broker_rejection(
+    tmp_path: Path, reason
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason=reason,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    with pytest.raises(ValueError, match="terminal broker rejection"):
+        mark_rejected_reconciled(
+            INTENT,
+            rejection_reason=reason,
+            order_id=101,
+            final_position_quantity=0.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
         )
 
     assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
