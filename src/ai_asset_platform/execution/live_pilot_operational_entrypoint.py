@@ -532,6 +532,281 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
     )
 
 
+
+def _finite_decimal(value: object) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _definitive_rejection_reason(value: object) -> str | None:
+    reason = str(value or "").strip()
+    if reason.startswith(
+        "broker orderStatus callback reported non-accepted status:"
+    ) or reason.startswith(
+        "broker openOrder callback reported non-accepted status:"
+    ):
+        return reason
+    parts = reason.split(":", 2)
+    if (
+        len(parts) == 3
+        and parts[0].lstrip("-").isdigit()
+        and parts[1].isdigit()
+    ):
+        return reason
+    return None
+
+
+def _promote_terminal_reconciliation_if_proven(
+    request: LivePilotOperationalRequest,
+) -> str | None:
+    """Promote only fully reconciled no-retry terminal non-full-fill outcomes.
+
+    A partial fill or explicit broker rejection is terminal evidence for this
+    one-shot campaign, not permission to send a remainder or retry.
+    """
+    journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
+    if not _request_matches_durable_authorization(request, journal):
+        return None
+    if not isinstance(journal, dict) or journal.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
+        return None
+
+    order_id = _positive_exact_int(journal.get("order_id"))
+    sender_client_id = _nonnegative_exact_int(journal.get("sender_client_id"))
+    endpoint_port = journal.get("authorized_endpoint_port")
+    if (
+        order_id is None
+        or sender_client_id is None
+        or not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in {4001, 7496}
+    ):
+        return None
+
+    postfill = _load_json(DEFAULT_POSTFILL_REPORT)
+    account = _load_json(DEFAULT_LIVE_ACCOUNT_REPORT)
+    open_orders = _load_json(DEFAULT_LIVE_OPEN_ORDERS_REPORT)
+    paper = _load_json(DEFAULT_PAPER_MONITOR_REPORT)
+    attempt_marker = load_send_attempt_marker(
+        request.intent_id, directory=DEFAULT_JOURNAL_DIR
+    )
+    if not all(
+        isinstance(report, dict)
+        for report in (postfill, account, open_orders, paper, attempt_marker)
+    ):
+        return None
+
+    current = _utc_now()
+    if not (
+        _fresh(
+            postfill,
+            now=current,
+            max_age_seconds=DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
+        )
+        and _fresh(
+            account,
+            now=current,
+            max_age_seconds=DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
+        )
+        and _fresh(
+            open_orders,
+            now=current,
+            max_age_seconds=DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
+        )
+        and _fresh(
+            paper,
+            now=current,
+            max_age_seconds=DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
+        )
+    ):
+        return None
+
+    marker_time = _parse_aware_timestamp(attempt_marker.get("recorded_at"))
+    paper_time = _parse_aware_timestamp(paper.get("checked_at"))
+    if marker_time is None or paper_time is None or paper_time <= marker_time:
+        return None
+    if not _paper_safe(paper):
+        return None
+
+    if not _clean_live_report(
+        postfill,
+        required_schema_version=LIVE_POSTFILL_SCHEMA_VERSION,
+        required_false_flags=("order_sent", "live_order_sent"),
+    ):
+        return None
+    if not _clean_live_report(
+        account,
+        required_schema_version=LIVE_ACCOUNT_SCHEMA_VERSION,
+        required_false_flags=("order_sent", "live_order_sent"),
+    ):
+        return None
+    if not _clean_live_report(
+        open_orders,
+        required_schema_version=LIVE_OPEN_ORDERS_SCHEMA_VERSION,
+        required_false_flags=("order_sent", "cancel_sent", "live_order_sent"),
+    ):
+        return None
+
+    fingerprint = request.expected_account_fingerprint.strip().lower()
+    for report in (postfill, account, open_orders):
+        if report.get("endpoint_port") != endpoint_port:
+            return None
+        if str(report.get("account_fingerprint") or "").strip().lower() != fingerprint:
+            return None
+
+    if (
+        open_orders.get("open_order_count") != 0
+        or isinstance(open_orders.get("open_order_count"), bool)
+        or not isinstance(open_orders.get("orders"), list)
+        or open_orders.get("orders")
+    ):
+        return None
+
+    rows = postfill.get("executions")
+    commissions = postfill.get("commissions")
+    if not isinstance(rows, list) or not isinstance(commissions, list):
+        return None
+
+    validated_rows: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        row_order = _positive_exact_int(row.get("order_id"))
+        row_perm = _positive_exact_int(row.get("perm_id"))
+        row_client = _nonnegative_exact_int(row.get("client_id"))
+        if row_order is None or row_perm is None or row_client != sender_client_id:
+            return None
+        validated_rows.append(row)
+
+    selected_rows = [
+        row for row in validated_rows if row.get("order_id") == order_id
+    ]
+    persisted_perm = _positive_exact_int(journal.get("perm_id"))
+    if selected_rows:
+        selected_perm_ids = {row.get("perm_id") for row in selected_rows}
+        if len(selected_perm_ids) != 1:
+            return None
+        selected_perm = next(iter(selected_perm_ids))
+        if persisted_perm is not None and selected_perm != persisted_perm:
+            return None
+        if any(
+            row.get("perm_id") == selected_perm and row.get("order_id") != order_id
+            for row in validated_rows
+        ):
+            return None
+
+        expected_symbol = (
+            "9432"
+            if request.ticker.strip().upper() == "9432.T"
+            else request.ticker.strip().upper()
+        )
+        expected_side = request.side.strip().upper()
+        expected_currency = "JPY" if request.ticker.strip().upper() == "9432.T" else "USD"
+        total_quantity = Decimal("0")
+        exec_ids: list[str] = []
+        commission_total = Decimal("0")
+        for row in selected_rows:
+            if (
+                str(row.get("symbol") or "").strip().upper() != expected_symbol
+                or str(row.get("sec_type") or "").strip().upper() != "STK"
+                or str(row.get("side") or "").strip().upper() != expected_side
+                or str(row.get("currency") or "").strip().upper() != expected_currency
+                or str(row.get("account_fingerprint") or "").strip().lower()
+                != fingerprint
+            ):
+                return None
+            quantity = _finite_decimal(row.get("quantity"))
+            price = _finite_decimal(row.get("price"))
+            exec_id = str(row.get("exec_id") or "").strip()
+            if (
+                quantity is None
+                or quantity <= 0
+                or price is None
+                or price <= 0
+                or not exec_id
+            ):
+                return None
+            total_quantity += quantity
+            exec_ids.append(exec_id)
+
+        if len(exec_ids) != len(set(exec_ids)):
+            return None
+        authorized_quantity = Decimal(request.quantity)
+        if total_quantity <= 0 or total_quantity >= authorized_quantity:
+            return None
+
+        for exec_id in exec_ids:
+            matched_commissions = [
+                row
+                for row in commissions
+                if isinstance(row, dict)
+                and str(row.get("exec_id") or "").strip() == exec_id
+            ]
+            if len(matched_commissions) != 1:
+                return None
+            commission_row = matched_commissions[0]
+            value = _finite_decimal(commission_row.get("commission"))
+            currency = str(commission_row.get("currency") or "").strip().upper()
+            if value is None or currency != expected_currency:
+                return None
+            commission_total += value
+
+        final_position = _target_position_quantity(account, request.ticker)
+        expected_final_position = (
+            float(total_quantity)
+            if expected_side == "BUY"
+            else float(authorized_quantity - total_quantity)
+        )
+        if final_position is None or final_position != expected_final_position:
+            return None
+
+        mark_partial_reconciled(
+            request.intent_id,
+            exec_ids=tuple(exec_ids),
+            order_id=order_id,
+            perm_id=int(selected_perm),
+            filled_quantity=float(total_quantity),
+            commission_total=float(commission_total),
+            commission_currency=expected_currency,
+            final_position_quantity=final_position,
+            directory=DEFAULT_JOURNAL_DIR,
+        )
+        return "PARTIAL_RECONCILED"
+
+    # No matching execution rows: only an explicit broker-side non-acceptance
+    # may become REJECTED_RECONCILED. Timeout/disconnect/no-evidence remains
+    # UNKNOWN by design.
+    rejection_reason = _definitive_rejection_reason(journal.get("unknown_reason"))
+    if rejection_reason is None:
+        return None
+    if persisted_perm is not None:
+        return None
+    if any(row.get("order_id") == order_id for row in validated_rows):
+        return None
+
+    final_position = _target_position_quantity(account, request.ticker)
+    expected_unchanged_position = (
+        0.0 if request.side.strip().upper() == "BUY" else float(request.quantity)
+    )
+    if final_position is None or final_position != expected_unchanged_position:
+        return None
+
+    mark_rejected_reconciled(
+        request.intent_id,
+        rejection_reason=rejection_reason,
+        order_id=order_id,
+        final_position_quantity=final_position,
+        directory=DEFAULT_JOURNAL_DIR,
+    )
+    return "REJECTED_RECONCILED"
+
+
 def _reconcile_once(
     request: LivePilotOperationalRequest,
     *,
