@@ -659,7 +659,9 @@ def build_strategy_profitability_evidence(
         gross_result=gross_result,
         reason=(
             "Every natural strategy fill is bound to explicit broker exec_id commission "
-            "evidence; net realized PnL includes buy and sell commissions in account currency."
+            "evidence; net realized PnL includes buy and sell commissions in account currency. "
+            "The versioned strategy-promotion policy is not yet implemented/passed, so "
+            "net_profitability_proven remains false."
         ),
         account_currency=account,
         strategy_fill_count=len(strategy_fills),
@@ -672,7 +674,7 @@ def build_strategy_profitability_evidence(
         fees_accounted=True,
         fee_aware=True,
         net_realized_pnl=float(net_performance.net_profit),
-        net_profitability_proven=net_positive,
+        net_profitability_proven=False,
         live_ready=False,
     )
 
