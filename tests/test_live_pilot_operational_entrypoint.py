@@ -92,6 +92,11 @@ def test_existing_campaign_marker_forces_recovery_only_and_sender_is_unreachable
         "send_exactly_one_live_pilot",
         lambda *args, **kwargs: pytest.fail("sender must be unreachable after marker"),
     )
+    monkeypatch.setattr(
+        subject,
+        "audit_live_pilot_source_cutover",
+        lambda **kwargs: SimpleNamespace(ready=True),
+    )
     calls = []
 
     def fake_reconcile(request, *, send_status, order_transport_called):
@@ -1103,6 +1108,114 @@ def test_recovery_fails_closed_on_any_type_invalid_broker_identity_row(
         "mark_postfill_proven",
         lambda *args, **kwargs: pytest.fail(
             "type-invalid broker execution evidence must never be promoted"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+def test_recovery_source_cutover_blocks_before_broker_collection(monkeypatch):
+    monkeypatch.setattr(subject, "global_send_attempt_recorded", lambda **kwargs: True)
+    monkeypatch.setattr(
+        subject,
+        "audit_live_pilot_source_cutover",
+        lambda **kwargs: SimpleNamespace(ready=False),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_reconcile_once",
+        lambda *args, **kwargs: pytest.fail(
+            "recovery broker collection must be unreachable when source audit fails"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "send_exactly_one_live_pilot",
+        lambda *args, **kwargs: pytest.fail(
+            "sender must remain unreachable after campaign marker"
+        ),
+    )
+
+    result = subject.run_live_pilot_operational_once(_request(), repository_root=Path("/repo"))
+
+    assert result.status == "BLOCKED_SOURCE_CUTOVER"
+    assert result.recovery_only is True
+    assert result.broker_connection_used is False
+    assert result.order_transport_called is False
+
+
+def test_postfill_proven_still_revalidates_fresh_execution_identity(monkeypatch):
+    journal = {
+        "state": "POSTFILL_PROVEN",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "malformed",
+            "order_id": "+77",
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "already-promoted journal must not be rewritten"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+def test_postfill_proven_accepts_only_exact_int_fresh_execution_identity(monkeypatch):
+    journal = {
+        "state": "POSTFILL_PROVEN",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "good",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "already-promoted journal must not be rewritten"
         ),
     )
 
