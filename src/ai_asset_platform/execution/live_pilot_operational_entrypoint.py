@@ -70,6 +70,9 @@ from ai_asset_platform.execution.live_pilot_single_send import (
     LivePilotSendResult,
     send_exactly_one_live_pilot,
 )
+from ai_asset_platform.execution.live_pilot_source_cutover import (
+    audit_live_pilot_source_cutover,
+)
 from ai_asset_platform.reports.live_operational_pilot_readiness import (
     DEFAULT_PAPER_MONITOR_REPORT,
     DEFAULT_REPORT_PATH as DEFAULT_READINESS_REPORT,
@@ -224,6 +227,25 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
     journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
     if not isinstance(journal, dict):
         return
+
+    # Every fresh recovery report must first pass exact broker-identity typing,
+    # even when the journal is already POSTFILL_PROVEN. Completion must never
+    # accept a later malformed execution report merely because an earlier pass
+    # had already promoted the journal.
+    postfill_payload = _load_json(DEFAULT_POSTFILL_REPORT)
+    if not isinstance(postfill_payload, dict):
+        return
+    rows = postfill_payload.get("executions")
+    rows = rows if isinstance(rows, list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            return
+        if (
+            _positive_exact_int(row.get("order_id")) is None
+            or _positive_exact_int(row.get("perm_id")) is None
+        ):
+            return
+
     if journal.get("state") == "POSTFILL_PROVEN":
         return
     # SEND_ATTEMPT_RECORDED is intentionally recoverable here. A crash can
@@ -240,12 +262,6 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
     order_id = _positive_exact_int(journal.get("order_id"))
     if order_id is None:
         return
-
-    postfill_payload = _load_json(DEFAULT_POSTFILL_REPORT)
-    if not isinstance(postfill_payload, dict):
-        return
-    rows = postfill_payload.get("executions")
-    rows = rows if isinstance(rows, list) else []
 
     raw_perm_id = journal.get("perm_id")
     if raw_perm_id is None:
@@ -456,6 +472,28 @@ def run_live_pilot_operational_once(
             completion_status=None,
             complete=False,
             blockers=("exact Live read-only confirmation is missing",),
+            broker_connection_used=False,
+            order_transport_called=False,
+        )
+
+    # Recovery is safety-critical too. Verify the exact approved commit and
+    # tracked cleanliness before any recovery broker collection or completion
+    # persistence. This is intentionally independent of whether the sender is
+    # reachable.
+    source = audit_live_pilot_source_cutover(
+        expected_commit_sha=request.expected_commit_sha,
+        repository_root=repository_root,
+    )
+    if not source.ready:
+        return LivePilotOperationalResult(
+            status="BLOCKED_SOURCE_CUTOVER",
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=global_send_attempt_recorded(directory=DEFAULT_JOURNAL_DIR),
+            preflight_ready=False,
+            send_status=None,
+            completion_status=None,
+            complete=False,
+            blockers=("audited source/PIN cutover is not ready",),
             broker_connection_used=False,
             order_transport_called=False,
         )
