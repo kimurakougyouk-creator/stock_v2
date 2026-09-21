@@ -10,16 +10,19 @@ into strategy-performance metrics. Older ``signal-runner:paper-pilot:...`` proof
 identifiers do not match the natural runtime structure and are excluded.
 
 This module never connects to a broker and never creates, changes, cancels, or
-transmits an order. Reported PnL is explicitly gross of commissions/fees because
-the current profitability path has not yet joined durable commission evidence to
-every strategy execution. Therefore this report must never claim that net
-profitability is proven or that Live Trading is ready.
+transmits an order. Gross PnL is always computed from durable natural-strategy
+fills. Net PnL is computed only when every strategy fill carries broker exec_id
+evidence and every exec_id has exactly one durable commission record in the same
+instrument currency. Missing, duplicate, ambiguous, or cross-currency fee
+evidence fails closed; fees are never guessed. This report alone never authorizes
+Live Trading.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
 import math
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable
 
@@ -36,8 +39,9 @@ from ai_asset_platform.reports.performance import (
 
 STRATEGY_INTENT_PREFIX = "signal-runner:"
 DEFAULT_ORDER_LOG_PATH = Path("results/paper_orders.jsonl")
+DEFAULT_COMMISSION_REPORT_PATH = Path("results/ibkr_paper_commission_evidence_latest.json")
 DEFAULT_REPORT_PATH = Path("results/strategy_profitability_evidence_latest.json")
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 
 
 class StrategyProfitabilityEvidenceError(ValueError):
@@ -56,6 +60,7 @@ class StrategyProfitabilityEvidence:
     gross_performance: dict
     performance_health: dict
     realized_trades: tuple[dict, ...]
+    net_performance: dict | None = None
     fees_accounted: bool = False
     fee_aware: bool = False
     net_realized_pnl: float | None = None
@@ -86,6 +91,240 @@ def _load_jsonl(path: Path) -> list[dict]:
             )
         rows.append(row)
     return rows
+
+
+
+def _load_json_object(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
+    except json.JSONDecodeError as exc:
+        raise StrategyProfitabilityEvidenceError(
+            f"{path} contains malformed JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise StrategyProfitabilityEvidenceError(
+            f"{path} must contain a JSON object"
+        )
+    return payload
+
+
+def _currency(value: object, *, field: str) -> str:
+    normalized = str(value or "").strip().upper()
+    if len(normalized) != 3 or not normalized.isalpha():
+        raise StrategyProfitabilityEvidenceError(
+            f"{field} must be a 3-letter currency code"
+        )
+    return normalized
+
+
+def _decimal(value: object, *, field: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise StrategyProfitabilityEvidenceError(f"{field} must be numeric") from exc
+    if not parsed.is_finite():
+        raise StrategyProfitabilityEvidenceError(f"{field} must be finite")
+    return parsed
+
+
+def _positive_decimal(value: object, *, field: str) -> Decimal:
+    parsed = _decimal(value, field=field)
+    if parsed <= 0:
+        raise StrategyProfitabilityEvidenceError(f"{field} must be positive")
+    return parsed
+
+
+def _fill_fx_rate(record: dict, *, fill_currency: str, account_currency: str) -> Decimal:
+    raw = record.get("fx_to_account_rate")
+    if fill_currency == account_currency:
+        if raw in (None, ""):
+            return Decimal("1")
+        rate = _positive_decimal(raw, field="fx_to_account_rate")
+        if rate != Decimal("1"):
+            raise StrategyProfitabilityEvidenceError(
+                "same-currency fill requires fx_to_account_rate=1 or omission"
+            )
+        return rate
+    if raw in (None, ""):
+        raise StrategyProfitabilityEvidenceError(
+            f"fee-aware fill currency {fill_currency} requires explicit "
+            f"fx_to_account_rate into {account_currency}"
+        )
+    return _positive_decimal(raw, field="fx_to_account_rate")
+
+
+def _commission_index(commission_report: dict) -> dict[str, tuple[Decimal, str]]:
+    if commission_report.get("ready") is not True:
+        raise StrategyProfitabilityEvidenceError(
+            "commission evidence report is not ready"
+        )
+    if commission_report.get("order_sent") is not False:
+        raise StrategyProfitabilityEvidenceError(
+            "commission evidence report unexpectedly indicates an order send"
+        )
+    rows = commission_report.get("commissions")
+    if not isinstance(rows, list):
+        raise StrategyProfitabilityEvidenceError(
+            "commission evidence report is missing commissions list"
+        )
+
+    index: dict[str, tuple[Decimal, str]] = {}
+    for position, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise StrategyProfitabilityEvidenceError(
+                f"commission row #{position} is not an object"
+            )
+        exec_id = str(row.get("exec_id", "")).strip()
+        if not exec_id:
+            raise StrategyProfitabilityEvidenceError(
+                f"commission row #{position} is missing exec_id"
+            )
+        if exec_id in index:
+            raise StrategyProfitabilityEvidenceError(
+                f"duplicate commission evidence for exec_id={exec_id}"
+            )
+        commission = _decimal(
+            row.get("commission"),
+            field=f"commission[{exec_id}]",
+        )
+        currency = _currency(
+            row.get("currency"),
+            field=f"commission currency[{exec_id}]",
+        )
+        index[exec_id] = (commission, currency)
+    return index
+
+
+def _net_realized_pnls_with_commissions(
+    strategy_fills: Iterable[dict],
+    *,
+    commission_report: dict,
+    account_currency: str,
+) -> list[float]:
+    account = _currency(account_currency, field="account_currency")
+    commissions = _commission_index(commission_report)
+    used_exec_ids: set[str] = set()
+    quantities: dict[str, int] = {}
+    average_cost_account: dict[str, Decimal] = {}
+    symbol_currency: dict[str, str] = {}
+    net_realized: list[float] = []
+
+    for position, record in enumerate(strategy_fills, start=1):
+        ticker = str(record.get("ticker", "")).strip().upper()
+        side = str(record.get("side", "")).strip().upper()
+        if not ticker or side not in {"BUY", "SELL"}:
+            raise StrategyProfitabilityEvidenceError(
+                f"strategy fill #{position} has invalid ticker/side"
+            )
+        try:
+            shares = int(record.get("shares"))
+        except (TypeError, ValueError) as exc:
+            raise StrategyProfitabilityEvidenceError(
+                f"strategy fill #{position} shares must be a whole number"
+            ) from exc
+        if shares <= 0:
+            raise StrategyProfitabilityEvidenceError(
+                f"strategy fill #{position} shares must be positive"
+            )
+
+        price = _positive_decimal(
+            record.get("reference_price"),
+            field=f"strategy fill #{position} reference_price",
+        )
+        fill_currency = _currency(
+            record.get("currency"),
+            field=f"strategy fill #{position} currency",
+        )
+        prior_currency = symbol_currency.get(ticker)
+        if prior_currency is not None and prior_currency != fill_currency:
+            raise StrategyProfitabilityEvidenceError(
+                f"symbol {ticker} changed currency from {prior_currency} to {fill_currency}"
+            )
+        symbol_currency[ticker] = fill_currency
+        fx_rate = _fill_fx_rate(
+            record,
+            fill_currency=fill_currency,
+            account_currency=account,
+        )
+
+        raw_exec_ids = record.get("broker_exec_ids")
+        if not isinstance(raw_exec_ids, list) or not raw_exec_ids:
+            raise StrategyProfitabilityEvidenceError(
+                f"strategy fill #{position} is missing broker_exec_ids"
+            )
+        exec_ids: list[str] = []
+        for value in raw_exec_ids:
+            exec_id = str(value or "").strip()
+            if not exec_id:
+                raise StrategyProfitabilityEvidenceError(
+                    f"strategy fill #{position} contains an empty broker exec_id"
+                )
+            if exec_id in exec_ids:
+                raise StrategyProfitabilityEvidenceError(
+                    f"strategy fill #{position} contains duplicate exec_id={exec_id}"
+                )
+            if exec_id in used_exec_ids:
+                raise StrategyProfitabilityEvidenceError(
+                    f"broker exec_id={exec_id} is reused by multiple strategy fills"
+                )
+            exec_ids.append(exec_id)
+
+        fee_local = Decimal("0")
+        for exec_id in exec_ids:
+            evidence = commissions.get(exec_id)
+            if evidence is None:
+                raise StrategyProfitabilityEvidenceError(
+                    f"missing commission evidence for exec_id={exec_id}"
+                )
+            commission, commission_currency = evidence
+            if commission_currency != fill_currency:
+                raise StrategyProfitabilityEvidenceError(
+                    f"commission currency for exec_id={exec_id} does not match "
+                    f"fill currency: {commission_currency} != {fill_currency}"
+                )
+            fee_local += commission
+            used_exec_ids.add(exec_id)
+
+        fee_account = fee_local * fx_rate
+        unit_account = price * fx_rate
+        held = quantities.get(ticker, 0)
+
+        if side == "BUY":
+            prior_avg = average_cost_account.get(ticker, Decimal("0"))
+            new_qty = held + shares
+            total_cost = (
+                prior_avg * Decimal(held)
+                + unit_account * Decimal(shares)
+                + fee_account
+            )
+            quantities[ticker] = new_qty
+            average_cost_account[ticker] = total_cost / Decimal(new_qty)
+            continue
+
+        if shares > held:
+            raise StrategyProfitabilityEvidenceError(
+                f"confirmed SELL for {ticker} exceeds fee-aware accounted holdings"
+            )
+        avg = average_cost_account.get(ticker)
+        if avg is None:
+            raise StrategyProfitabilityEvidenceError(
+                f"confirmed SELL for {ticker} has no fee-aware cost basis"
+            )
+        net_proceeds = unit_account * Decimal(shares) - fee_account
+        pnl = net_proceeds - avg * Decimal(shares)
+        if not pnl.is_finite():
+            raise StrategyProfitabilityEvidenceError(
+                f"fee-aware realized PnL for {ticker} is non-finite"
+            )
+        net_realized.append(float(pnl))
+        remaining = held - shares
+        quantities[ticker] = remaining
+        if remaining == 0:
+            average_cost_account.pop(ticker, None)
+
+    return net_realized
 
 
 def _is_confirmed_ibkr_fill(record: dict) -> bool:
@@ -180,8 +419,9 @@ def build_strategy_profitability_evidence(
     records: Iterable[dict],
     *,
     account_currency: str = "JPY",
+    commission_report: dict | None = None,
 ) -> StrategyProfitabilityEvidence:
-    """Build gross strategy evidence while excluding every non-strategy fill.
+    """Build strategy evidence while excluding every non-strategy fill.
 
     The existing account-currency trade-history engine is reused so FX is never
     guessed. Any missing/ambiguous cost basis or FX evidence blocks the report
@@ -259,13 +499,74 @@ def build_strategy_profitability_evidence(
         if performance.net_profit > 0
         else "NON_POSITIVE_GROSS_SO_FAR"
     )
+    if commission_report is None:
+        return StrategyProfitabilityEvidence(
+            evidence_status="GROSS_RESULT_ONLY_FEES_NOT_ACCOUNTED",
+            gross_result=gross_result,
+            reason=(
+                "Natural strategy closed trades are measurable, but durable commission/fee "
+                "evidence is not available to this accounting run. "
+                "Net profitability therefore remains unverified."
+            ),
+            account_currency=account,
+            strategy_fill_count=len(strategy_fills),
+            closed_trade_count=len(realized),
+            excluded_ibkr_fill_count=excluded,
+            gross_performance=performance_record,
+            performance_health=health_record,
+            realized_trades=tuple(trade.as_record() for trade in realized),
+        )
+
+    try:
+        net_pnls = _net_realized_pnls_with_commissions(
+            strategy_fills,
+            commission_report=commission_report,
+            account_currency=account,
+        )
+    except StrategyProfitabilityEvidenceError as exc:
+        return StrategyProfitabilityEvidence(
+            evidence_status="BLOCKED_FEE_EVIDENCE",
+            gross_result=gross_result,
+            reason=f"Fee-aware strategy accounting failed closed: {exc}",
+            account_currency=account,
+            strategy_fill_count=len(strategy_fills),
+            closed_trade_count=len(realized),
+            excluded_ibkr_fill_count=excluded,
+            gross_performance=performance_record,
+            performance_health=health_record,
+            realized_trades=tuple(trade.as_record() for trade in realized),
+        )
+
+    if len(net_pnls) != len(realized):
+        return StrategyProfitabilityEvidence(
+            evidence_status="BLOCKED_FEE_EVIDENCE",
+            gross_result=gross_result,
+            reason=(
+                "Fee-aware realized trade count does not match gross realized trade count; "
+                "report blocked instead of guessing."
+            ),
+            account_currency=account,
+            strategy_fill_count=len(strategy_fills),
+            closed_trade_count=len(realized),
+            excluded_ibkr_fill_count=excluded,
+            gross_performance=performance_record,
+            performance_health=health_record,
+            realized_trades=tuple(trade.as_record() for trade in realized),
+        )
+
+    net_performance = calculate_performance(net_pnls)
+    net_record = _json_safe_performance(net_performance)
+    net_positive = net_performance.net_profit > 0
     return StrategyProfitabilityEvidence(
-        evidence_status="GROSS_RESULT_ONLY_FEES_NOT_ACCOUNTED",
+        evidence_status=(
+            "NET_POSITIVE_AFTER_FEES"
+            if net_positive
+            else "NET_NON_POSITIVE_AFTER_FEES"
+        ),
         gross_result=gross_result,
         reason=(
-            "Natural strategy closed trades are measurable, but durable commission/fee "
-            "evidence is not yet joined to every execution in this accounting path. "
-            "Net profitability therefore remains unverified."
+            "Every natural strategy fill is bound to explicit broker exec_id commission "
+            "evidence; net realized PnL includes buy and sell commissions in account currency."
         ),
         account_currency=account,
         strategy_fill_count=len(strategy_fills),
@@ -274,6 +575,12 @@ def build_strategy_profitability_evidence(
         gross_performance=performance_record,
         performance_health=health_record,
         realized_trades=tuple(trade.as_record() for trade in realized),
+        net_performance=net_record,
+        fees_accounted=True,
+        fee_aware=True,
+        net_realized_pnl=float(net_performance.net_profit),
+        net_profitability_proven=net_positive,
+        live_ready=False,
     )
 
 
@@ -293,11 +600,13 @@ def evidence_record(result: StrategyProfitabilityEvidence) -> dict:
 def audit_strategy_profitability_evidence(
     *,
     order_log_path: Path = DEFAULT_ORDER_LOG_PATH,
+    commission_report_path: Path = DEFAULT_COMMISSION_REPORT_PATH,
     account_currency: str | None = None,
 ) -> StrategyProfitabilityEvidence:
     account = str(account_currency or SETTINGS.account_currency)
     try:
         records = _load_jsonl(order_log_path)
+        commission_report = _load_json_object(commission_report_path)
     except (StrategyProfitabilityEvidenceError, UnicodeError, OSError) as exc:
         return _blocked_input_evidence(
             reason=f"Profitability source evidence is unreadable; report blocked: {exc}",
@@ -306,6 +615,7 @@ def audit_strategy_profitability_evidence(
     return build_strategy_profitability_evidence(
         records,
         account_currency=account,
+        commission_report=commission_report,
     )
 
 
@@ -342,6 +652,7 @@ def main() -> int:
     print("FEE AWARE             :", result.fee_aware)
     print("NET REALIZED PNL      :", result.net_realized_pnl)
     print("NET PROFIT PROVEN     :", result.net_profitability_proven)
+    print("NET PERFORMANCE       :", result.net_performance)
     print("LIVE READY            :", result.live_ready)
     print("REASON                :", result.reason)
     print("REPORT                :", DEFAULT_REPORT_PATH)
