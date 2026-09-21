@@ -80,6 +80,7 @@ from ai_asset_platform.execution.live_pilot_send_journal import (
     load_global_send_attempt_marker,
     load_send_attempt_marker,
     load_send_journal,
+    load_terminal_reconciliation_marker,
     mark_partial_reconciled,
     mark_postfill_proven,
     mark_rejected_reconciled,
@@ -600,25 +601,19 @@ def _definitive_rejection_reason(value: object) -> str | None:
 def _terminal_reconciliation_is_durably_proven(
     request: LivePilotOperationalRequest,
     journal: dict,
+    terminal: dict,
 ) -> bool:
-    """Validate a persisted terminal outcome before surfacing COMPLETE.
-
-    The mutable summary journal is not sufficient by itself.  Require the
-    campaign-wide and per-intent irreversible markers plus the state-specific
-    payload written by the reconciliation transition.
-    """
-    state = journal.get("state")
+    """Validate immutable terminal proof plus both irreversible attempt markers."""
+    state = terminal.get("state")
     if state not in {"PARTIAL_RECONCILED", "REJECTED_RECONCILED"}:
         return False
-    if journal.get("schema_version") != SEND_JOURNAL_SCHEMA_VERSION:
-        return False
     if (
-        not isinstance(journal.get("send_attempt_count"), int)
-        or isinstance(journal.get("send_attempt_count"), bool)
-        or journal.get("send_attempt_count") != 1
-        or journal.get("recovery_required") is not False
-        or journal.get("order_sent") is not False
-        or journal.get("live_order_sent") is not False
+        terminal.get("schema_version") != SEND_JOURNAL_SCHEMA_VERSION
+        or terminal.get("send_attempt_count") != 1
+        or isinstance(terminal.get("send_attempt_count"), bool)
+        or terminal.get("recovery_required") is not False
+        or terminal.get("order_sent") is not False
+        or terminal.get("live_order_sent") is not False
     ):
         return False
     for flag in (
@@ -628,8 +623,60 @@ def _terminal_reconciliation_is_durably_proven(
         "automatic_flatten_allowed",
         "automatic_close_allowed",
     ):
-        if journal.get(flag) is not False:
+        if terminal.get(flag) is not False:
             return False
+
+    # The independent terminal marker carries the original consumed
+    # authorization binding so a later edit/restore of the mutable summary
+    # journal cannot redefine what the pilot was allowed to do.
+    quantity = terminal.get("authorized_quantity")
+    limit_price = _positive_finite_number(terminal.get("authorized_limit_price"))
+    notional = _positive_finite_number(
+        terminal.get("authorized_estimated_notional_jpy")
+    )
+    endpoint_port = terminal.get("authorized_endpoint_port")
+    if not (
+        str(terminal.get("intent_id") or "").strip() == request.intent_id.strip()
+        and str(terminal.get("nonce") or "").strip() == request.nonce.strip()
+        and str(terminal.get("authorized_ticker") or "").strip().upper()
+        == request.ticker.strip().upper()
+        and str(terminal.get("authorized_side") or "").strip().upper()
+        == request.side.strip().upper()
+        and isinstance(quantity, int)
+        and not isinstance(quantity, bool)
+        and quantity == request.quantity
+        and limit_price is not None
+        and limit_price == float(request.limit_price)
+        and notional is not None
+        and notional == float(request.estimated_notional_jpy)
+        and str(
+            terminal.get("authorized_account_fingerprint") or ""
+        ).strip().lower()
+        == request.expected_account_fingerprint.strip().lower()
+        and isinstance(endpoint_port, int)
+        and not isinstance(endpoint_port, bool)
+        and endpoint_port in {4001, 7496}
+    ):
+        return False
+
+    # A terminal summary may legitimately lag the exclusive marker if the
+    # process crashed between marker creation and summary replacement.  But a
+    # summary that already claims a terminal state must agree with the marker.
+    journal_state = journal.get("state") if isinstance(journal, dict) else None
+    if journal_state in {"PARTIAL_RECONCILED", "REJECTED_RECONCILED"}:
+        if journal_state != state:
+            return False
+    if not isinstance(journal, dict) or journal.get("send_attempt_count") != 1:
+        return False
+    if isinstance(journal.get("send_attempt_count"), bool):
+        return False
+    if journal.get("order_id") not in {None, terminal.get("order_id")}:
+        return False
+    if journal.get("sender_client_id") not in {
+        None,
+        terminal.get("sender_client_id"),
+    }:
+        return False
 
     try:
         attempt = load_send_attempt_marker(
@@ -665,37 +712,37 @@ def _terminal_reconciliation_is_durably_proven(
 
     attempt_time = _parse_aware_timestamp(attempt.get("recorded_at"))
     global_time = _parse_aware_timestamp(global_attempt.get("recorded_at"))
-    journal_attempt_time = _parse_aware_timestamp(
-        journal.get("send_attempt_recorded_at")
+    terminal_attempt_time = _parse_aware_timestamp(
+        terminal.get("send_attempt_recorded_at")
     )
-    reconciled_time = _parse_aware_timestamp(journal.get("reconciled_at"))
+    terminal_time = _parse_aware_timestamp(terminal.get("terminal_recorded_at"))
     if (
         attempt_time is None
         or global_time is None
-        or journal_attempt_time is None
-        or reconciled_time is None
+        or terminal_attempt_time is None
+        or terminal_time is None
         or global_time > attempt_time
-        or journal_attempt_time != attempt_time
-        or reconciled_time < attempt_time
+        or terminal_attempt_time != attempt_time
+        or terminal_time < attempt_time
     ):
         return False
 
-    order_id = _positive_exact_int(journal.get("order_id"))
-    sender_client_id = _nonnegative_exact_int(journal.get("sender_client_id"))
+    order_id = _positive_exact_int(terminal.get("order_id"))
+    sender_client_id = _nonnegative_exact_int(terminal.get("sender_client_id"))
     if order_id is None or sender_client_id is None:
         return False
 
     expected_side = request.side.strip().upper()
     authorized_quantity = Decimal(request.quantity)
-    final_position = _finite_decimal(journal.get("final_position_quantity"))
+    final_position = _finite_decimal(terminal.get("final_position_quantity"))
     if final_position is None:
         return False
 
     if state == "PARTIAL_RECONCILED":
-        perm_id = _positive_exact_int(journal.get("perm_id"))
-        exec_ids = journal.get("exec_ids")
-        filled_quantity = _finite_decimal(journal.get("filled_quantity"))
-        commission_total = _finite_decimal(journal.get("commission_total"))
+        perm_id = _positive_exact_int(terminal.get("perm_id"))
+        exec_ids = terminal.get("exec_ids")
+        filled_quantity = _finite_decimal(terminal.get("filled_quantity"))
+        commission_total = _finite_decimal(terminal.get("commission_total"))
         expected_currency = (
             "JPY" if request.ticker.strip().upper() == "9432.T" else "USD"
         )
@@ -712,7 +759,7 @@ def _terminal_reconciliation_is_durably_proven(
             or filled_quantity <= 0
             or filled_quantity >= authorized_quantity
             or commission_total is None
-            or str(journal.get("commission_currency") or "").strip().upper()
+            or str(terminal.get("commission_currency") or "").strip().upper()
             != expected_currency
         ):
             return False
@@ -723,14 +770,15 @@ def _terminal_reconciliation_is_durably_proven(
         )
         return final_position == expected_final
 
-    if journal.get("perm_id") is not None:
+    if terminal.get("perm_id") is not None:
         return False
-    rejection_reason = _definitive_rejection_reason(journal.get("rejection_reason"))
+    rejection_reason = _definitive_rejection_reason(
+        terminal.get("rejection_reason")
+    )
     if rejection_reason is None:
         return False
     expected_final = Decimal("0") if expected_side == "BUY" else authorized_quantity
     return final_position == expected_final
-
 
 def _promote_terminal_reconciliation_if_proven(
     request: LivePilotOperationalRequest,
@@ -1004,31 +1052,61 @@ def _reconcile_once(
         )
 
     terminal_state = journal.get("state") if isinstance(journal, dict) else None
-    if terminal_state in {"PARTIAL_RECONCILED", "REJECTED_RECONCILED"}:
-        if not _terminal_reconciliation_is_durably_proven(request, journal):
+    try:
+        terminal = load_terminal_reconciliation_marker(
+            request.intent_id,
+            directory=DEFAULT_JOURNAL_DIR,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        terminal = {"state": "INVALID_TERMINAL_MARKER"}
+
+    if terminal is not None:
+        terminal_marker_state = (
+            terminal.get("state") if isinstance(terminal, dict) else None
+        )
+        if not isinstance(terminal, dict) or not _terminal_reconciliation_is_durably_proven(
+            request,
+            journal,
+            terminal,
+        ):
             return LivePilotOperationalResult(
                 status="BLOCKED_TERMINAL_EVIDENCE",
                 checked_at=_utc_now().isoformat(timespec="seconds"),
                 recovery_only=True,
                 preflight_ready=False,
                 send_status=send_status,
-                completion_status=terminal_state,
+                completion_status=terminal_marker_state,
                 complete=False,
                 blockers=(
-                    "persisted terminal reconciliation evidence is incomplete or invalid",
+                    "exclusive terminal reconciliation evidence is incomplete or invalid",
                 ),
                 broker_connection_used=False,
                 order_transport_called=order_transport_called,
             )
+        terminal_marker_state = str(terminal.get("state"))
         return LivePilotOperationalResult(
-            status=terminal_state,
+            status=terminal_marker_state,
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=True,
+            preflight_ready=False,
+            send_status=send_status,
+            completion_status=terminal_marker_state,
+            complete=True,
+            blockers=(),
+            broker_connection_used=False,
+            order_transport_called=order_transport_called,
+        )
+
+    if terminal_state in {"PARTIAL_RECONCILED", "REJECTED_RECONCILED"}:
+        return LivePilotOperationalResult(
+            status="BLOCKED_TERMINAL_EVIDENCE",
             checked_at=_utc_now().isoformat(timespec="seconds"),
             recovery_only=True,
             preflight_ready=False,
             send_status=send_status,
             completion_status=terminal_state,
-            complete=True,
-            blockers=(),
+            complete=False,
+            blockers=("exclusive terminal reconciliation marker is missing",),
             broker_connection_used=False,
             order_transport_called=order_transport_called,
         )
@@ -1037,6 +1115,41 @@ def _reconcile_once(
     _promote_postfill_if_proven(request)
     terminal_status = _promote_terminal_reconciliation_if_proven(request)
     if terminal_status is not None:
+        refreshed_journal = load_send_journal(
+            request.intent_id,
+            directory=DEFAULT_JOURNAL_DIR,
+        )
+        try:
+            terminal = load_terminal_reconciliation_marker(
+                request.intent_id,
+                directory=DEFAULT_JOURNAL_DIR,
+            )
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            terminal = None
+        if (
+            not isinstance(refreshed_journal, dict)
+            or not isinstance(terminal, dict)
+            or terminal.get("state") != terminal_status
+            or not _terminal_reconciliation_is_durably_proven(
+                request,
+                refreshed_journal,
+                terminal,
+            )
+        ):
+            return LivePilotOperationalResult(
+                status="BLOCKED_TERMINAL_EVIDENCE",
+                checked_at=_utc_now().isoformat(timespec="seconds"),
+                recovery_only=True,
+                preflight_ready=False,
+                send_status=send_status,
+                completion_status=terminal_status,
+                complete=False,
+                blockers=(
+                    "new terminal reconciliation proof did not validate durably",
+                ),
+                broker_connection_used=True,
+                order_transport_called=order_transport_called,
+            )
         return LivePilotOperationalResult(
             status=terminal_status,
             checked_at=_utc_now().isoformat(timespec="seconds"),
