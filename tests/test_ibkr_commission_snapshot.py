@@ -355,6 +355,49 @@ def test_successful_refresh_recovers_after_prior_unready_latest(tmp_path):
     assert latest_payload["ready"] is True
 
 
+def test_existing_ledger_without_explicit_paper_only_is_rejected(tmp_path):
+    import json
+    import pytest
+
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_only": False,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "unverified-exec",
+                        "commission": 1.0,
+                        "currency": "USD",
+                        "realized_pnl": None,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("paper-exec", commission=0.5),),
+        order_sent=False,
+    )
+
+    with pytest.raises(ValueError, match="Paper-only"):
+        module.persist_commission_ledger(snapshot, ledger_path=ledger)
+
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert payload["paper_only"] is False
+    assert payload["commissions"][0]["exec_id"] == "unverified-exec"
+
+
 def test_module_is_read_only_and_contains_no_order_mutation_api():
     source = Path(
         "src/ai_asset_platform/brokers/ibkr_commission_snapshot.py"
