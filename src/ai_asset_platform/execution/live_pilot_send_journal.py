@@ -65,6 +65,10 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.attempted.json"
 
 
+def _terminal_path(intent_id: str, directory: Path) -> Path:
+    return directory / f"{_stem(intent_id)}.terminal.json"
+
+
 def _resolve_machine_state_root() -> Path:
     """Resolve checkout-independent durable operator state for the campaign marker."""
     try:
@@ -232,6 +236,21 @@ def global_send_attempt_recorded(*, directory: Path = DEFAULT_JOURNAL_DIR) -> bo
     otherwise-unblocked attempt marker.
     """
     return _global_attempt_path(directory).exists()
+
+
+def load_terminal_reconciliation_marker(
+    intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    """Load the exclusive terminal-reconciliation proof, if it exists.
+
+    This record is created exactly once before the mutable summary journal is
+    advanced to PARTIAL_RECONCILED or REJECTED_RECONCILED.  Recovery treats
+    this marker, not the mutable summary, as the durable state-specific proof.
+    """
+    path = _terminal_path(intent_id, directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="terminal reconciliation marker")
 
 
 def load_global_send_attempt_marker(
@@ -542,6 +561,108 @@ def mark_unknown(
     return payload
 
 
+def _validated_attempt_marker_timestamp(
+    payload: dict,
+    *,
+    intent_id: str,
+    directory: Path,
+) -> str:
+    """Validate both irreversible attempt markers before a terminal transition."""
+    try:
+        attempt = load_send_attempt_marker(intent_id, directory=directory)
+        global_attempt = load_global_send_attempt_marker(directory=directory)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise PermissionError("irreversible attempt marker evidence is unreadable") from exc
+    if not isinstance(attempt, dict) or not isinstance(global_attempt, dict):
+        raise PermissionError("both irreversible attempt markers are required")
+    if (
+        attempt.get("schema_version") != REPORT_SCHEMA_VERSION
+        or global_attempt.get("schema_version") != REPORT_SCHEMA_VERSION
+        or attempt.get("state") != "SEND_ATTEMPT_RECORDED"
+        or str(attempt.get("intent_id") or "") != intent_id
+        or str(global_attempt.get("intent_id") or "") != intent_id
+        or str(attempt.get("nonce") or "") != str(payload.get("nonce") or "")
+        or attempt.get("automatic_resend_allowed") is not False
+        or global_attempt.get("automatic_resend_allowed") is not False
+    ):
+        raise PermissionError("irreversible attempt marker binding is invalid")
+    for flag in (
+        "automatic_cancel_allowed",
+        "automatic_modify_allowed",
+        "automatic_flatten_allowed",
+        "automatic_close_allowed",
+    ):
+        if attempt.get(flag) is not False:
+            raise PermissionError("irreversible attempt marker action flags are invalid")
+
+    recorded_at = str(attempt.get("recorded_at") or "").strip()
+    global_recorded_at = str(global_attempt.get("recorded_at") or "").strip()
+    journal_recorded_at = str(payload.get("send_attempt_recorded_at") or "").strip()
+    try:
+        attempt_time = datetime.fromisoformat(recorded_at)
+        global_time = datetime.fromisoformat(global_recorded_at)
+        journal_time = datetime.fromisoformat(journal_recorded_at)
+    except ValueError as exc:
+        raise PermissionError("irreversible attempt marker timestamp is invalid") from exc
+    for observed in (attempt_time, global_time, journal_time):
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise PermissionError("irreversible attempt marker timestamp is not timezone-aware")
+    attempt_time = attempt_time.astimezone(timezone.utc)
+    global_time = global_time.astimezone(timezone.utc)
+    journal_time = journal_time.astimezone(timezone.utc)
+    if global_time > attempt_time or journal_time != attempt_time:
+        raise PermissionError("irreversible attempt marker timestamps conflict")
+    return attempt_time.isoformat(timespec="seconds")
+
+
+def _terminal_marker_base(
+    payload: dict,
+    *,
+    intent_id: str,
+    state: str,
+    order_id: int,
+    recorded_at: str,
+    reconciled_at: str,
+) -> dict:
+    sender_client_id = payload.get("sender_client_id")
+    if (
+        not isinstance(sender_client_id, int)
+        or isinstance(sender_client_id, bool)
+        or sender_client_id < 0
+    ):
+        raise PermissionError("terminal reconciliation sender client_id is invalid")
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "intent_id": intent_id,
+        "nonce": str(payload.get("nonce") or ""),
+        "state": state,
+        "authorized_ticker": payload.get("authorized_ticker"),
+        "authorized_side": payload.get("authorized_side"),
+        "authorized_quantity": payload.get("authorized_quantity"),
+        "authorized_limit_price": payload.get("authorized_limit_price"),
+        "authorized_estimated_notional_jpy": payload.get(
+            "authorized_estimated_notional_jpy"
+        ),
+        "authorized_account_fingerprint": payload.get(
+            "authorized_account_fingerprint"
+        ),
+        "authorized_endpoint_port": payload.get("authorized_endpoint_port"),
+        "send_attempt_count": 1,
+        "send_attempt_recorded_at": recorded_at,
+        "terminal_recorded_at": reconciled_at,
+        "order_id": order_id,
+        "sender_client_id": sender_client_id,
+        "recovery_required": False,
+        "automatic_resend_allowed": False,
+        "automatic_cancel_allowed": False,
+        "automatic_modify_allowed": False,
+        "automatic_flatten_allowed": False,
+        "automatic_close_allowed": False,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
+
+
 def mark_partial_reconciled(
     intent_id: str,
     *,
@@ -596,6 +717,36 @@ def mark_partial_reconciled(
         raise PermissionError("partial reconciliation order_id conflicts with journal")
     if existing_perm not in {None, perm_id}:
         raise PermissionError("partial reconciliation perm_id conflicts with journal")
+
+    attempt_recorded_at = _validated_attempt_marker_timestamp(
+        payload,
+        intent_id=intent_id,
+        directory=directory,
+    )
+    reconciled_at = _now(now)
+    terminal_marker = _terminal_marker_base(
+        payload,
+        intent_id=intent_id,
+        state="PARTIAL_RECONCILED",
+        order_id=order_id,
+        recorded_at=attempt_recorded_at,
+        reconciled_at=reconciled_at,
+    )
+    terminal_marker.update(
+        perm_id=perm_id,
+        exec_ids=list(normalized_exec_ids),
+        filled_quantity=float(filled_quantity),
+        commission_total=float(commission_total),
+        commission_currency=currency,
+        final_position_quantity=float(final_position_quantity),
+    )
+    try:
+        _atomic_new(_terminal_path(intent_id, directory), terminal_marker)
+    except FileExistsError as exc:
+        raise PermissionError(
+            "terminal reconciliation marker already exists for this intent"
+        ) from exc
+
     payload.update(
         state="PARTIAL_RECONCILED",
         order_id=order_id,
@@ -605,7 +756,7 @@ def mark_partial_reconciled(
         commission_total=float(commission_total),
         commission_currency=currency,
         final_position_quantity=float(final_position_quantity),
-        reconciled_at=_now(now),
+        reconciled_at=reconciled_at,
         recovery_required=False,
         automatic_resend_allowed=False,
         automatic_cancel_allowed=False,
@@ -654,12 +805,39 @@ def mark_rejected_reconciled(
     existing_order = payload.get("order_id")
     if existing_order not in {None, order_id}:
         raise PermissionError("rejection reconciliation order_id conflicts with journal")
+
+    attempt_recorded_at = _validated_attempt_marker_timestamp(
+        payload,
+        intent_id=intent_id,
+        directory=directory,
+    )
+    reconciled_at = _now(now)
+    terminal_marker = _terminal_marker_base(
+        payload,
+        intent_id=intent_id,
+        state="REJECTED_RECONCILED",
+        order_id=order_id,
+        recorded_at=attempt_recorded_at,
+        reconciled_at=reconciled_at,
+    )
+    terminal_marker.update(
+        perm_id=None,
+        rejection_reason=reason,
+        final_position_quantity=float(final_position_quantity),
+    )
+    try:
+        _atomic_new(_terminal_path(intent_id, directory), terminal_marker)
+    except FileExistsError as exc:
+        raise PermissionError(
+            "terminal reconciliation marker already exists for this intent"
+        ) from exc
+
     payload.update(
         state="REJECTED_RECONCILED",
         order_id=order_id,
         rejection_reason=reason,
         final_position_quantity=float(final_position_quantity),
-        reconciled_at=_now(now),
+        reconciled_at=reconciled_at,
         recovery_required=False,
         automatic_resend_allowed=False,
         automatic_cancel_allowed=False,
