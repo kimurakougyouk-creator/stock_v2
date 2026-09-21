@@ -24,6 +24,7 @@ import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 
 from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
@@ -240,9 +241,57 @@ def _nonnegative_exact_int(value: object) -> int | None:
     return value
 
 
+def _positive_finite_number(value: object) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return parsed
+
+
+def _request_matches_durable_authorization(
+    request: LivePilotOperationalRequest,
+    journal: dict | None,
+) -> bool:
+    """Bind every recovery pass to the exact consumed one-shot authorization."""
+    if not isinstance(journal, dict):
+        return False
+    quantity = journal.get("authorized_quantity")
+    limit_price = _positive_finite_number(journal.get("authorized_limit_price"))
+    notional = _positive_finite_number(
+        journal.get("authorized_estimated_notional_jpy")
+    )
+    endpoint_port = journal.get("authorized_endpoint_port")
+    return bool(
+        str(journal.get("intent_id") or "").strip() == request.intent_id.strip()
+        and str(journal.get("nonce") or "").strip() == request.nonce.strip()
+        and str(journal.get("authorized_ticker") or "").strip().upper()
+        == request.ticker.strip().upper()
+        and str(journal.get("authorized_side") or "").strip().upper()
+        == request.side.strip().upper()
+        and isinstance(quantity, int)
+        and not isinstance(quantity, bool)
+        and quantity == request.quantity
+        and limit_price is not None
+        and limit_price == float(request.limit_price)
+        and notional is not None
+        and notional == float(request.estimated_notional_jpy)
+        and str(
+            journal.get("authorized_account_fingerprint") or ""
+        ).strip().lower()
+        == request.expected_account_fingerprint.strip().lower()
+        and isinstance(endpoint_port, int)
+        and not isinstance(endpoint_port, bool)
+        and endpoint_port in {4001, 7496}
+    )
+
+
 def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
     journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
     if not isinstance(journal, dict):
+        return
+    if not _request_matches_durable_authorization(request, journal):
         return
 
     state = journal.get("state")
@@ -464,6 +513,23 @@ def _reconcile_once(
     send_status: str | None,
     order_transport_called: bool,
 ) -> LivePilotOperationalResult:
+    journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
+    if not _request_matches_durable_authorization(request, journal):
+        return LivePilotOperationalResult(
+            status="BLOCKED_AUTHORIZATION_BINDING",
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=True,
+            preflight_ready=False,
+            send_status=send_status,
+            completion_status=None,
+            complete=False,
+            blockers=(
+                "recovery request does not match the durable consumed authorization",
+            ),
+            broker_connection_used=False,
+            order_transport_called=order_transport_called,
+        )
+
     _collect_post_attempt_readonly_evidence(request)
     _promote_postfill_if_proven(request)
 
@@ -521,6 +587,23 @@ def run_live_pilot_operational_once(
 
     attempt_recorded = global_send_attempt_recorded(directory=DEFAULT_JOURNAL_DIR)
     if attempt_recorded:
+        journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
+        if not _request_matches_durable_authorization(request, journal):
+            return LivePilotOperationalResult(
+                status="BLOCKED_AUTHORIZATION_BINDING",
+                checked_at=_utc_now().isoformat(timespec="seconds"),
+                recovery_only=True,
+                preflight_ready=False,
+                send_status=None,
+                completion_status=None,
+                complete=False,
+                blockers=(
+                    "recovery request does not match the durable consumed authorization",
+                ),
+                broker_connection_used=False,
+                order_transport_called=False,
+            )
+
         # Recovery is safety-critical too. Verify the exact approved commit
         # and tracked cleanliness before any recovery broker collection or
         # completion persistence. The pre-send path is still audited again by
