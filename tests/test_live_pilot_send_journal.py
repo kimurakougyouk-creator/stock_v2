@@ -795,6 +795,104 @@ def test_partial_reconciliation_is_durable_terminal_and_never_reenables_send(tmp
         )
 
 
+def test_late_terminal_rejection_proof_survives_timeout_unknown_race(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason="broker acknowledgement timed out",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    evidence = record_definitive_rejection_evidence(
+        INTENT,
+        nonce=NONCE,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        account_fingerprint="a" * 64,
+        endpoint_port=4001,
+        order_id=101,
+        client_id=681,
+        rejection_reason=(
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+
+    assert evidence["rejection_reason"].endswith("Cancelled")
+    assert load_send_journal(INTENT, directory=tmp_path)["state"] == "UNKNOWN"
+
+
+def test_post_ack_cancelled_rejection_keeps_acknowledged_perm_id(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_order_acknowledged(
+        INTENT,
+        order_id=101,
+        perm_id=202,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    evidence = record_definitive_rejection_evidence(
+        INTENT,
+        nonce=NONCE,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        account_fingerprint="a" * 64,
+        endpoint_port=4001,
+        order_id=101,
+        client_id=681,
+        perm_id=202,
+        rejection_reason=(
+            "broker completedOrder callback reported terminal status: Cancelled"
+        ),
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+    assert evidence["perm_id"] == 202
+
+    result = mark_rejected_reconciled(
+        INTENT,
+        rejection_reason=(
+            "broker completedOrder callback reported terminal status: Cancelled"
+        ),
+        order_id=101,
+        perm_id=202,
+        final_position_quantity=0.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert result["state"] == "REJECTED_RECONCILED"
+    assert result["perm_id"] == 202
+    terminal = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert terminal is not None
+    assert terminal["perm_id"] == 202
+
+
 def test_rejected_reconciliation_is_durable_terminal_and_never_retries(tmp_path: Path):
     _create(tmp_path)
     record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
