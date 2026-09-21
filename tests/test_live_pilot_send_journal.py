@@ -458,6 +458,7 @@ def test_order_id_is_durably_bound_before_transport_and_survives_unknown(tmp_pat
     )
     assert bound["state"] == "SEND_ATTEMPT_RECORDED"
     assert bound["order_id"] == 101
+    assert bound["sender_client_id"] == 681
     assert bound["perm_id"] is None
     assert bound["recovery_required"] is True
 
@@ -627,4 +628,36 @@ def test_order_acknowledgement_rejects_non_exact_broker_ids(
             perm_id=perm_id,
             directory=tmp_path,
             now=NOW + timedelta(seconds=2),
+        )
+
+
+
+def test_pretransport_sender_client_id_is_exact_and_conflict_checked(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+
+    for bad_client_id in ("681", 681.0, True, -1):
+        with pytest.raises(ValueError, match="client_id must be a non-negative exact int"):
+            record_order_id_before_transport(
+                INTENT,
+                order_id=101,
+                client_id=bad_client_id,
+                directory=tmp_path,
+                now=NOW + timedelta(seconds=2),
+            )
+
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+    with pytest.raises(PermissionError, match="client_id conflicts"):
+        record_order_id_before_transport(
+            INTENT,
+            order_id=101,
+            client_id=682,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
         )
