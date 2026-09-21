@@ -255,6 +255,7 @@ def _net_realized_trades_with_commissions(
     quantities: dict[str, int] = {}
     average_gross_cost_account: dict[str, Decimal] = {}
     average_buy_fee_account: dict[str, Decimal] = {}
+    buy_sources: dict[str, list[dict]] = {}
     symbol_currency: dict[str, str] = {}
     net_realized: list[dict] = []
 
@@ -349,6 +350,22 @@ def _net_realized_trades_with_commissions(
                 prior_fee * Decimal(held) + fee_account
             ) / Decimal(new_qty)
             quantities[ticker] = new_qty
+            buy_sources.setdefault(ticker, []).append(
+                {
+                    "remaining_shares": Decimal(shares),
+                    "exec_ids": tuple(exec_ids),
+                    "fill_currency": fill_currency,
+                    "fx_to_account_rate": fx_rate,
+                    "commission_account_total": fee_account,
+                    "gross_unit_cost_account": unit_account,
+                    "order_intent_id": str(record.get("order_intent_id") or ""),
+                    "created_at": (
+                        str(record.get("created_at"))
+                        if record.get("created_at")
+                        else None
+                    ),
+                }
+            )
             continue
 
         if shares > held:
@@ -364,6 +381,57 @@ def _net_realized_trades_with_commissions(
 
         gross_pnl = (unit_account - gross_avg) * Decimal(shares)
         allocated_buy_fee = buy_fee_avg * Decimal(shares)
+
+        source_rows = buy_sources.get(ticker)
+        if not source_rows:
+            raise StrategyProfitabilityEvidenceError(
+                f"confirmed SELL for {ticker} has no BUY provenance"
+            )
+        source_total = sum(
+            (row["remaining_shares"] for row in source_rows),
+            Decimal("0"),
+        )
+        if source_total != Decimal(held):
+            raise StrategyProfitabilityEvidenceError(
+                f"BUY provenance for {ticker} does not match accounted holdings"
+            )
+
+        sale_ratio = Decimal(shares) / Decimal(held)
+        buy_contributions: list[dict] = []
+        for row in source_rows:
+            remaining_before = row["remaining_shares"]
+            allocated_shares = remaining_before * sale_ratio
+            source_commission_total = row["commission_account_total"]
+            source_original_shares = (
+                source_commission_total
+                / (source_commission_total / remaining_before)
+                if source_commission_total != 0
+                else remaining_before
+            )
+            commission_per_remaining_share = (
+                source_commission_total / remaining_before
+                if remaining_before != 0
+                else Decimal("0")
+            )
+            allocated_commission = commission_per_remaining_share * allocated_shares
+            buy_contributions.append(
+                {
+                    "order_intent_id": row["order_intent_id"],
+                    "buy_exec_ids": list(row["exec_ids"]),
+                    "allocated_shares_weighted_average": float(allocated_shares),
+                    "remaining_shares_before_sale": float(remaining_before),
+                    "fill_currency": row["fill_currency"],
+                    "fx_to_account_rate": float(row["fx_to_account_rate"]),
+                    "gross_unit_cost_account": float(row["gross_unit_cost_account"]),
+                    "allocated_commission_account": float(allocated_commission),
+                    "created_at": row["created_at"],
+                }
+            )
+            row["commission_account_total"] = (
+                source_commission_total - allocated_commission
+            )
+            row["remaining_shares"] = remaining_before - allocated_shares
+
         net_pnl = gross_pnl - allocated_buy_fee - fee_account
         if not net_pnl.is_finite():
             raise StrategyProfitabilityEvidenceError(
@@ -375,6 +443,7 @@ def _net_realized_trades_with_commissions(
                 "shares": shares,
                 "order_intent_id": str(record.get("order_intent_id") or ""),
                 "sell_exec_ids": list(exec_ids),
+                "buy_contributions_weighted_average": buy_contributions,
                 "fill_currency": fill_currency,
                 "account_currency": account,
                 "sell_price_local": float(price),
@@ -397,6 +466,7 @@ def _net_realized_trades_with_commissions(
         if remaining == 0:
             average_gross_cost_account.pop(ticker, None)
             average_buy_fee_account.pop(ticker, None)
+            buy_sources.pop(ticker, None)
 
     return net_realized
 
