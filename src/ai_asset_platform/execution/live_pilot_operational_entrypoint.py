@@ -268,6 +268,17 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
             return
 
     if state == "POSTFILL_PROVEN":
+        if perm_id is None:
+            return
+        for row in rows:
+            row_order_id = _positive_exact_int(row.get("order_id"))
+            row_perm_id = _positive_exact_int(row.get("perm_id"))
+            if row_order_id is None or row_perm_id is None:
+                return
+            if row_order_id == order_id and row_perm_id != perm_id:
+                return
+            if row_perm_id == perm_id and row_order_id != order_id:
+                return
         return
 
     # SEND_ATTEMPT_RECORDED is intentionally recoverable here. A crash can
