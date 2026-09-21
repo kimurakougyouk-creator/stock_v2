@@ -72,6 +72,26 @@ def _broker_exec_ids(result: object | None) -> list[str]:
     return ids
 
 
+def _broker_exec_fills(result: object | None) -> list[dict]:
+    fills: list[dict] = []
+    seen: set[str] = set()
+    for row in list(getattr(result, "executions", None) or []):
+        if not isinstance(row, dict):
+            continue
+        exec_id = str(row.get("exec_id", "")).strip()
+        if not exec_id or exec_id in seen:
+            continue
+        try:
+            shares = float(row.get("shares"))
+        except (TypeError, ValueError):
+            continue
+        if shares <= 0:
+            continue
+        seen.add(exec_id)
+        fills.append({"exec_id": exec_id, "shares": shares})
+    return fills
+
+
 def execute_approved_signal_via_ibkr_paper(
     *, ticker: str, signal: str, shares: int, order_intent_id: str,
     order_log_path: Path = Path("results/paper_orders.jsonl"),
@@ -108,6 +128,7 @@ def execute_approved_signal_via_ibkr_paper(
                 currency=instrument.currency, order_intent_id=order_intent_id,
                 order_log_path=order_log_path, fx_to_account_rate=fx_rate,
                 broker_exec_ids=_broker_exec_ids(result),
+                broker_exec_fills=_broker_exec_fills(result),
                 broker_order_id=int(raw_order_id) if raw_order_id is not None else None,
             )
         return execution
