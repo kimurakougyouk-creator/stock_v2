@@ -311,6 +311,50 @@ def test_failed_refresh_still_migrates_prior_latest_to_ledger(tmp_path):
     assert ledger_payload["commissions"][0]["exec_id"] == "old-exec"
 
 
+def test_successful_refresh_recovers_after_prior_unready_latest(tmp_path):
+    import json
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": False,
+                "endpoint_port": None,
+                "ready": False,
+                "commission_count": 0,
+                "commissions": [],
+                "duplicate_conflicts": [],
+                "errors": ["temporary connection failure"],
+                "broker_connection_used": True,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    recovered = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("exec-recovered", commission=0.5),),
+        order_sent=False,
+    )
+
+    module.persist_commission_snapshot(
+        recovered,
+        report_path=latest,
+        ledger_path=ledger,
+    )
+
+    ledger_payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert ledger_payload["commission_count"] == 1
+    assert ledger_payload["commissions"][0]["exec_id"] == "exec-recovered"
+    latest_payload = json.loads(latest.read_text(encoding="utf-8"))
+    assert latest_payload["ready"] is True
+
+
 def test_module_is_read_only_and_contains_no_order_mutation_api():
     source = Path(
         "src/ai_asset_platform/brokers/ibkr_commission_snapshot.py"
