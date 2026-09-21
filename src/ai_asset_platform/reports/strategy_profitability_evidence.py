@@ -402,12 +402,6 @@ def _net_realized_trades_with_commissions(
             remaining_before = row["remaining_shares"]
             allocated_shares = remaining_before * sale_ratio
             source_commission_total = row["commission_account_total"]
-            source_original_shares = (
-                source_commission_total
-                / (source_commission_total / remaining_before)
-                if source_commission_total != 0
-                else remaining_before
-            )
             commission_per_remaining_share = (
                 source_commission_total / remaining_before
                 if remaining_before != 0
