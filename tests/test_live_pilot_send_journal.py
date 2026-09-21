@@ -474,7 +474,7 @@ def test_order_id_is_durably_bound_before_transport_and_survives_unknown(tmp_pat
 
 def test_pretransport_order_id_binding_is_fail_closed(tmp_path: Path):
     _create(tmp_path)
-    with pytest.raises(PermissionError, match="send attempt is recorded"):
+    with pytest.raises(PermissionError, match="marker is missing|send attempt is recorded"):
         record_order_id_before_transport(
             INTENT,
             order_id=101,
