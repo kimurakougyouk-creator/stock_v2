@@ -206,6 +206,59 @@ def test_persist_snapshot_updates_latest_and_durable_ledger(tmp_path):
     assert ledger.exists()
 
 
+def test_first_ledger_write_migrates_prior_latest_before_replacement(tmp_path):
+    import json
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": True,
+                "endpoint_port": 4002,
+                "ready": True,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "old-exec",
+                        "commission": 1.25,
+                        "currency": "USD",
+                        "realized_pnl": 10.0,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "duplicate_conflicts": [],
+                "errors": [],
+                "broker_connection_used": True,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    current = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("new-exec", commission=0.75),),
+        order_sent=False,
+    )
+
+    module.persist_commission_snapshot(
+        current,
+        report_path=latest,
+        ledger_path=ledger,
+    )
+
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert [row["exec_id"] for row in payload["commissions"]] == [
+        "new-exec",
+        "old-exec",
+    ]
+
+
 def test_module_is_read_only_and_contains_no_order_mutation_api():
     source = Path(
         "src/ai_asset_platform/brokers/ibkr_commission_snapshot.py"
