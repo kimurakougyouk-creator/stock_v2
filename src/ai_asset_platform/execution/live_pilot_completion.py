@@ -107,6 +107,16 @@ def _fresh(report: dict | None, *, now: datetime, max_age_seconds: float) -> boo
     return 0.0 <= age <= max_age_seconds
 
 
+def _parse_aware_timestamp(value: object) -> datetime | None:
+    try:
+        observed = datetime.fromisoformat(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        return None
+    return observed.astimezone(timezone.utc)
+
+
 def _finite(value: object) -> float | None:
     try:
         parsed = float(value)
@@ -430,7 +440,40 @@ def evaluate_live_pilot_completion(
     account_fresh = _fresh(final_account_report, now=current, max_age_seconds=max_age)
     open_orders_fresh = _fresh(final_open_orders_report, now=current, max_age_seconds=max_age)
     paper_fresh = _fresh(paper_monitor_report, now=current, max_age_seconds=max_age)
-    evidence_fresh = all((postfill_fresh, account_fresh, open_orders_fresh, paper_fresh))
+
+    # Completion must use Paper safety evidence collected after the irreversible
+    # send-attempt marker, not merely a still-fresh pre-send monitor snapshot.
+    # The marker/report timestamps are persisted at second precision, so equal
+    # timestamps remain ambiguous and fail closed.
+    attempt_recorded_at = _parse_aware_timestamp(
+        send_attempt_marker.get("recorded_at")
+        if isinstance(send_attempt_marker, dict)
+        else None
+    )
+    paper_checked_at = _parse_aware_timestamp(
+        paper_monitor_report.get("checked_at")
+        if isinstance(paper_monitor_report, dict)
+        else None
+    )
+    paper_after_send_attempt = bool(
+        attempt_recorded_at is not None
+        and paper_checked_at is not None
+        and paper_checked_at > attempt_recorded_at
+    )
+    if not paper_after_send_attempt:
+        blockers.append(
+            "Paper safety monitor evidence does not strictly postdate the send attempt"
+        )
+
+    evidence_fresh = all(
+        (
+            postfill_fresh,
+            account_fresh,
+            open_orders_fresh,
+            paper_fresh,
+            paper_after_send_attempt,
+        )
+    )
     if not postfill_fresh:
         blockers.append("Live post-fill evidence is missing or stale")
     if not account_fresh:
