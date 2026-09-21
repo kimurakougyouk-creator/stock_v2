@@ -922,3 +922,40 @@ def test_terminal_marker_is_exclusive_and_cannot_be_replaced(tmp_path: Path):
     with pytest.raises(FileExistsError):
         journal._atomic_new(marker_path, {"state": "FABRICATED"})
     assert marker_path.read_bytes() == original
+
+
+def test_terminal_marker_rejects_corrupted_authorization_binding(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    journal_path = journal._path(INTENT, tmp_path)
+    payload = load_send_journal(INTENT, directory=tmp_path)
+    assert payload is not None
+    payload["authorized_endpoint_port"] = 4002
+    journal_path.write_text(
+        __import__("json").dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PermissionError, match="endpoint binding"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
