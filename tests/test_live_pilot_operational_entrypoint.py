@@ -510,6 +510,7 @@ def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkey
 
     assert seen["order_id"] == 77
     assert seen["perm_id"] == 880077
+    assert seen["expected_client_id"] == 681
     assert len(calls) == 1
     assert calls[0][1]["perm_id"] == 880077
 
@@ -1253,6 +1254,46 @@ def test_postfill_proven_accepts_only_exact_int_fresh_execution_identity(monkeyp
         lambda *args, **kwargs: pytest.fail(
             "already-promoted journal must not be rewritten"
         ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+
+def test_postfill_proven_revalidation_rejects_wrong_sender_client_id(monkeypatch):
+    journal = {
+        "state": "POSTFILL_PROVEN",
+        "order_id": 77,
+        "perm_id": 880077,
+        "sender_client_id": 681,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "wrong-client",
+            "order_id": 77,
+            "perm_id": 880077,
+            "client_id": 672,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail("already-proven journal must not be rewritten"),
     )
 
     subject._promote_postfill_if_proven(_request())
