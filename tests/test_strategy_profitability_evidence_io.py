@@ -90,7 +90,7 @@ def test_audit_joins_durable_commission_report_by_exec_id(tmp_path):
     assert result.evidence_status == "NET_POSITIVE_AFTER_FEES"
     assert result.fees_accounted is True
     assert result.net_realized_pnl == 990.0
-    assert result.net_profitability_proven is True
+    assert result.net_profitability_proven is False
     assert result.live_ready is False
 
 
