@@ -803,6 +803,26 @@ def mark_partial_reconciled(
     return payload
 
 
+def _definitive_terminal_rejection_reason(value: object) -> str | None:
+    reason = str(value or "").strip()
+    for prefix in (
+        "broker orderStatus callback reported non-accepted status:",
+        "broker openOrder callback reported non-accepted status:",
+    ):
+        if reason.startswith(prefix):
+            status = reason[len(prefix) :].strip()
+            return reason if status in {"Cancelled", "ApiCancelled"} else None
+    parts = reason.split(":", 2)
+    if (
+        len(parts) == 3
+        and parts[0].isdigit()
+        and parts[1].isdigit()
+        and int(parts[1]) in {201, 202}
+    ):
+        return reason
+    return None
+
+
 def mark_rejected_reconciled(
     intent_id: str,
     *,
@@ -825,9 +845,9 @@ def mark_rejected_reconciled(
         raise PermissionError("rejection reconciliation is not valid in the current state")
     if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
         raise ValueError("order_id must be a positive exact int")
-    reason = str(rejection_reason or "").strip()
-    if not reason:
-        raise ValueError("rejection_reason is required")
+    reason = _definitive_terminal_rejection_reason(rejection_reason)
+    if reason is None:
+        raise ValueError("rejection_reason must prove a terminal broker rejection")
     if not isinstance(final_position_quantity, (int, float)) or isinstance(
         final_position_quantity, bool
     ):
