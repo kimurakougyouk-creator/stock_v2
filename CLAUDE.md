@@ -27,6 +27,40 @@ Complete the multi-broker, multi-market AI trading platform safely and efficient
 
 The primary implementation role must not be changed by an AI on its own. Any role change requires an explicit user decision and a matching update to the canonical project documents.
 
+## GitHub access boundary
+
+GitHub read access and GitHub write authority are separate.
+
+Claude Code may use local `gh`, GitHub API, and repository inspection commands for **read-only verification** without asking the user first. This includes reading PR/Issue state, exact HEAD/base SHA, CI/check-runs, review threads, diffs, files, workflow results, and main-branch drift.
+
+Claude Code must **not** perform any GitHub write without a fresh, explicit user authorization for that specific action. Prohibited without explicit authorization include at least:
+
+- `gh pr merge`, merge/rebase/squash, or enabling auto-merge;
+- `git push` or any remote ref update;
+- creating/updating/closing PRs or Issues;
+- posting/editing/deleting GitHub comments or review comments;
+- resolving/dismissing review threads or reviews;
+- creating/deleting branches or tags on the remote;
+- changing repository settings, protections, workflows, secrets, or permissions.
+
+A Claude GO/NO-GO verdict is an **independent audit opinion only**. It is never a merge authorization. Merge requires a separate explicit user authorization after all required gates are re-verified on the exact current HEAD.
+
+Read access to GitHub never implies permission for Live trading, broker mutation, order placement, cancel/modify/retry/flatten/close, or removal of broker Read-Only.
+
+## Independent audit evidence rule
+
+Before issuing GO/NO-GO on a PR or safety-critical change, do not rely on another agent's summary or on stale chat memory. Independently verify, where technically available:
+
+1. current `main` SHA and whether the proposed base has drifted;
+2. exact PR HEAD SHA and full relevant diff;
+3. relevant local tests and current GitHub CI/check-runs for that exact HEAD;
+4. unresolved, non-outdated review threads and latest independent-review result;
+5. the governing Issue/checklist and whether the change actually closes the claimed blocker;
+6. safety invariants, especially fail-closed behavior and any Live/broker-write boundary;
+7. any material uncertainty or source that could not be directly checked.
+
+If direct evidence cannot be obtained in the current session, state that limitation explicitly and do not present another agent's report as independently verified.
+
 ## Independent-review requirement
 
 For any safety-critical trading change, Codex must independently review the actual implementation evidence after Claude Code's primary implementation pass. Codex must actively look for:
