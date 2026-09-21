@@ -793,3 +793,124 @@ def test_recovery_rejects_non_exact_execution_identity(monkeypatch):
     )
 
     subject._promote_postfill_if_proven(_request())
+
+
+def test_recovery_rejects_order_id_reused_with_another_perm_id(monkeypatch):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "good",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+        {
+            "exec_id": "conflict",
+            "order_id": 77,
+            "perm_id": 990088,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:01+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail(
+            "matcher must be unreachable when one order_id maps to multiple perm_ids"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "contradictory broker identity must never be promoted"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
+
+
+@pytest.mark.parametrize("bad_perm_id", [None, "990088", 990088.0, True])
+def test_recovery_rejects_selected_order_with_malformed_or_wrong_perm_id(
+    monkeypatch, bad_perm_id
+):
+    journal = {
+        "state": "UNKNOWN",
+        "order_id": 77,
+        "perm_id": 880077,
+    }
+    payload = _postfill_payload()
+    payload["executions"] = [
+        {
+            "exec_id": "good",
+            "order_id": 77,
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:00+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+        {
+            "exec_id": "bad",
+            "order_id": "77",
+            "perm_id": bad_perm_id,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:01+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
+    ]
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "_load_json",
+        lambda path: payload if path == subject.DEFAULT_POSTFILL_REPORT else None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "match_live_postfill",
+        lambda *args, **kwargs: pytest.fail(
+            "matcher must be unreachable for malformed selected-order identity"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_postfill_proven",
+        lambda *args, **kwargs: pytest.fail(
+            "malformed selected-order identity must never be promoted"
+        ),
+    )
+
+    subject._promote_postfill_if_proven(_request())
