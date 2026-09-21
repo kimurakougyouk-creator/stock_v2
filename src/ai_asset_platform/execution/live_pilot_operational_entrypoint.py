@@ -102,7 +102,7 @@ from ai_asset_platform.reports.live_operational_pilot_readiness import (
 DEFAULT_PREFLIGHT_REPORT = Path("results/live_pilot_same_run_preflight_latest.json")
 DEFAULT_OPERATIONAL_RESULT = Path("results/live_pilot_operational_once_latest.json")
 _USD_TICKERS = {"AAPL", "SPY"}
-_DEFINITIVE_REJECTION_STATUSES = {"Inactive", "Cancelled", "ApiCancelled"}
+_DEFINITIVE_REJECTION_STATUSES = {"Cancelled", "ApiCancelled"}
 _DEFINITIVE_REJECTION_ERROR_CODES = {201, 202}
 
 
