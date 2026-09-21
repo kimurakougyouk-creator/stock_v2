@@ -354,7 +354,7 @@ def test_journal_anchor_exec_id_must_exist_in_final_execution_set():
 def test_sell_completion_requires_final_flat_position():
     result = _evaluate(
         side="SELL",
-        send_journal=_journal(),
+        send_journal=_journal(authorized_side="SELL"),
         postfill_report=_postfill(
             executions=[
                 {
