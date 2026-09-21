@@ -70,6 +70,17 @@ class IbkrLiveCompletedOrdersSnapshot:
     live_order_sent: bool = False
 
 
+def _dedupe_exact_completed_orders(
+    orders: list[IbkrLiveCompletedOrderEvidence],
+) -> tuple[IbkrLiveCompletedOrderEvidence, ...]:
+    """Drop only byte-for-byte-equivalent normalized callback evidence.
+
+    Conflicting callbacks for the same broker identity must remain distinct so
+    downstream reconciliation sees the ambiguity and fails closed.
+    """
+    return tuple(dict.fromkeys(orders))
+
+
 def _parse_error(args: tuple[object, ...]) -> tuple[int, str] | None:
     if len(args) >= 4:
         code, message = args[1], args[2]
@@ -278,28 +289,14 @@ def preview_ibkr_live_completed_orders(
                 errors=tuple(probe.errors),
             )
 
-        deduped: dict[
-            tuple[int, int, int, str, str, float, str],
-            IbkrLiveCompletedOrderEvidence,
-        ] = {}
-        for item in probe.orders:
-            key = (
-                item.order_id,
-                item.perm_id,
-                item.client_id,
-                item.symbol,
-                item.action,
-                item.quantity,
-                item.order_ref,
-            )
-            deduped.setdefault(key, item)
+        deduped = _dedupe_exact_completed_orders(probe.orders)
         return IbkrLiveCompletedOrdersSnapshot(
             attempted=True,
             connected=True,
             ready=True,
             endpoint_port=int(endpoint_port),
             account_fingerprint=fingerprint,
-            orders=tuple(deduped.values()),
+            orders=deduped,
             blocked_reason=None,
             errors=tuple(probe.errors),
             order_sent=False,
