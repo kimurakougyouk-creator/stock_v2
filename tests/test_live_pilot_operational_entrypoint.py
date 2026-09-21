@@ -33,6 +33,22 @@ def _request(**overrides) -> subject.LivePilotOperationalRequest:
     return subject.LivePilotOperationalRequest(**data)
 
 
+def _bound_journal(**overrides) -> dict:
+    data = {
+        "intent_id": _request().intent_id,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
+    }
+    data.update(overrides)
+    return data
+
+
 def _result(
     *,
     status: str = "RECOVERY_REQUIRED",
@@ -91,6 +107,11 @@ def test_existing_campaign_marker_forces_recovery_only_and_sender_is_unreachable
         subject,
         "send_exactly_one_live_pilot",
         lambda *args, **kwargs: pytest.fail("sender must be unreachable after marker"),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_send_journal",
+        lambda *args, **kwargs: _bound_journal(),
     )
     monkeypatch.setattr(
         subject,
@@ -301,6 +322,14 @@ def test_postfill_promotion_requires_shared_matcher_ready(monkeypatch):
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -332,6 +361,14 @@ def test_postfill_promotion_uses_proven_broker_identity_once(monkeypatch):
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -457,6 +494,14 @@ def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkey
         "order_id": 77,
         "perm_id": None,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -521,6 +566,14 @@ def test_unknown_recovery_rejects_ambiguous_or_conflicting_broker_identity(monke
         "order_id": 77,
         "perm_id": None,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -608,6 +661,14 @@ def test_recovery_rejects_non_exact_persisted_order_identity(monkeypatch, bad_or
         "order_id": bad_order_id,
         "perm_id": None,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -631,6 +692,14 @@ def test_recovery_rejects_non_exact_persisted_perm_identity(monkeypatch, bad_per
         "order_id": 77,
         "perm_id": bad_perm_id,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
     monkeypatch.setattr(
@@ -658,6 +727,14 @@ def test_send_attempt_recorded_crash_state_can_reconcile_without_sender(monkeypa
         "order_id": 77,
         "perm_id": None,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -718,6 +795,14 @@ def test_recovery_rejects_perm_id_reused_by_another_order(monkeypatch):
         "order_id": 77,
         "perm_id": None,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -780,6 +865,14 @@ def test_recovery_rejects_non_exact_execution_identity(monkeypatch):
         "order_id": 77,
         "perm_id": None,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -824,6 +917,14 @@ def test_recovery_rejects_order_id_reused_with_another_perm_id(monkeypatch):
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -889,6 +990,14 @@ def test_recovery_rejects_selected_order_with_malformed_or_wrong_perm_id(
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -954,6 +1063,14 @@ def test_recovery_rejects_malformed_alias_of_selected_perm_id_on_other_order(
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1019,6 +1136,14 @@ def test_recovery_rejects_malformed_alias_of_selected_order_id_even_with_matchin
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1091,6 +1216,14 @@ def test_recovery_fails_closed_on_any_type_invalid_broker_identity_row(
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1183,6 +1316,14 @@ def test_postfill_proven_still_revalidates_fresh_execution_identity(monkeypatch)
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1224,6 +1365,14 @@ def test_postfill_proven_accepts_only_exact_int_fresh_execution_identity(monkeyp
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1266,6 +1415,14 @@ def test_postfill_proven_revalidation_rejects_wrong_sender_client_id(monkeypatch
         "order_id": 77,
         "perm_id": 880077,
         "sender_client_id": 681,
+        "nonce": _request().nonce,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
     }
     payload = _postfill_payload()
     payload["executions"] = [
@@ -1297,3 +1454,67 @@ def test_postfill_proven_revalidation_rejects_wrong_sender_client_id(monkeypatch
     )
 
     subject._promote_postfill_if_proven(_request())
+
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ticker": "AAPL"},
+        {"side": "SELL"},
+        {"quantity": 99},
+        {"limit_price": 401.0},
+        {"estimated_notional_jpy": 40_100.0},
+        {"expected_account_fingerprint": "b" * 64},
+        {"nonce": "different-nonce"},
+    ],
+)
+def test_recovery_request_must_match_durable_consumed_authorization(
+    monkeypatch, overrides
+):
+    monkeypatch.setattr(
+        subject,
+        "global_send_attempt_recorded",
+        lambda **kwargs: True,
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_send_journal",
+        lambda *args, **kwargs: _bound_journal(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "audit_live_pilot_source_cutover",
+        lambda **kwargs: pytest.fail(
+            "source audit must be unreachable when recovery binding mismatches"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "broker recovery must be unreachable when authorization binding mismatches"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "send_exactly_one_live_pilot",
+        lambda *args, **kwargs: pytest.fail(
+            "sender must always remain unreachable after campaign marker"
+        ),
+    )
+
+    result = subject.run_live_pilot_operational_once(_request(**overrides))
+
+    assert result.status == "BLOCKED_AUTHORIZATION_BINDING"
+    assert result.recovery_only is True
+    assert result.complete is False
+    assert result.broker_connection_used is False
+    assert result.order_transport_called is False
+
+
+def test_exact_recovery_request_binding_is_accepted(monkeypatch):
+    assert subject._request_matches_durable_authorization(
+        _request(),
+        _bound_journal(),
+    ) is True
