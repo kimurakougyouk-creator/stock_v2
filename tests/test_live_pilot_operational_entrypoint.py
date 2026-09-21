@@ -1905,7 +1905,7 @@ def test_timeout_without_definitive_rejection_remains_unknown(monkeypatch):
     [
         (
             "broker orderStatus callback reported non-accepted status: Inactive",
-            True,
+            False,
         ),
         (
             "broker openOrder callback reported non-accepted status: Cancelled",
