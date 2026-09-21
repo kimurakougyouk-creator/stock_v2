@@ -149,3 +149,21 @@ def test_module_contains_no_broker_order_transport():
     )
     for token in forbidden:
         assert token not in source
+
+
+def test_human_wrapper_is_in_default_audited_paths():
+    assert "live_pilot_operational_once.sh" in AUDITED_PATHS
+
+
+def test_tracked_edit_in_human_wrapper_fails_closed(tmp_path: Path):
+    runner = FakeRunner(status=" M live_pilot_operational_once.sh\n")
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is False
+    assert result.audited_paths_clean is False
+    assert result.dirty_entries == (" M live_pilot_operational_once.sh",)
