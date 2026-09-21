@@ -361,7 +361,7 @@ def _load_prior_latest_snapshot_for_ledger(
     if payload.get("order_sent") is not False or payload.get("live_order_sent") is not False:
         raise ValueError("existing commission latest report safety contract is invalid")
     if payload.get("ready") is not True:
-        raise ValueError("existing commission latest report is not ready; refusing overwrite")
+        return None
     rows = payload.get("commissions")
     if not isinstance(rows, list):
         raise ValueError("existing commission latest report commissions must be a list")
