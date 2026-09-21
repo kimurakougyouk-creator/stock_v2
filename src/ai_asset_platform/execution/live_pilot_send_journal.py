@@ -517,8 +517,13 @@ def mark_unknown(
     payload = load_send_journal(intent_id, directory=directory)
     if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("UNKNOWN is only valid after the single send attempt")
-    if payload.get("state") in {"POSTFILL_PROVEN", "COMPLETE"}:
-        raise PermissionError("completed evidence cannot be changed to UNKNOWN")
+    if payload.get("state") in {
+        "POSTFILL_PROVEN",
+        "COMPLETE",
+        "PARTIAL_RECONCILED",
+        "REJECTED_RECONCILED",
+    }:
+        raise PermissionError("reconciled evidence cannot be changed to UNKNOWN")
     normalized = str(reason or "").strip()
     if not normalized:
         raise ValueError("UNKNOWN reason is required")
@@ -527,6 +532,135 @@ def mark_unknown(
         unknown_at=_now(now),
         unknown_reason=normalized,
         recovery_required=True,
+        automatic_resend_allowed=False,
+        automatic_cancel_allowed=False,
+        automatic_modify_allowed=False,
+        automatic_flatten_allowed=False,
+        automatic_close_allowed=False,
+    )
+    _atomic_replace(_path(intent_id, directory), payload)
+    return payload
+
+
+def mark_partial_reconciled(
+    intent_id: str,
+    *,
+    exec_ids: tuple[str, ...],
+    order_id: int,
+    perm_id: int,
+    filled_quantity: float,
+    commission_total: float,
+    commission_currency: str,
+    final_position_quantity: float,
+    directory: Path = DEFAULT_JOURNAL_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Persist a terminal, read-only reconciled partial-fill outcome.
+
+    This never authorizes or sends the unfilled remainder.
+    """
+    _require_attempt_marker(intent_id, directory)
+    payload = load_send_journal(intent_id, directory=directory)
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
+        raise PermissionError("partial reconciliation requires the recorded send attempt")
+    if payload.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
+        raise PermissionError("partial reconciliation is not valid in the current state")
+    if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
+        raise ValueError("order_id must be a positive exact int")
+    if not isinstance(perm_id, int) or isinstance(perm_id, bool) or perm_id <= 0:
+        raise ValueError("perm_id must be a positive exact int")
+    normalized_exec_ids = tuple(_safe(value, "exec_id") for value in exec_ids)
+    if not normalized_exec_ids or len(normalized_exec_ids) != len(set(normalized_exec_ids)):
+        raise ValueError("partial reconciliation requires unique execution ids")
+    for name, value in (
+        ("filled_quantity", filled_quantity),
+        ("commission_total", commission_total),
+        ("final_position_quantity", final_position_quantity),
+    ):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"{name} must be numeric")
+        if value != value or value in {float("inf"), float("-inf")}:
+            raise ValueError(f"{name} must be finite")
+    if float(filled_quantity) <= 0:
+        raise ValueError("filled_quantity must be positive")
+    currency = str(commission_currency or "").strip().upper()
+    if len(currency) != 3:
+        raise ValueError("commission_currency must be a three-letter code")
+    existing_order = payload.get("order_id")
+    existing_perm = payload.get("perm_id")
+    if existing_order not in {None, order_id}:
+        raise PermissionError("partial reconciliation order_id conflicts with journal")
+    if existing_perm not in {None, perm_id}:
+        raise PermissionError("partial reconciliation perm_id conflicts with journal")
+    payload.update(
+        state="PARTIAL_RECONCILED",
+        order_id=order_id,
+        perm_id=perm_id,
+        exec_ids=list(normalized_exec_ids),
+        filled_quantity=float(filled_quantity),
+        commission_total=float(commission_total),
+        commission_currency=currency,
+        final_position_quantity=float(final_position_quantity),
+        reconciled_at=_now(now),
+        recovery_required=False,
+        automatic_resend_allowed=False,
+        automatic_cancel_allowed=False,
+        automatic_modify_allowed=False,
+        automatic_flatten_allowed=False,
+        automatic_close_allowed=False,
+    )
+    _atomic_replace(_path(intent_id, directory), payload)
+    return payload
+
+
+def mark_rejected_reconciled(
+    intent_id: str,
+    *,
+    rejection_reason: str,
+    order_id: int,
+    final_position_quantity: float,
+    directory: Path = DEFAULT_JOURNAL_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Persist a terminal rejected/no-fill outcome proven by read-only evidence."""
+    _require_attempt_marker(intent_id, directory)
+    payload = load_send_journal(intent_id, directory=directory)
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
+        raise PermissionError("rejection reconciliation requires the recorded send attempt")
+    if payload.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
+        raise PermissionError("rejection reconciliation is not valid in the current state")
+    if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
+        raise ValueError("order_id must be a positive exact int")
+    reason = str(rejection_reason or "").strip()
+    if not reason:
+        raise ValueError("rejection_reason is required")
+    if not isinstance(final_position_quantity, (int, float)) or isinstance(
+        final_position_quantity, bool
+    ):
+        raise ValueError("final_position_quantity must be numeric")
+    if final_position_quantity != final_position_quantity or final_position_quantity in {
+        float("inf"),
+        float("-inf"),
+    }:
+        raise ValueError("final_position_quantity must be finite")
+    existing_order = payload.get("order_id")
+    if existing_order not in {None, order_id}:
+        raise PermissionError("rejection reconciliation order_id conflicts with journal")
+    payload.update(
+        state="REJECTED_RECONCILED",
+        order_id=order_id,
+        rejection_reason=reason,
+        final_position_quantity=float(final_position_quantity),
+        reconciled_at=_now(now),
+        recovery_required=False,
         automatic_resend_allowed=False,
         automatic_cancel_allowed=False,
         automatic_modify_allowed=False,
