@@ -398,6 +398,108 @@ def test_existing_ledger_without_explicit_paper_only_is_rejected(tmp_path):
     assert payload["commissions"][0]["exec_id"] == "unverified-exec"
 
 
+def test_latest_snapshot_from_live_endpoint_is_rejected_before_ledger_migration(tmp_path):
+    import json
+    import pytest
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": True,
+                "endpoint_port": 4001,
+                "ready": True,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "live-exec",
+                        "commission": 1.0,
+                        "currency": "USD",
+                        "realized_pnl": None,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "duplicate_conflicts": [],
+                "errors": [],
+                "broker_connection_used": True,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper_snapshot = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("paper-exec", commission=0.5),),
+        order_sent=False,
+    )
+
+    with pytest.raises(ValueError, match="Paper endpoint"):
+        module.persist_commission_snapshot(
+            paper_snapshot,
+            report_path=latest,
+            ledger_path=ledger,
+        )
+
+    assert not ledger.exists()
+
+
+def test_latest_snapshot_without_collector_provenance_is_rejected(tmp_path):
+    import json
+    import pytest
+
+    latest = tmp_path / "latest.json"
+    ledger = tmp_path / "ledger.json"
+    latest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "connected": True,
+                "endpoint_port": 4002,
+                "ready": True,
+                "commission_count": 1,
+                "commissions": [
+                    {
+                        "exec_id": "unknown-exec",
+                        "commission": 1.0,
+                        "currency": "USD",
+                        "realized_pnl": None,
+                        "yield_value": None,
+                        "yield_redemption_date": None,
+                    }
+                ],
+                "duplicate_conflicts": [],
+                "errors": [],
+                "broker_connection_used": False,
+                "order_sent": False,
+                "live_order_sent": False,
+                "live_trading": "PROHIBITED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper_snapshot = module.IbkrPaperCommissionSnapshot(
+        connected=True,
+        endpoint_port=4002,
+        commissions=(_row("paper-exec", commission=0.5),),
+        order_sent=False,
+    )
+
+    with pytest.raises(ValueError, match="collector provenance"):
+        module.persist_commission_snapshot(
+            paper_snapshot,
+            report_path=latest,
+            ledger_path=ledger,
+        )
+
+    assert not ledger.exists()
+
+
 def test_module_is_read_only_and_contains_no_order_mutation_api():
     source = Path(
         "src/ai_asset_platform/brokers/ibkr_commission_snapshot.py"
