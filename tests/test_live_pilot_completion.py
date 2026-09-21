@@ -49,7 +49,7 @@ def _attempt_marker(**overrides) -> dict:
         "intent_id": INTENT,
         "nonce": NONCE,
         "state": "SEND_ATTEMPT_RECORDED",
-        "recorded_at": _stamp(),
+        "recorded_at": _stamp(-1),
         "automatic_resend_allowed": False,
         "automatic_cancel_allowed": False,
         "automatic_modify_allowed": False,
@@ -1285,3 +1285,40 @@ def test_completion_rejects_perm_id_reused_with_different_order_id():
         "reuses the reconciled perm_id with a different order_id" in item
         for item in result.blockers
     )
+
+
+
+def test_completion_requires_paper_monitor_strictly_after_send_attempt():
+    equal = _evaluate(
+        send_attempt_marker=_attempt_marker(recorded_at=_stamp()),
+        paper_monitor_report=_paper(checked_at=_stamp()),
+    )
+    assert equal.complete is False
+    assert equal.evidence_fresh is False
+    assert any(
+        "Paper safety monitor evidence does not strictly postdate the send attempt"
+        in item
+        for item in equal.blockers
+    )
+
+    before = _evaluate(
+        send_attempt_marker=_attempt_marker(recorded_at=_stamp()),
+        paper_monitor_report=_paper(checked_at=_stamp(-1)),
+    )
+    assert before.complete is False
+    assert before.evidence_fresh is False
+    assert any(
+        "Paper safety monitor evidence does not strictly postdate the send attempt"
+        in item
+        for item in before.blockers
+    )
+
+
+def test_completion_accepts_fresh_safe_paper_monitor_after_send_attempt():
+    result = _evaluate(
+        send_attempt_marker=_attempt_marker(recorded_at=_stamp(-1)),
+        paper_monitor_report=_paper(checked_at=_stamp()),
+    )
+    assert result.complete is True
+    assert result.paper_monitor_safe is True
+    assert result.evidence_fresh is True
