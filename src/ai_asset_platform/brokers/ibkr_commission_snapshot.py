@@ -415,10 +415,10 @@ def persist_commission_snapshot(
     *, report_path: Path = DEFAULT_REPORT_PATH,
 ) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    prior = _load_prior_latest_snapshot_for_ledger(report_path)
+    if prior is not None:
+        persist_commission_ledger(prior, ledger_path=ledger_path)
     if snapshot.ready:
-        prior = _load_prior_latest_snapshot_for_ledger(report_path)
-        if prior is not None:
-            persist_commission_ledger(prior, ledger_path=ledger_path)
         persist_commission_ledger(snapshot, ledger_path=ledger_path)
 
     payload = {
