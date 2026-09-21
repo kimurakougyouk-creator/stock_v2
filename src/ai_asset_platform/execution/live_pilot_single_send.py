@@ -44,9 +44,11 @@ from ai_asset_platform.execution.live_pilot_same_run_preflight import (
 )
 from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
+    _definitive_terminal_rejection_reason,
     create_consumed_authorization_journal,
     mark_order_acknowledged,
     mark_unknown,
+    record_definitive_rejection_evidence,
     record_order_id_before_transport,
     record_send_attempt,
 )
@@ -752,9 +754,42 @@ def send_exactly_one_live_pilot(
                 "broker acknowledgement timed out; no retry permitted",
             )
         if client.order_error or client.ack_perm_id is None or int(client.ack_perm_id) <= 0:
+            unknown_reason = (
+                client.order_error or "broker acknowledgement lacked positive permId"
+            )
+            definitive_reason = _definitive_terminal_rejection_reason(
+                client.order_error
+            )
+            if definitive_reason is not None:
+                try:
+                    record_definitive_rejection_evidence(
+                        intent,
+                        nonce=nonce,
+                        ticker=ticker,
+                        side=side,
+                        quantity=quantity,
+                        limit_price=limit_price,
+                        estimated_notional_jpy=notional,
+                        account_fingerprint=fingerprint,
+                        endpoint_port=int(endpoint_port),
+                        order_id=int(order_id),
+                        client_id=LIVE_PILOT_CLIENT_ID,
+                        rejection_reason=definitive_reason,
+                        directory=journal_dir,
+                        now=_current_clock(),
+                    )
+                except (OSError, UnicodeError, ValueError, PermissionError):
+                    # The send attempt is already permanently spent. If the
+                    # independent rejection proof cannot be durably recorded,
+                    # keep the outcome UNKNOWN so recovery can never promote a
+                    # fabricated mutable summary reason to terminal rejection.
+                    unknown_reason = (
+                        "definitive broker rejection evidence could not be "
+                        "durably persisted"
+                    )
             mark_unknown(
                 intent,
-                reason=client.order_error or "broker acknowledgement lacked positive permId",
+                reason=unknown_reason,
                 directory=journal_dir,
                 now=_current_clock(),
             )
