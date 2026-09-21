@@ -2265,7 +2265,7 @@ def test_timeout_without_definitive_rejection_remains_unknown(monkeypatch):
         subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
-    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports.get(path))
     monkeypatch.setattr(
         subject,
         "load_send_attempt_marker",
@@ -2785,7 +2785,7 @@ def test_mutable_unknown_reason_cannot_manufacture_rejection_without_immutable_p
         subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
-    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports.get(path))
     monkeypatch.setattr(
         subject,
         "load_send_attempt_marker",
