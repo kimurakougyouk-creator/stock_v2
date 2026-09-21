@@ -1659,6 +1659,18 @@ def test_recovery_request_must_match_durable_consumed_authorization(
     assert result.order_transport_called is False
 
 
+def test_recovery_authorization_overflowing_numbers_fail_closed():
+    journal = _bound_journal(
+        authorized_limit_price=10**10000,
+        authorized_estimated_notional_jpy=10**10000,
+    )
+
+    assert subject._request_matches_durable_authorization(
+        _request(),
+        journal,
+    ) is False
+
+
 def test_exact_recovery_request_binding_is_accepted(monkeypatch):
     assert subject._request_matches_durable_authorization(
         _request(),
@@ -1865,6 +1877,65 @@ def test_partial_fill_becomes_terminal_reconciled_without_sending_remainder(monk
     assert calls[0]["final_position_quantity"] == 40.0
 
 
+def test_partial_reconciliation_decimal_overflow_fails_closed(monkeypatch):
+    journal = _terminal_journal()
+    executions = [
+        {
+            "exec_id": "overflow-1",
+            "order_id": 77,
+            "perm_id": 880077,
+            "client_id": 681,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": "1e1000000",
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=executions,
+        position=0.0,
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_partial_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "overflowing quantity must not be promoted"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "overflowing quantity must not enter rejection path"
+        ),
+    )
+
+    assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
+
+
 def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch):
     journal = _terminal_journal(
         perm_id=None,
@@ -1941,6 +2012,60 @@ def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch
     assert len(calls) == 1
     assert calls[0]["order_id"] == 77
     assert calls[0]["final_position_quantity"] == 0.0
+
+
+def test_malformed_nonnull_perm_id_blocks_rejection_promotion(monkeypatch):
+    journal = _terminal_journal(
+        perm_id="880077",
+        unknown_reason=(
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+    )
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=[],
+        position=0.0,
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: _persisted_rejection_evidence(),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "malformed non-null perm_id must block rejection promotion"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_partial_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "no executions means partial path must be unreachable"
+        ),
+    )
+
+    assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
 
 
 def test_timeout_without_definitive_rejection_remains_unknown(monkeypatch):
