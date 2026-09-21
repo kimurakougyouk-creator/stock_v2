@@ -70,6 +70,9 @@ from ai_asset_platform.execution.live_pilot_same_run_preflight import (
     evaluate_live_pilot_same_run_preflight,
     preflight_record,
 )
+from ai_asset_platform.execution.live_pilot_one_shot_authorization import (
+    load_live_pilot_authorization_binding,
+)
 from ai_asset_platform.execution.live_pilot_send_journal import (
     DEFAULT_JOURNAL_DIR,
     global_send_attempt_recorded,
@@ -99,6 +102,8 @@ from ai_asset_platform.reports.live_operational_pilot_readiness import (
 DEFAULT_PREFLIGHT_REPORT = Path("results/live_pilot_same_run_preflight_latest.json")
 DEFAULT_OPERATIONAL_RESULT = Path("results/live_pilot_operational_once_latest.json")
 _USD_TICKERS = {"AAPL", "SPY"}
+_DEFINITIVE_REJECTION_STATUSES = {"Inactive", "Cancelled", "ApiCancelled"}
+_DEFINITIVE_REJECTION_ERROR_CODES = {201, 202}
 
 
 @dataclass(frozen=True)
@@ -158,8 +163,33 @@ def _persist_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def _resolve_presend_authorized_endpoint(
+    request: LivePilotOperationalRequest,
+) -> int:
+    authorization = load_live_pilot_authorization_binding(
+        nonce=request.nonce,
+        intent_id=request.intent_id,
+        ticker=request.ticker,
+        side=request.side,
+        quantity=request.quantity,
+        limit_price=request.limit_price,
+        estimated_notional_jpy=request.estimated_notional_jpy,
+        account_fingerprint=request.expected_account_fingerprint,
+    )
+    endpoint_port = authorization.get("endpoint_port")
+    if (
+        not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in {4001, 7496}
+    ):
+        raise PermissionError("active authorization endpoint binding is invalid")
+    return endpoint_port
+
+
 def _collect_presend_readonly_evidence(
     request: LivePilotOperationalRequest,
+    *,
+    authorized_endpoint_port: int,
 ) -> None:
     account = preview_ibkr_live_readonly_account_snapshot(
         confirmation=request.live_readonly_confirmation,
@@ -545,17 +575,20 @@ def _finite_decimal(value: object) -> Decimal | None:
 
 def _definitive_rejection_reason(value: object) -> str | None:
     reason = str(value or "").strip()
-    if reason.startswith(
-        "broker orderStatus callback reported non-accepted status:"
-    ) or reason.startswith(
-        "broker openOrder callback reported non-accepted status:"
+    for prefix in (
+        "broker orderStatus callback reported non-accepted status:",
+        "broker openOrder callback reported non-accepted status:",
     ):
-        return reason
+        if reason.startswith(prefix):
+            status = reason[len(prefix) :].strip()
+            return reason if status in _DEFINITIVE_REJECTION_STATUSES else None
+
     parts = reason.split(":", 2)
     if (
         len(parts) == 3
-        and parts[0].lstrip("-").isdigit()
+        and parts[0].isdigit()
         and parts[1].isdigit()
+        and int(parts[1]) in _DEFINITIVE_REJECTION_ERROR_CODES
     ):
         return reason
     return None
@@ -832,6 +865,27 @@ def _reconcile_once(
             order_transport_called=order_transport_called,
         )
 
+    terminal_state = journal.get("state") if isinstance(journal, dict) else None
+    if (
+        terminal_state in {"PARTIAL_RECONCILED", "REJECTED_RECONCILED"}
+        and journal.get("recovery_required") is False
+        and isinstance(journal.get("send_attempt_count"), int)
+        and not isinstance(journal.get("send_attempt_count"), bool)
+        and journal.get("send_attempt_count") == 1
+    ):
+        return LivePilotOperationalResult(
+            status=terminal_state,
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=True,
+            preflight_ready=False,
+            send_status=send_status,
+            completion_status=terminal_state,
+            complete=True,
+            blockers=(),
+            broker_connection_used=False,
+            order_transport_called=order_transport_called,
+        )
+
     _collect_post_attempt_readonly_evidence(request)
     _promote_postfill_if_proven(request)
     terminal_status = _promote_terminal_reconciliation_if_proven(request)
@@ -947,7 +1001,28 @@ def run_live_pilot_operational_once(
             order_transport_called=False,
         )
 
-    _collect_presend_readonly_evidence(request)
+    try:
+        authorized_endpoint_port = _resolve_presend_authorized_endpoint(request)
+    except (PermissionError, ValueError, TypeError) as exc:
+        return LivePilotOperationalResult(
+            status="BLOCKED_AUTHORIZATION_BINDING",
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=False,
+            preflight_ready=False,
+            send_status=None,
+            completion_status=None,
+            complete=False,
+            blockers=(
+                f"active one-shot authorization is not valid for pre-send collection: {exc}",
+            ),
+            broker_connection_used=False,
+            order_transport_called=False,
+        )
+
+    _collect_presend_readonly_evidence(
+        request,
+        authorized_endpoint_port=authorized_endpoint_port,
+    )
     readiness_payload, preflight = _evaluate_and_persist_preflight(request)
     if not preflight.ready:
         return LivePilotOperationalResult(
