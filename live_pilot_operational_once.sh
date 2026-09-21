@@ -29,16 +29,26 @@ fi
 : "${LIVE_PILOT_ACCOUNT_FINGERPRINT:?BLOCKED: LIVE_PILOT_ACCOUNT_FINGERPRINT is required}"
 : "${LIVE_PILOT_EXPECTED_COMMIT_SHA:?BLOCKED: LIVE_PILOT_EXPECTED_COMMIT_SHA is required}"
 
-# shellcheck disable=SC1091
-source .venv/bin/activate
-unset PYTHONPATH
-bash scripts/ensure_exact_checkout_runtime.sh
-
 ACTUAL_SHA="$(git rev-parse HEAD)"
 if [[ "$ACTUAL_SHA" != "$LIVE_PILOT_EXPECTED_COMMIT_SHA" ]]; then
   echo "BLOCKED: checkout SHA does not match the explicitly approved SHA. No Live order was sent."
   exit 2
 fi
+
+# Fail closed before launching any Python from this checkout.  The in-process
+# source/PIN audit is still required later, but it is too late to protect
+# against import-time execution if tracked source has been edited after the
+# explicitly approved commit was chosen.
+TRACKED_DIRTY="$(git status --porcelain --untracked-files=no)"
+if [[ -n "$TRACKED_DIRTY" ]]; then
+  echo "BLOCKED: tracked checkout edits are present before Python launch. No Live order was sent."
+  exit 2
+fi
+
+# shellcheck disable=SC1091
+source .venv/bin/activate
+unset PYTHONPATH
+bash scripts/ensure_exact_checkout_runtime.sh
 
 python -P -m ai_asset_platform.execution.live_pilot_operational_entrypoint \
   --intent-id "$LIVE_PILOT_INTENT_ID" \
