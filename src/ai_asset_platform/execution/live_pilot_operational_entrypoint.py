@@ -1,0 +1,490 @@
+"""Single operational entrypoint for the bounded first IBKR Live pilot.
+
+This module wires the already-audited Issue #255 components into one fail-closed
+state machine:
+
+1. collect fresh read-only Live evidence;
+2. evaluate operational readiness and same-run preflight;
+3. call the existing exactly-once sender only when every gate is ready;
+4. after any irreversible send attempt, switch permanently to read-only
+   reconciliation;
+5. collect one fresh post-fill/account/open-order snapshot and evaluate the
+   existing completion judge.
+
+The coordinator never retries a Live send.  If the campaign-wide send-attempt
+marker already exists, the sender is unreachable and only read-only recovery is
+performed.  It never cancels, modifies, resends, flattens, or closes an order,
+and it never changes broker API Read-Only settings.
+
+No broker action occurs merely by importing this module.
+"""
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+
+from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
+    DEFAULT_REPORT_PATH as DEFAULT_LIVE_OPEN_ORDERS_REPORT,
+    persist_live_all_open_orders,
+    preview_ibkr_live_all_open_orders,
+)
+from ai_asset_platform.brokers.ibkr_live_fx_evidence import (
+    DEFAULT_REPORT_PATH as DEFAULT_LIVE_FX_REPORT,
+    persist_live_fx_evidence,
+    resolve_ibkr_live_fx_evidence,
+)
+from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
+    DEFAULT_REPORT_PATH as DEFAULT_POSTFILL_REPORT,
+    match_live_postfill,
+    persist_live_postfill_snapshot,
+    preview_ibkr_live_postfill_snapshot,
+)
+from ai_asset_platform.brokers.ibkr_live_readonly_account import (
+    CONFIRMATION_VALUE as LIVE_READONLY_CONFIRMATION_VALUE,
+    DEFAULT_REPORT_PATH as DEFAULT_LIVE_ACCOUNT_REPORT,
+    persist_live_readonly_account_snapshot,
+    preview_ibkr_live_readonly_account_snapshot,
+)
+from ai_asset_platform.execution.live_pilot_completion import (
+    DEFAULT_COMPLETION_REPORT,
+    DEFAULT_OPERATOR_ALERT,
+    audit_live_pilot_completion,
+    persist_live_pilot_completion,
+)
+from ai_asset_platform.execution.live_pilot_same_run_preflight import (
+    LivePilotSameRunPreflight,
+    evaluate_live_pilot_same_run_preflight,
+    preflight_record,
+)
+from ai_asset_platform.execution.live_pilot_send_journal import (
+    DEFAULT_JOURNAL_DIR,
+    global_send_attempt_recorded,
+    load_send_journal,
+    mark_postfill_proven,
+)
+from ai_asset_platform.execution.live_pilot_single_send import (
+    FINAL_SEND_CONFIRMATION_VALUE,
+    LivePilotSendRequest,
+    LivePilotSendResult,
+    send_exactly_one_live_pilot,
+)
+from ai_asset_platform.reports.live_operational_pilot_readiness import (
+    DEFAULT_PAPER_MONITOR_REPORT,
+    DEFAULT_REPORT_PATH as DEFAULT_READINESS_REPORT,
+    audit_live_operational_pilot_readiness,
+    persist_live_operational_pilot_readiness,
+    readiness_record,
+)
+
+
+DEFAULT_PREFLIGHT_REPORT = Path("results/live_pilot_same_run_preflight_latest.json")
+DEFAULT_OPERATIONAL_RESULT = Path("results/live_pilot_operational_once_latest.json")
+_USD_TICKERS = {"AAPL", "SPY"}
+
+
+@dataclass(frozen=True)
+class LivePilotOperationalRequest:
+    intent_id: str
+    ticker: str
+    side: str
+    quantity: int
+    limit_price: float
+    estimated_notional_jpy: float
+    nonce: str
+    expected_account_fingerprint: str
+    expected_commit_sha: str
+    final_confirmation: str
+    live_readonly_confirmation: str
+
+
+@dataclass(frozen=True)
+class LivePilotOperationalResult:
+    status: str
+    checked_at: str
+    recovery_only: bool
+    preflight_ready: bool
+    send_status: str | None
+    completion_status: str | None
+    complete: bool
+    blockers: tuple[str, ...]
+    broker_connection_used: bool
+    order_transport_called: bool
+    automatic_retry_allowed: bool = False
+    automatic_cancel_allowed: bool = False
+    automatic_modify_allowed: bool = False
+    automatic_flatten_allowed: bool = False
+    automatic_close_allowed: bool = False
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _load_json(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return payload
+
+
+def _persist_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _collect_presend_readonly_evidence(
+    request: LivePilotOperationalRequest,
+) -> None:
+    account = preview_ibkr_live_readonly_account_snapshot(
+        confirmation=request.live_readonly_confirmation
+    )
+    persist_live_readonly_account_snapshot(account)
+
+    open_orders = preview_ibkr_live_all_open_orders(
+        confirmation=request.live_readonly_confirmation
+    )
+    persist_live_all_open_orders(open_orders)
+
+    if request.ticker.strip().upper() in _USD_TICKERS:
+        fx = resolve_ibkr_live_fx_evidence(
+            base_currency="USD",
+            quote_currency="JPY",
+            confirmation=request.live_readonly_confirmation,
+        )
+        persist_live_fx_evidence(fx)
+
+
+def _evaluate_and_persist_preflight(
+    request: LivePilotOperationalRequest,
+) -> tuple[dict, LivePilotSameRunPreflight]:
+    readiness = audit_live_operational_pilot_readiness(
+        ticker=request.ticker,
+        side=request.side,
+        quantity=request.quantity,
+        estimated_notional_jpy=request.estimated_notional_jpy,
+        expected_account_fingerprint=request.expected_account_fingerprint,
+        limit_price=request.limit_price,
+    )
+    persist_live_operational_pilot_readiness(readiness)
+    readiness_payload = readiness_record(readiness)
+
+    account = _load_json(DEFAULT_LIVE_ACCOUNT_REPORT)
+    open_orders = _load_json(DEFAULT_LIVE_OPEN_ORDERS_REPORT)
+    fx = _load_json(DEFAULT_LIVE_FX_REPORT)
+    paper = _load_json(DEFAULT_PAPER_MONITOR_REPORT)
+
+    preflight = evaluate_live_pilot_same_run_preflight(
+        ticker=request.ticker,
+        expected_account_fingerprint=request.expected_account_fingerprint,
+        readiness_report=readiness_payload,
+        live_account_report=account,
+        live_open_orders_report=open_orders,
+        live_fx_report=fx,
+        paper_monitor_report=paper,
+    )
+    _persist_json(DEFAULT_PREFLIGHT_REPORT, preflight_record(preflight))
+    return readiness_payload, preflight
+
+
+def _collect_post_attempt_readonly_evidence(
+    request: LivePilotOperationalRequest,
+) -> None:
+    postfill = preview_ibkr_live_postfill_snapshot(
+        confirmation=request.live_readonly_confirmation
+    )
+    persist_live_postfill_snapshot(postfill)
+
+    account = preview_ibkr_live_readonly_account_snapshot(
+        confirmation=request.live_readonly_confirmation
+    )
+    persist_live_readonly_account_snapshot(account)
+
+    open_orders = preview_ibkr_live_all_open_orders(
+        confirmation=request.live_readonly_confirmation
+    )
+    persist_live_all_open_orders(open_orders)
+
+
+def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
+    journal = load_send_journal(request.intent_id, directory=DEFAULT_JOURNAL_DIR)
+    if not isinstance(journal, dict):
+        return
+    if journal.get("state") == "POSTFILL_PROVEN":
+        return
+    if journal.get("state") not in {"ORDER_ACKNOWLEDGED", "UNKNOWN"}:
+        return
+
+    try:
+        order_id = int(journal.get("order_id"))
+        perm_id = int(journal.get("perm_id"))
+    except (TypeError, ValueError):
+        return
+    if order_id <= 0 or perm_id <= 0:
+        return
+
+    postfill_payload = _load_json(DEFAULT_POSTFILL_REPORT)
+    if not isinstance(postfill_payload, dict):
+        return
+
+    # Rehydrate only through the existing persisted report contract by asking
+    # the completion layer to consume the raw report.  The shared matcher is
+    # additionally used here solely to decide whether the durable journal may
+    # advance to POSTFILL_PROVEN.
+    from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
+        IbkrLivePostFillSnapshot,
+        LiveCommissionEvidence,
+        LiveExecutionEvidence,
+    )
+
+    executions = tuple(
+        LiveExecutionEvidence(**row)
+        for row in postfill_payload.get("executions", [])
+        if isinstance(row, dict)
+    )
+    commissions = tuple(
+        LiveCommissionEvidence(**row)
+        for row in postfill_payload.get("commissions", [])
+        if isinstance(row, dict)
+    )
+    snapshot = IbkrLivePostFillSnapshot(
+        attempted=postfill_payload.get("attempted") is True,
+        connected=postfill_payload.get("connected") is True,
+        endpoint_port=postfill_payload.get("endpoint_port"),
+        account_fingerprint=postfill_payload.get("account_fingerprint"),
+        executions=executions,
+        commissions=commissions,
+        blocked_reason=postfill_payload.get("blocked_reason"),
+        errors=tuple(postfill_payload.get("errors") or ()),
+    )
+    matched = match_live_postfill(
+        snapshot,
+        expected_account_fingerprint=request.expected_account_fingerprint,
+        ticker=request.ticker,
+        side=request.side,
+        quantity=request.quantity,
+        order_id=order_id,
+        perm_id=perm_id,
+    )
+    if not matched.ready or not matched.executions:
+        return
+
+    mark_postfill_proven(
+        request.intent_id,
+        exec_id=matched.executions[0].exec_id,
+        order_id=order_id,
+        perm_id=perm_id,
+        directory=DEFAULT_JOURNAL_DIR,
+    )
+
+
+def _reconcile_once(
+    request: LivePilotOperationalRequest,
+    *,
+    send_status: str | None,
+    order_transport_called: bool,
+) -> LivePilotOperationalResult:
+    _collect_post_attempt_readonly_evidence(request)
+    _promote_postfill_if_proven(request)
+
+    completion = audit_live_pilot_completion(
+        intent_id=request.intent_id,
+        ticker=request.ticker,
+        side=request.side,
+        quantity=request.quantity,
+        expected_account_fingerprint=request.expected_account_fingerprint,
+    )
+    persist_live_pilot_completion(
+        completion,
+        report_path=DEFAULT_COMPLETION_REPORT,
+        alert_path=DEFAULT_OPERATOR_ALERT,
+    )
+
+    return LivePilotOperationalResult(
+        status="COMPLETE" if completion.complete else "RECOVERY_REQUIRED",
+        checked_at=_utc_now().isoformat(timespec="seconds"),
+        recovery_only=True,
+        preflight_ready=False,
+        send_status=send_status,
+        completion_status=completion.status,
+        complete=completion.complete,
+        blockers=tuple(completion.blockers),
+        broker_connection_used=True,
+        order_transport_called=order_transport_called,
+    )
+
+
+def run_live_pilot_operational_once(
+    request: LivePilotOperationalRequest,
+    *,
+    repository_root: Path = Path("."),
+) -> LivePilotOperationalResult:
+    """Run one fail-closed operational pass.
+
+    The campaign-wide marker is checked before any path that can reach the
+    sender.  Once it exists, every later invocation is recovery-only and can
+    perform read-only reconciliation but can never reach the sender again.
+    """
+    if request.live_readonly_confirmation != LIVE_READONLY_CONFIRMATION_VALUE:
+        return LivePilotOperationalResult(
+            status="BLOCKED_READONLY_CONFIRMATION",
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=False,
+            preflight_ready=False,
+            send_status=None,
+            completion_status=None,
+            complete=False,
+            blockers=("exact Live read-only confirmation is missing",),
+            broker_connection_used=False,
+            order_transport_called=False,
+        )
+
+    if global_send_attempt_recorded(directory=DEFAULT_JOURNAL_DIR):
+        return _reconcile_once(
+            request,
+            send_status=None,
+            order_transport_called=False,
+        )
+
+    _collect_presend_readonly_evidence(request)
+    readiness_payload, preflight = _evaluate_and_persist_preflight(request)
+    if not preflight.ready:
+        return LivePilotOperationalResult(
+            status="BLOCKED_PREFLIGHT",
+            checked_at=_utc_now().isoformat(timespec="seconds"),
+            recovery_only=False,
+            preflight_ready=False,
+            send_status=None,
+            completion_status=None,
+            complete=False,
+            blockers=tuple(preflight.blockers),
+            broker_connection_used=True,
+            order_transport_called=False,
+        )
+
+    send_request = LivePilotSendRequest(
+        intent_id=request.intent_id,
+        ticker=request.ticker,
+        side=request.side,
+        quantity=request.quantity,
+        limit_price=request.limit_price,
+        estimated_notional_jpy=request.estimated_notional_jpy,
+    )
+    send_result: LivePilotSendResult = send_exactly_one_live_pilot(
+        send_request,
+        nonce=request.nonce,
+        expected_account_fingerprint=request.expected_account_fingerprint,
+        readiness_report=readiness_payload,
+        same_run_preflight=preflight,
+        expected_commit_sha=request.expected_commit_sha,
+        final_confirmation=request.final_confirmation,
+        repository_root=repository_root,
+    )
+
+    if send_result.recovery_required:
+        return _reconcile_once(
+            request,
+            send_status=send_result.status,
+            order_transport_called=send_result.sent,
+        )
+
+    return LivePilotOperationalResult(
+        status=send_result.status,
+        checked_at=_utc_now().isoformat(timespec="seconds"),
+        recovery_only=False,
+        preflight_ready=True,
+        send_status=send_result.status,
+        completion_status=None,
+        complete=False,
+        blockers=(send_result.message,) if send_result.message else (),
+        broker_connection_used=True,
+        order_transport_called=send_result.sent,
+    )
+
+
+def persist_operational_result(
+    result: LivePilotOperationalResult,
+    *,
+    report_path: Path = DEFAULT_OPERATIONAL_RESULT,
+) -> None:
+    _persist_json(
+        report_path,
+        {
+            "schema_version": 1,
+            **asdict(result),
+            "live_execution_authorized_by_this_report": False,
+            "interpretation": (
+                "This report records one bounded operational pass. COMPLETE is "
+                "evidence of reconciliation only; it never authorizes another send."
+            ),
+        },
+    )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run one fail-closed bounded Live-pilot operational pass."
+    )
+    parser.add_argument("--intent-id", required=True)
+    parser.add_argument("--ticker", required=True)
+    parser.add_argument("--side", required=True)
+    parser.add_argument("--quantity", required=True, type=int)
+    parser.add_argument("--limit-price", required=True, type=float)
+    parser.add_argument("--estimated-notional-jpy", required=True, type=float)
+    parser.add_argument("--nonce", required=True)
+    parser.add_argument("--account-fingerprint", required=True)
+    parser.add_argument("--expected-commit-sha", required=True)
+    parser.add_argument("--final-confirmation", required=True)
+    parser.add_argument("--live-readonly-confirmation", required=True)
+    parser.add_argument("--repository-root", default=".")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    request = LivePilotOperationalRequest(
+        intent_id=args.intent_id,
+        ticker=args.ticker,
+        side=args.side,
+        quantity=args.quantity,
+        limit_price=args.limit_price,
+        estimated_notional_jpy=args.estimated_notional_jpy,
+        nonce=args.nonce,
+        expected_account_fingerprint=args.account_fingerprint,
+        expected_commit_sha=args.expected_commit_sha,
+        final_confirmation=args.final_confirmation,
+        live_readonly_confirmation=args.live_readonly_confirmation,
+    )
+    result = run_live_pilot_operational_once(
+        request,
+        repository_root=Path(args.repository_root),
+    )
+    persist_operational_result(result)
+    print("===== LIVE PILOT OPERATIONAL ONCE =====")
+    print("STATUS                 :", result.status)
+    print("RECOVERY ONLY          :", result.recovery_only)
+    print("PREFLIGHT READY        :", result.preflight_ready)
+    print("SEND STATUS            :", result.send_status)
+    print("COMPLETION STATUS      :", result.completion_status)
+    print("COMPLETE               :", result.complete)
+    print("ORDER TRANSPORT CALLED :", result.order_transport_called)
+    print("AUTOMATIC RETRY        : False")
+    print("AUTOMATIC CANCEL       : False")
+    print("AUTOMATIC MODIFY       : False")
+    print("AUTOMATIC FLATTEN      : False")
+    print("AUTOMATIC CLOSE        : False")
+    print("REPORT                 :", DEFAULT_OPERATIONAL_RESULT)
+    return 0 if result.complete else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
