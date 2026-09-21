@@ -225,15 +225,66 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
 
     try:
         order_id = int(journal.get("order_id"))
-        perm_id = int(journal.get("perm_id"))
     except (TypeError, ValueError):
         return
-    if order_id <= 0 or perm_id <= 0:
+    if order_id <= 0:
         return
 
     postfill_payload = _load_json(DEFAULT_POSTFILL_REPORT)
     if not isinstance(postfill_payload, dict):
         return
+
+    raw_perm_id = journal.get("perm_id")
+    try:
+        perm_id = int(raw_perm_id) if raw_perm_id is not None else 0
+    except (TypeError, ValueError):
+        return
+
+    if perm_id <= 0:
+        expected_symbol = (
+            "9432"
+            if request.ticker.strip().upper() == "9432.T"
+            else request.ticker.strip().upper()
+        )
+        expected_side = request.side.strip().upper()
+        expected_fingerprint = request.expected_account_fingerprint.strip().lower()
+        rows = postfill_payload.get("executions")
+        rows = rows if isinstance(rows, list) else []
+        same_order = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                row_order_id = int(row.get("order_id"))
+            except (TypeError, ValueError):
+                continue
+            if row_order_id == order_id:
+                same_order.append(row)
+
+        if not same_order:
+            return
+        for row in same_order:
+            if (
+                str(row.get("symbol") or "").strip().upper() != expected_symbol
+                or str(row.get("sec_type") or "").strip().upper() != "STK"
+                or str(row.get("side") or "").strip().upper() != expected_side
+                or str(row.get("account_fingerprint") or "").strip().lower()
+                != expected_fingerprint
+            ):
+                return
+
+        candidate_perm_ids: set[int] = set()
+        for row in same_order:
+            try:
+                candidate = int(row.get("perm_id"))
+            except (TypeError, ValueError):
+                return
+            if candidate <= 0:
+                return
+            candidate_perm_ids.add(candidate)
+        if len(candidate_perm_ids) != 1:
+            return
+        perm_id = next(iter(candidate_perm_ids))
 
     # Rehydrate only through the existing persisted report contract by asking
     # the completion layer to consume the raw report.  The shared matcher is
