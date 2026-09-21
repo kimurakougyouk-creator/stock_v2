@@ -1815,7 +1815,10 @@ def test_partial_fill_becomes_terminal_reconciled_without_sending_remainder(monk
 
 
 def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch):
-    journal = _terminal_journal(perm_id=None)
+    journal = _terminal_journal(
+        perm_id=None,
+        unknown_reason="broker orderStatus callback reported non-accepted status: Cancelled",
+    )
     postfill, account, open_orders, paper = _terminal_reports(
         executions=[], position=0.0
     )
