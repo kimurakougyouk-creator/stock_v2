@@ -180,6 +180,7 @@ def _atomic_replace(path: Path, payload: dict) -> None:
     finally:
         os.close(descriptor)
     os.replace(temporary, path)
+    _fsync_parent_dir(path)
 
 
 def _load_json(path: Path, *, label: str) -> dict:
