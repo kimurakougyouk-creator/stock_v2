@@ -245,6 +245,7 @@ def preview_ibkr_live_postfill_snapshot(
     settle_seconds: float = 0.25,
     confirmation: str | None = None,
     expected_client_id: int | None = None,
+    endpoint_port: int | None = None,
 ) -> IbkrLivePostFillSnapshot:
     supplied = str(confirmation).strip() if confirmation is not None else os.getenv(CONFIRMATION_ENV, "").strip()
     if supplied != CONFIRMATION_VALUE:
@@ -258,8 +259,12 @@ def preview_ibkr_live_postfill_snapshot(
     ):
         raise ValueError("expected_client_id must be a non-negative exact int")
 
+    if endpoint_port is not None and endpoint_port not in {LIVE_GATEWAY_PORT, LIVE_TWS_PORT}:
+        raise ValueError("endpoint_port must identify an audited Live endpoint")
+
+    ports = (endpoint_port,) if endpoint_port is not None else (LIVE_GATEWAY_PORT, LIVE_TWS_PORT)
     errors: list[str] = []
-    for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
+    for index, port in enumerate(ports, start=1):
         probe = _LivePostFillProbe()
         try:
             try:
