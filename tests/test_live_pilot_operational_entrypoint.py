@@ -2299,3 +2299,37 @@ def test_new_terminal_transition_is_revalidated_before_complete(monkeypatch):
     assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
     assert result.complete is False
     assert result.broker_connection_used is True
+
+
+def test_terminal_transition_marker_failure_returns_blocked_result(monkeypatch):
+    journal = _terminal_journal()
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        subject,
+        "load_terminal_reconciliation_marker",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_collect_post_attempt_readonly_evidence",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(subject, "_promote_postfill_if_proven", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        subject,
+        "_promote_terminal_reconciliation_if_proven",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            PermissionError("irreversible attempt marker binding is invalid")
+        ),
+    )
+
+    result = subject._reconcile_once(
+        _request(),
+        send_status=None,
+        order_transport_called=False,
+    )
+
+    assert result.status == "BLOCKED_TERMINAL_EVIDENCE"
+    assert result.complete is False
+    assert result.broker_connection_used is True
+    assert result.order_transport_called is False
