@@ -244,12 +244,14 @@ def _collect_post_attempt_readonly_evidence(
     persist_live_postfill_snapshot(postfill)
 
     account = preview_ibkr_live_readonly_account_snapshot(
-        confirmation=request.live_readonly_confirmation
+        confirmation=request.live_readonly_confirmation,
+        endpoint_port=authorized_endpoint_port,
     )
     persist_live_readonly_account_snapshot(account)
 
     open_orders = preview_ibkr_live_all_open_orders(
-        confirmation=request.live_readonly_confirmation
+        confirmation=request.live_readonly_confirmation,
+        endpoint_port=authorized_endpoint_port,
     )
     persist_live_all_open_orders(open_orders)
 
