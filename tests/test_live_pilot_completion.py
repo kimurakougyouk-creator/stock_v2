@@ -1182,3 +1182,43 @@ def test_module_contains_no_broker_transport():
     )
     for token in forbidden:
         assert token not in source
+
+
+def test_completion_rejects_type_invalid_execution_broker_identity():
+    malformed = _postfill()
+    malformed["executions"] = [
+        {
+            "exec_id": EXEC_ID,
+            "order_id": "+77",
+            "perm_id": 880077,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+
+    result = _evaluate(postfill_report=malformed)
+
+    assert result.complete is False
+    assert result.status == "BLOCKED"
+    assert any(
+        "type-invalid or non-positive broker identity" in blocker
+        for blocker in result.blockers
+    )
+
+
+def test_completion_rejects_type_invalid_journal_broker_identity():
+    result = _evaluate(
+        send_journal=_journal(order_id="77", perm_id=880077),
+    )
+
+    assert result.complete is False
+    assert result.status == "BLOCKED"
+    assert any(
+        "durable send journal is not in exact POSTFILL_PROVEN state" in blocker
+        for blocker in result.blockers
+    )
