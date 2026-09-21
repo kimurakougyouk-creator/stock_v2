@@ -43,6 +43,7 @@ def test_audit_joins_durable_commission_report_by_exec_id(tmp_path):
                         "status": "FILLED",
                         "order_intent_id": "signal-runner:9432.T:BUY:100:2026-09-01T10:00:00+09:00",
                         "broker_exec_ids": ["buy-1"],
+                        "broker_exec_fills": [{"exec_id": "buy-1", "shares": 100}],
                     }
                 ),
                 json.dumps(
@@ -58,6 +59,7 @@ def test_audit_joins_durable_commission_report_by_exec_id(tmp_path):
                         "status": "FILLED",
                         "order_intent_id": "signal-runner:9432.T:SELL:100:2026-09-02T10:00:00+09:00",
                         "broker_exec_ids": ["sell-1"],
+                        "broker_exec_fills": [{"exec_id": "sell-1", "shares": 100}],
                     }
                 ),
             ]
