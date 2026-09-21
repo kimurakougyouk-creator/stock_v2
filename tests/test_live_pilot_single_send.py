@@ -181,6 +181,11 @@ def _patch_prereqs(
     )
     monkeypatch.setattr(
         subject,
+        "record_order_id_before_transport",
+        lambda *args, **kwargs: events.append("order_id") or {},
+    )
+    monkeypatch.setattr(
+        subject,
         "mark_order_acknowledged",
         lambda *args, **kwargs: events.append("ack") or {},
     )
@@ -226,7 +231,7 @@ def test_acknowledged_path_calls_place_order_exactly_once(monkeypatch):
     assert result.perm_id == 880077
     assert result.account_fingerprint == PINNED_FINGERPRINT
     assert len(client.place_calls) == 1
-    assert events == ["journal", "attempt", "ack"]
+    assert events == ["journal", "attempt", "order_id", "ack"]
 
     order_id, contract, order = client.place_calls[0]
     assert order_id == 77
@@ -254,7 +259,7 @@ def test_stop_at_last_possible_point_spends_attempt_without_transport(monkeypatc
     assert result.sent is False
     assert result.recovery_required is True
     assert client.place_calls == []
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
 
 
 def test_stale_evidence_after_stop_check_blocks_before_transport(monkeypatch):
@@ -275,7 +280,7 @@ def test_stale_evidence_after_stop_check_blocks_before_transport(monkeypatch):
     assert result.order_id == 77
     assert result.recovery_required is True
     assert client.place_calls == []
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
 
 
 def test_transport_exception_becomes_unknown_and_never_retries(monkeypatch):
@@ -288,7 +293,7 @@ def test_transport_exception_becomes_unknown_and_never_retries(monkeypatch):
     assert result.acknowledged is False
     assert result.recovery_required is True
     assert len(client.place_calls) == 1
-    assert events == ["journal", "attempt", "unknown"]
+    assert events == ["journal", "attempt", "order_id", "unknown"]
 
 
 def test_ack_timeout_becomes_unknown_and_never_retries(monkeypatch):
@@ -298,7 +303,7 @@ def test_ack_timeout_becomes_unknown_and_never_retries(monkeypatch):
 
     assert result.status == "UNKNOWN"
     assert len(client.place_calls) == 1
-    assert events == ["journal", "attempt", "unknown"]
+    assert events == ["journal", "attempt", "order_id", "unknown"]
 
 
 def test_same_session_account_mismatch_blocks_before_authorization_consumption(monkeypatch):
@@ -524,7 +529,7 @@ def test_stale_evidence_after_durable_attempt_recording_blocks_transport(monkeyp
     # The irreversible attempt marker must already have been recorded before
     # this check runs -- it is not skipped/rolled back just because transport
     # is subsequently blocked.
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
 
 
 def test_freshness_is_rechecked_before_the_final_stop_check(monkeypatch):
@@ -560,7 +565,7 @@ def test_freshness_is_rechecked_before_the_final_stop_check(monkeypatch):
 
     assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
     assert client.place_calls == []
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
     # There are two stop checks in the whole function: an early one before
     # ever connecting, and the final one immediately before placeOrder. Only
     # the early one should have run; the final one must never be reached
@@ -596,7 +601,7 @@ def test_expired_authorization_after_durable_attempt_recording_blocks_transport(
     assert result.sent is False
     assert result.recovery_required is True
     assert client.place_calls == []
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
 
 
 def test_fixed_clock_callable_still_works_for_simple_deterministic_tests(monkeypatch):
@@ -609,7 +614,7 @@ def test_fixed_clock_callable_still_works_for_simple_deterministic_tests(monkeyp
     client = FakeClient()
     result = _send(monkeypatch, client, clock=lambda: NOW)
     assert result.status == "ORDER_ACKNOWLEDGED"
-    assert events == ["journal", "attempt", "ack"]
+    assert events == ["journal", "attempt", "order_id", "ack"]
 
 
 def test_bare_datetime_is_no_longer_accepted_as_clock(monkeypatch):
