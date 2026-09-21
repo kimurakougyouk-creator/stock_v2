@@ -476,29 +476,29 @@ def run_live_pilot_operational_once(
             order_transport_called=False,
         )
 
-    # Recovery is safety-critical too. Verify the exact approved commit and
-    # tracked cleanliness before any recovery broker collection or completion
-    # persistence. This is intentionally independent of whether the sender is
-    # reachable.
-    source = audit_live_pilot_source_cutover(
-        expected_commit_sha=request.expected_commit_sha,
-        repository_root=repository_root,
-    )
-    if not source.ready:
-        return LivePilotOperationalResult(
-            status="BLOCKED_SOURCE_CUTOVER",
-            checked_at=_utc_now().isoformat(timespec="seconds"),
-            recovery_only=global_send_attempt_recorded(directory=DEFAULT_JOURNAL_DIR),
-            preflight_ready=False,
-            send_status=None,
-            completion_status=None,
-            complete=False,
-            blockers=("audited source/PIN cutover is not ready",),
-            broker_connection_used=False,
-            order_transport_called=False,
+    attempt_recorded = global_send_attempt_recorded(directory=DEFAULT_JOURNAL_DIR)
+    if attempt_recorded:
+        # Recovery is safety-critical too. Verify the exact approved commit
+        # and tracked cleanliness before any recovery broker collection or
+        # completion persistence. The pre-send path is still audited again by
+        # the existing sender immediately before transport.
+        source = audit_live_pilot_source_cutover(
+            expected_commit_sha=request.expected_commit_sha,
+            repository_root=repository_root,
         )
-
-    if global_send_attempt_recorded(directory=DEFAULT_JOURNAL_DIR):
+        if not source.ready:
+            return LivePilotOperationalResult(
+                status="BLOCKED_SOURCE_CUTOVER",
+                checked_at=_utc_now().isoformat(timespec="seconds"),
+                recovery_only=True,
+                preflight_ready=False,
+                send_status=None,
+                completion_status=None,
+                complete=False,
+                blockers=("audited source/PIN cutover is not ready",),
+                broker_connection_used=False,
+                order_transport_called=False,
+            )
         return _reconcile_once(
             request,
             send_status=None,
