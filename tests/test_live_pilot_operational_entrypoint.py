@@ -2289,6 +2289,175 @@ def test_rejection_recovery_rejects_reverse_permid_collision(monkeypatch):
     assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
 
 
+def test_existing_rejection_proof_revalidates_fresh_completed_conflicts(
+    monkeypatch,
+):
+    journal = _terminal_journal(
+        perm_id=880077,
+        unknown_reason=(
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+    )
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=[],
+        position=0.0,
+    )
+    conflicting_completed = _terminal_completed_report(
+        orders=[
+            {
+                "order_id": 77,
+                "perm_id": 880077,
+                "client_id": 999,
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "exchange": "TSEJ",
+                "action": "BUY",
+                "quantity": 100.0,
+                "order_type": "LMT",
+                "limit_price": 400.0,
+                "status": "Filled",
+                "completed_status": "Filled",
+                "completed_time": "20260921 12:39:20 UTC",
+                "order_ref": _request().intent_id,
+                "account_fingerprint": FINGERPRINT,
+            }
+        ]
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_LIVE_COMPLETED_ORDERS_REPORT: conflicting_completed,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    rejection = _persisted_rejection_evidence()
+    rejection["perm_id"] = 880077
+
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: rejection,
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "fresh completed-order contradiction must block rejection promotion"
+        ),
+    )
+
+    assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
+
+
+def test_execution_conflict_blocks_before_completed_rejection_proof_is_frozen(
+    monkeypatch,
+):
+    journal = _terminal_journal(
+        state="ORDER_ACKNOWLEDGED",
+        perm_id=880077,
+        unknown_reason=None,
+    )
+    executions = [
+        {
+            "exec_id": "reverse-collision",
+            "order_id": 78,
+            "perm_id": 880077,
+            "client_id": 681,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=executions,
+        position=0.0,
+    )
+    completed = _terminal_completed_report(
+        orders=[
+            {
+                "order_id": 77,
+                "perm_id": 880077,
+                "client_id": 681,
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "exchange": "TSEJ",
+                "action": "BUY",
+                "quantity": 100.0,
+                "order_type": "LMT",
+                "limit_price": 400.0,
+                "status": "Cancelled",
+                "completed_status": "Cancelled",
+                "completed_time": "20260921 12:39:20 UTC",
+                "order_ref": _request().intent_id,
+                "account_fingerprint": FINGERPRINT,
+            }
+        ]
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_LIVE_COMPLETED_ORDERS_REPORT: completed,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        subject,
+        "record_definitive_rejection_evidence",
+        lambda *args, **kwargs: pytest.fail(
+            "execution conflict must block before immutable rejection proof"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "execution conflict must block rejection promotion"
+        ),
+    )
+
+    assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
+
+
 def test_malformed_nonnull_perm_id_blocks_rejection_promotion(monkeypatch):
     journal = _terminal_journal(
         perm_id="880077",
