@@ -34,6 +34,21 @@ AUDITED_PATHS: tuple[str, ...] = (
 )
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REPORT_SCHEMA_VERSION = 1
+_IMPORTABLE_IGNORED_SUFFIXES = (".py", ".pyc", ".pyo", ".pyz", ".so", ".pyd", ".dylib")
+
+
+def _ignored_importable_entries(raw_listing: str) -> tuple[str, ...]:
+    entries: list[str] = []
+    for raw in raw_listing.splitlines():
+        path = raw.strip()
+        if not path:
+            continue
+        normalized = path.replace("\\", "/")
+        if "/__pycache__/" in f"/{normalized}":
+            continue
+        if normalized.lower().endswith(_IMPORTABLE_IGNORED_SUFFIXES):
+            entries.append(f"IGNORED_IMPORTABLE {path}")
+    return tuple(entries)
 
 
 @dataclass(frozen=True)
@@ -113,9 +128,21 @@ def audit_live_pilot_source_cutover(
             cwd=repository_root,
             runner=runner,
         )
+        ignored_text = _run_git(
+            (
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--",
+                *normalized_paths,
+            ),
+            cwd=repository_root,
+            runner=runner,
+        )
         dirty_entries = tuple(
             line.rstrip() for line in status_text.splitlines() if line.strip()
-        )
+        ) + _ignored_importable_entries(ignored_text)
     except (OSError, subprocess.SubprocessError):
         # Any inability to prove source identity/cleanliness fails closed.
         actual = None
@@ -143,7 +170,7 @@ def source_cutover_record(result: LivePilotSourceCutover) -> dict:
         "audited_paths": list(AUDITED_PATHS),
         "interpretation": (
             "READY proves only that the audited local source equals the externally "
-            "approved Git commit and has no tracked or untracked changes in safety-critical paths. "
+            "approved Git commit and has no tracked/untracked changes or ignored importable artifacts in safety-critical paths. "
             "It does not authorize or transmit a Live order."
         ),
     }

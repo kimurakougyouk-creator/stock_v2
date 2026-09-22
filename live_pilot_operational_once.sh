@@ -53,6 +53,27 @@ if [[ -n "$SOURCE_DIRTY" ]]; then
   exit 2
 fi
 
+# Git intentionally hides ignored files from status.  Most ignored runtime
+# caches are harmless, but importable source/bytecode/native-extension artifacts
+# under audited code paths could execute before the in-process audit.  Detect
+# those explicitly while allowing normal __pycache__ entries.
+IGNORED_IMPORTABLE="$(
+  git ls-files --others --ignored --exclude-standard -- src tests scripts |
+    while IFS= read -r path; do
+      case "$path" in
+        */__pycache__/*)
+          ;;
+        *.py|*.pyc|*.pyo|*.pyz|*.so|*.pyd|*.dylib)
+          printf '%s\n' "$path"
+          ;;
+      esac
+    done
+)"
+if [[ -n "$IGNORED_IMPORTABLE" ]]; then
+  echo "BLOCKED: ignored importable artifact is present in an audited source path. No Live order was sent."
+  exit 2
+fi
+
 # shellcheck disable=SC1091
 source .venv/bin/activate
 unset PYTHONPATH

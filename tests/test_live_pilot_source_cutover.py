@@ -18,9 +18,17 @@ SHA = "a" * 40
 
 
 class FakeRunner:
-    def __init__(self, *, actual_sha: str = SHA, status: str = "", fail: bool = False):
+    def __init__(
+        self,
+        *,
+        actual_sha: str = SHA,
+        status: str = "",
+        ignored: str = "",
+        fail: bool = False,
+    ):
         self.actual_sha = actual_sha
         self.status = status
+        self.ignored = ignored
         self.fail = fail
         self.calls: list[list[str]] = []
 
@@ -32,6 +40,8 @@ class FakeRunner:
             stdout = self.actual_sha + "\n"
         elif command[1:3] == ["status", "--porcelain=v1"]:
             stdout = self.status
+        elif command[1:3] == ["ls-files", "--others"]:
+            stdout = self.ignored
         else:
             raise AssertionError(f"unexpected git command: {command}")
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -53,9 +63,17 @@ def test_exact_approved_commit_and_clean_audited_paths_are_ready(tmp_path: Path)
     assert result.order_sent is False
     assert result.live_order_sent is False
     status_call = runner.calls[1]
+    ignored_call = runner.calls[2]
     assert "--untracked-files=all" in status_call
+    assert ignored_call[1:5] == [
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+    ]
     for path in AUDITED_PATHS:
         assert path in status_call
+        assert path in ignored_call
 
 
 def test_wrong_commit_sha_fails_closed(tmp_path: Path):
@@ -97,6 +115,50 @@ def test_untracked_file_in_audited_source_fails_closed(tmp_path: Path):
     assert result.ready is False
     assert result.audited_paths_clean is False
     assert result.dirty_entries == ("?? src/sitecustomize.py",)
+
+
+def test_ignored_importable_artifact_in_audited_source_fails_closed(tmp_path: Path):
+    runner = FakeRunner(ignored="src/sitecustomize.pyc\n")
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is False
+    assert result.audited_paths_clean is False
+    assert result.dirty_entries == ("IGNORED_IMPORTABLE src/sitecustomize.pyc",)
+
+
+def test_ignored_native_extension_in_audited_source_fails_closed(tmp_path: Path):
+    runner = FakeRunner(ignored="src/ai_asset_platform/unsafe_shadow.so\n")
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is False
+    assert result.dirty_entries == (
+        "IGNORED_IMPORTABLE src/ai_asset_platform/unsafe_shadow.so",
+    )
+
+
+def test_ignored_pycache_bytecode_is_allowed(tmp_path: Path):
+    runner = FakeRunner(
+        ignored="src/ai_asset_platform/__pycache__/settings.cpython-313.pyc\n"
+    )
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is True
+    assert result.dirty_entries == ()
 
 
 def test_git_audit_failure_fails_closed(tmp_path: Path):
@@ -187,11 +249,16 @@ def test_tracked_edit_in_human_wrapper_fails_closed(tmp_path: Path):
 def test_human_wrapper_checks_tracked_cleanliness_before_any_python_launch():
     source = Path("live_pilot_operational_once.sh").read_text(encoding="utf-8")
     cleanliness = source.index("git status --porcelain=v1 --untracked-files=all")
+    ignored_importable = source.index(
+        "git ls-files --others --ignored --exclude-standard -- src tests scripts"
+    )
     runtime_gate = source.index("bash scripts/ensure_exact_checkout_runtime.sh")
     operational_python = source.index(
         "python -P -m ai_asset_platform.execution.live_pilot_operational_entrypoint"
     )
 
     assert cleanliness < runtime_gate
+    assert ignored_importable < runtime_gate
     assert cleanliness < operational_python
+    assert ignored_importable < operational_python
     assert source.index('ACTUAL_SHA="$(git rev-parse HEAD)"') < runtime_gate
