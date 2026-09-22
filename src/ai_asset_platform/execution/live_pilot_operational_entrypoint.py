@@ -969,8 +969,12 @@ def _completed_order_rejection_if_proven(
         if persisted_perm is None or persisted_perm != row_perm:
             return None
     if any(
-        other_perm == row_perm and other_order != order_id
-        for _, other_order, other_perm, _ in parsed_rows
+        other_perm == row_perm
+        and (
+            other_order != order_id
+            or other_client != sender_client_id
+        )
+        for _, other_order, other_perm, other_client in parsed_rows
     ):
         return None
 
