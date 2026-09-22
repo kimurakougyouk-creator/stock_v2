@@ -64,6 +64,51 @@ def test_malformed_same_account_completed_callback_marks_evidence_invalid():
     assert probe.orders == []
 
 
+def test_coercible_non_integer_completed_order_identities_are_rejected():
+    contract = SimpleNamespace(
+        symbol="9432",
+        secType="STK",
+        currency="JPY",
+        primaryExchange="TSEJ",
+        exchange="TSEJ",
+    )
+    order_state = SimpleNamespace(
+        status="Cancelled",
+        completedStatus="Cancelled",
+        completedTime="20260921 12:39:20 UTC",
+    )
+    base_order = {
+        "account": "DU123",
+        "orderId": 77,
+        "permId": 880077,
+        "clientId": 681,
+        "totalQuantity": 100.0,
+        "action": "BUY",
+        "orderType": "LMT",
+        "lmtPrice": 400.0,
+        "orderRef": "live-pilot:9432:BUY:100:test",
+    }
+
+    for field, malformed_value in (
+        ("orderId", 77.5),
+        ("permId", "880077"),
+        ("clientId", True),
+    ):
+        probe = subject._LiveCompletedOrdersProbe()
+        probe.accounts = ["DU123"]
+        values = dict(base_order)
+        values[field] = malformed_value
+
+        probe.completedOrder(
+            contract,
+            SimpleNamespace(**values),
+            order_state,
+        )
+
+        assert probe.invalid_order_evidence is True
+        assert probe.orders == []
+
+
 def test_invalid_completed_order_evidence_blocks_ready_snapshot(monkeypatch):
     class ReadyEvent:
         def wait(self, timeout):

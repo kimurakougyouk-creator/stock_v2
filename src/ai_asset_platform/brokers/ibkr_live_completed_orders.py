@@ -130,10 +130,23 @@ class _LiveCompletedOrdersProbe(EWrapper, EClient):
         raw_account = str(getattr(order, "account", "") or "").strip()
         if not raw_account or raw_account != self.accounts[0]:
             return
+        raw_order_id = getattr(order, "orderId", None)
+        raw_perm_id = getattr(order, "permId", None)
+        raw_client_id = getattr(order, "clientId", None)
+        if (
+            not isinstance(raw_order_id, int)
+            or isinstance(raw_order_id, bool)
+            or not isinstance(raw_perm_id, int)
+            or isinstance(raw_perm_id, bool)
+            or not isinstance(raw_client_id, int)
+            or isinstance(raw_client_id, bool)
+        ):
+            self.invalid_order_evidence = True
+            return
+        order_id = raw_order_id
+        perm_id = raw_perm_id
+        client_id = raw_client_id
         try:
-            order_id = int(getattr(order, "orderId", 0) or 0)
-            perm_id = int(getattr(order, "permId", 0) or 0)
-            client_id = int(getattr(order, "clientId", -1))
             quantity = float(getattr(order, "totalQuantity", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
             self.invalid_order_evidence = True

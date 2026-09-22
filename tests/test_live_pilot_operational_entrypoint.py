@@ -2295,6 +2295,96 @@ def test_callback_rejection_without_permid_accepts_exact_completed_cancelled_his
     assert calls[0]["perm_id"] is None
 
 
+def test_missing_rejection_permid_blocks_execution_using_derived_completed_permid(
+    monkeypatch,
+):
+    journal = _terminal_journal(
+        perm_id=None,
+        unknown_reason=(
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+    )
+    executions = [
+        {
+            "exec_id": "conflicting-exec",
+            "order_id": 78,
+            "perm_id": 880077,
+            "client_id": 681,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "time": "2026-09-21T12:39:20+00:00",
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=executions,
+        position=0.0,
+    )
+    completed = _terminal_completed_report(
+        orders=[
+            {
+                "order_id": 77,
+                "perm_id": 880077,
+                "client_id": 681,
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "exchange": "TSEJ",
+                "action": "BUY",
+                "quantity": 100.0,
+                "order_type": "LMT",
+                "limit_price": 400.0,
+                "status": "Cancelled",
+                "completed_status": "Cancelled",
+                "completed_time": "20260921 12:39:20 UTC",
+                "order_ref": _request().intent_id,
+                "account_fingerprint": FINGERPRINT,
+            }
+        ]
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_LIVE_COMPLETED_ORDERS_REPORT: completed,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    rejection = _persisted_rejection_evidence()
+
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: rejection,
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "derived completed permId must block the conflicting execution"
+        ),
+    )
+
+    assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
+
+
 def test_missing_rejection_permid_still_rejects_completed_permid_conflict(
     monkeypatch,
 ):

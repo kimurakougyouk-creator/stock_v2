@@ -1518,6 +1518,43 @@ def _promote_terminal_reconciliation_if_proven(
     ):
         return None
 
+    # A callback rejection may legitimately have no permId. Fresh completed
+    # history can then bind the selected sender-client/order pair to exactly one
+    # broker-global permId. Apply that derived identity to the already-collected
+    # execution evidence before allowing REJECTED_RECONCILED.
+    effective_rejection_perm = rejection_perm
+    if effective_rejection_perm is None:
+        completed_orders = completed.get("orders")
+        if not isinstance(completed_orders, list):
+            return None
+        derived_perms: list[int] = []
+        for completed_row in completed_orders:
+            if not isinstance(completed_row, dict):
+                return None
+            completed_order_id = _positive_exact_int(completed_row.get("order_id"))
+            completed_perm_id = _positive_exact_int(completed_row.get("perm_id"))
+            completed_client_id = _nonnegative_exact_int(completed_row.get("client_id"))
+            if (
+                completed_order_id is None
+                or completed_perm_id is None
+                or completed_client_id is None
+            ):
+                return None
+            if (
+                completed_order_id == order_id
+                and completed_client_id == sender_client_id
+            ):
+                derived_perms.append(completed_perm_id)
+        if len(derived_perms) > 1:
+            return None
+        if len(derived_perms) == 1:
+            effective_rejection_perm = derived_perms[0]
+
+    if effective_rejection_perm is not None and any(
+        row.get("perm_id") == effective_rejection_perm for row in validated_rows
+    ):
+        return None
+
     final_position = _target_position_quantity(account, request.ticker)
     expected_unchanged_position = (
         0.0 if request.side.strip().upper() == "BUY" else float(request.quantity)
