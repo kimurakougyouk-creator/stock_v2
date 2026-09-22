@@ -559,7 +559,7 @@ def test_human_wrapper_passes_empty_final_confirmation_by_default(tmp_path):
         "  printf '%s\\n' \"$LIVE_PILOT_EXPECTED_COMMIT_SHA\"\n"
         "  exit 0\n"
         "fi\n"
-        "if [[ \"$1\" == \"status\" && \"$2\" == \"--porcelain\" && \"$3\" == \"--untracked-files=no\" ]]; then\n"
+        "if [[ \"$1\" == \"status\" && \"$2\" == \"--porcelain=v1\" && \"$3\" == \"--untracked-files=all\" ]]; then\n"
         "  exit 0\n"
         "fi\n"
         "exit 99\n",
