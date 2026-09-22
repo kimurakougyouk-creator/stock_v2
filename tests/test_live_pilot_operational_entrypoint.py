@@ -2197,6 +2197,78 @@ def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch
     assert calls[0]["final_position_quantity"] == 0.0
 
 
+def test_rejection_recovery_rejects_reverse_permid_collision(monkeypatch):
+    journal = _terminal_journal(
+        perm_id=880077,
+        unknown_reason=(
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+    )
+    executions = [
+        {
+            "exec_id": "conflicting-exec",
+            "order_id": 78,
+            "perm_id": 880077,
+            "client_id": 681,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=executions,
+        position=0.0,
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    rejection = _persisted_rejection_evidence()
+    rejection["perm_id"] = 880077
+
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: rejection,
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "reverse permId collision must block rejection promotion"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_partial_reconciled",
+        lambda *args, **kwargs: pytest.fail(
+            "different order_id must not enter partial reconciliation"
+        ),
+    )
+
+    assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
+
+
 def test_malformed_nonnull_perm_id_blocks_rejection_promotion(monkeypatch):
     journal = _terminal_journal(
         perm_id="880077",
