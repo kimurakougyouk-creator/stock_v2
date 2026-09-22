@@ -1261,6 +1261,58 @@ def test_completion_rejects_type_invalid_journal_broker_identity():
 
 
 
+def test_completion_ignores_unrelated_cross_client_order_id_reuse():
+    postfill = _postfill()
+    postfill["executions"].append(
+        {
+            "exec_id": "other-client-unrelated",
+            "order_id": 77,
+            "perm_id": 990088,
+            "client_id": 999,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    )
+
+    result = _evaluate(postfill_report=postfill)
+
+    assert result.complete is True
+    assert result.status == "COMPLETE"
+    assert result.exec_ids == (EXEC_ID,)
+
+
+def test_completion_rejects_cross_client_global_permid_collision():
+    postfill = _postfill()
+    postfill["executions"].append(
+        {
+            "exec_id": "other-client-conflict",
+            "order_id": 78,
+            "perm_id": 880077,
+            "client_id": 999,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    )
+
+    result = _evaluate(postfill_report=postfill)
+
+    assert result.complete is False
+    assert any(
+        "reuses the reconciled perm_id with a different client/order identity" in item
+        for item in result.blockers
+    )
+
+
 def test_completion_rejects_order_id_reused_with_different_perm_id():
     postfill = _postfill()
     postfill["executions"].append(
@@ -1310,7 +1362,7 @@ def test_completion_rejects_perm_id_reused_with_different_order_id():
 
     assert result.complete is False
     assert any(
-        "reuses the reconciled perm_id with a different order_id" in item
+        "reuses the reconciled perm_id with a different client/order identity" in item
         for item in result.blockers
     )
 

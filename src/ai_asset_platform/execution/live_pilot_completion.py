@@ -620,21 +620,28 @@ def evaluate_live_pilot_completion(
                     "final Live execution contains type-invalid or non-positive broker identity"
                 )
                 continue
-            if row_client != sender_client_id:
-                blockers.append(
-                    "final Live execution client_id does not match the durable sender client_id"
-                )
-                continue
-            if row_order == order_id and row_perm != perm_id:
+            # orderId is scoped to the API client; the same numeric orderId
+            # from another client is unrelated unless it also claims the
+            # selected broker-global permId.
+            if (
+                row_client == sender_client_id
+                and row_order == order_id
+                and row_perm != perm_id
+            ):
                 blockers.append(
                     "final Live execution reuses the reconciled order_id with a different perm_id"
                 )
-            if row_perm == perm_id and row_order != order_id:
+            # permId is broker-global. Any other client or order claiming the
+            # selected permId is contradictory evidence.
+            if row_perm == perm_id and (
+                row_client != sender_client_id or row_order != order_id
+            ):
                 blockers.append(
-                    "final Live execution reuses the reconciled perm_id with a different order_id"
+                    "final Live execution reuses the reconciled perm_id with a different client/order identity"
                 )
             if (
-                row_order == order_id
+                row_client == sender_client_id
+                and row_order == order_id
                 and row_perm == perm_id
                 and _execution_identity(row) != expected_identity
             ):
