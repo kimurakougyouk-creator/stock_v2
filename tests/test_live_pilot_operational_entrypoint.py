@@ -645,7 +645,21 @@ def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkey
             "price": 402.0,
             "time": "2026-09-21T00:00:00+00:00",
             "account_fingerprint": FINGERPRINT,
-        }
+        },
+        {
+            "exec_id": "other-client-same-order-id",
+            "order_id": 77,
+            "perm_id": 990088,
+            "client_id": 999,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "time": "2026-09-21T00:00:01+00:00",
+            "account_fingerprint": FINGERPRINT,
+        },
     ]
     payload["commissions"] = [
         {
@@ -2227,7 +2241,22 @@ def test_callback_rejection_without_permid_accepts_exact_completed_cancelled_his
         ),
     )
     postfill, account, open_orders, paper = _terminal_reports(
-        executions=[],
+        executions=[
+            {
+                "exec_id": "unrelated-cross-client",
+                "order_id": 77,
+                "perm_id": 990088,
+                "client_id": 999,
+                "symbol": "9432",
+                "sec_type": "STK",
+                "currency": "JPY",
+                "side": "BUY",
+                "quantity": 1.0,
+                "price": 402.0,
+                "time": "2026-09-21T12:39:19+00:00",
+                "account_fingerprint": FINGERPRINT,
+            }
+        ],
         position=0.0,
     )
     completed = _terminal_completed_report(
@@ -2295,7 +2324,7 @@ def test_callback_rejection_without_permid_accepts_exact_completed_cancelled_his
     assert calls[0]["perm_id"] is None
 
 
-def test_missing_rejection_permid_blocks_execution_using_derived_completed_permid(
+def test_missing_rejection_permid_blocks_cross_client_execution_using_derived_permid(
     monkeypatch,
 ):
     journal = _terminal_journal(
@@ -2309,7 +2338,7 @@ def test_missing_rejection_permid_blocks_execution_using_derived_completed_permi
             "exec_id": "conflicting-exec",
             "order_id": 78,
             "perm_id": 880077,
-            "client_id": 681,
+            "client_id": 999,
             "symbol": "9432",
             "sec_type": "STK",
             "currency": "JPY",

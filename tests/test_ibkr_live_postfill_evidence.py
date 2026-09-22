@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import ai_asset_platform.brokers.ibkr_live_postfill_evidence as subject
 from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
     IbkrLivePostFillSnapshot,
     LiveCommissionEvidence,
@@ -59,6 +61,57 @@ def test_missing_exact_readonly_confirmation_blocks_before_connection():
     assert result.connected is False
     assert result.order_sent is False
     assert result.live_order_sent is False
+
+
+def test_collection_keeps_cross_client_executions_visible(monkeypatch):
+    class ReadyEvent:
+        def wait(self, timeout):
+            return True
+
+    class FakeExecutionFilter:
+        pass
+
+    class FakeProbe:
+        def __init__(self):
+            self.connected_ready = ReadyEvent()
+            self.accounts_ready = ReadyEvent()
+            self.executions_ready = ReadyEvent()
+            self.accounts = ["DU123"]
+            self.raw_executions = []
+            self.commissions = []
+            self.errors = []
+            self.fatal = False
+
+        def connect(self, *args, **kwargs):
+            return None
+
+        def reqManagedAccts(self):
+            return None
+
+        def reqExecutions(self, req_id, execution_filter):
+            assert req_id == 1997
+            assert not hasattr(execution_filter, "clientId")
+
+        def isConnected(self):
+            return False
+
+    monkeypatch.setattr(subject, "_LivePostFillProbe", FakeProbe)
+    monkeypatch.setattr(subject, "ExecutionFilter", FakeExecutionFilter)
+    monkeypatch.setattr(
+        subject,
+        "Thread",
+        lambda *args, **kwargs: SimpleNamespace(start=lambda: None),
+    )
+
+    snapshot = subject.preview_ibkr_live_postfill_snapshot(
+        confirmation=subject.CONFIRMATION_VALUE,
+        expected_client_id=681,
+        endpoint_port=4001,
+        settle_seconds=0,
+    )
+
+    assert snapshot.ready is True
+    assert snapshot.executions == ()
 
 
 def test_exact_execution_and_commission_prove_native_cash_effect():

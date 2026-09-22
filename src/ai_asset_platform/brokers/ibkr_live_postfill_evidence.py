@@ -283,8 +283,10 @@ def preview_ibkr_live_postfill_snapshot(
                 continue
             account_id = probe.accounts[0]
             execution_filter = ExecutionFilter()
-            if expected_client_id is not None:
-                execution_filter.clientId = expected_client_id
+            # Do not filter by API client at the broker. IBKR order IDs are
+            # client-scoped, but permIds are broker-global. Cross-client rows
+            # must remain visible so downstream reconciliation can detect a
+            # conflicting claim on the selected permId.
             probe.reqExecutions(1997, execution_filter)
             if not probe.executions_ready.wait(timeout) or probe.fatal:
                 errors.extend(probe.errors)

@@ -420,7 +420,6 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
             _positive_exact_int(row.get("order_id")) is None
             or _positive_exact_int(row.get("perm_id")) is None
             or _nonnegative_exact_int(row.get("client_id")) is None
-            or row.get("client_id") != sender_client_id
         ):
             return
 
@@ -434,12 +433,19 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
             if (
                 row_order_id is None
                 or row_perm_id is None
-                or row_client_id != sender_client_id
+                or row_client_id is None
             ):
                 return
-            if row_order_id == order_id and row_perm_id != perm_id:
+            if (
+                row_client_id == sender_client_id
+                and row_order_id == order_id
+                and row_perm_id != perm_id
+            ):
                 return
-            if row_perm_id == perm_id and row_order_id != order_id:
+            if row_perm_id == perm_id and (
+                row_client_id != sender_client_id
+                or row_order_id != order_id
+            ):
                 return
         return
 
@@ -462,7 +468,11 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
             if not isinstance(row, dict):
                 continue
             row_order_id = _positive_exact_int(row.get("order_id"))
-            if row_order_id == order_id:
+            row_client_id = _nonnegative_exact_int(row.get("client_id"))
+            if (
+                row_order_id == order_id
+                and row_client_id == sender_client_id
+            ):
                 same_order.append(row)
 
         if not same_order:
@@ -498,21 +508,22 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
         raw_perm_id = row.get("perm_id")
         row_order_id = _positive_exact_int(raw_order_id)
         row_perm_id = _positive_exact_int(raw_perm_id)
+        row_client_id = _nonnegative_exact_int(row.get("client_id"))
 
         # Broker execution identity is a safety boundary. Any type-invalid or
-        # non-positive order_id/perm_id anywhere in the read-only execution
-        # evidence makes the whole reconciliation ambiguous and therefore
-        # fails closed, even when the malformed row would otherwise be
-        # unrelated to the selected pair. This deliberately avoids trying to
-        # enumerate every numeric string/float alias such as "+77",
-        # "880077.0", scientific notation, or booleans.
-        if row_order_id is None or row_perm_id is None:
+        # non-positive order_id/perm_id/client_id anywhere in the read-only
+        # execution evidence makes the whole reconciliation ambiguous and
+        # therefore fails closed, even when the malformed row would otherwise
+        # be unrelated to the selected pair.
+        if (
+            row_order_id is None
+            or row_perm_id is None
+            or row_client_id is None
+        ):
             return
 
-        # Treat numeric-equivalent but non-exact representations as claims on
-        # the selected broker identity too. For example, "880077" or
-        # 880077.0 must not evade the reverse-identity conflict check merely
-        # because _positive_exact_int correctly rejects their type.
+        # permId is broker-global. A claim on the selected permId from another
+        # client or another order is contradictory and must fail closed.
         raw_perm_claims_selected = (
             raw_perm_id == perm_id
             or (
@@ -521,17 +532,25 @@ def _promote_postfill_if_proven(request: LivePilotOperationalRequest) -> None:
             )
         )
         if raw_perm_claims_selected:
-            if row_perm_id is None or row_order_id is None or row_order_id != order_id:
+            if (
+                row_perm_id is None
+                or row_order_id is None
+                or row_client_id != sender_client_id
+                or row_order_id != order_id
+            ):
                 return
 
-        # Persisted orderId must never appear with another/malformed permId.
-        # Numeric-but-type-invalid forms (for example 77.0 or "77") are also
-        # treated as claims on the selected identity and therefore fail closed.
+        # orderId is client-scoped. Reuse of the same numeric orderId by another
+        # API client is unrelated unless it also claims the selected global
+        # permId (handled above).
         raw_order_claims_selected = (
-            raw_order_id == order_id
-            or (
-                isinstance(raw_order_id, str)
-                and raw_order_id.strip() == str(order_id)
+            row_client_id == sender_client_id
+            and (
+                raw_order_id == order_id
+                or (
+                    isinstance(raw_order_id, str)
+                    and raw_order_id.strip() == str(order_id)
+                )
             )
         )
         if raw_order_claims_selected:
@@ -1274,12 +1293,15 @@ def _promote_terminal_reconciliation_if_proven(
         row_order = _positive_exact_int(row.get("order_id"))
         row_perm = _positive_exact_int(row.get("perm_id"))
         row_client = _nonnegative_exact_int(row.get("client_id"))
-        if row_order is None or row_perm is None or row_client != sender_client_id:
+        if row_order is None or row_perm is None or row_client is None:
             return None
         validated_rows.append(row)
 
     selected_rows = [
-        row for row in validated_rows if row.get("order_id") == order_id
+        row
+        for row in validated_rows
+        if row.get("client_id") == sender_client_id
+        and row.get("order_id") == order_id
     ]
     raw_persisted_perm = journal.get("perm_id")
     if raw_persisted_perm is None:
@@ -1296,7 +1318,11 @@ def _promote_terminal_reconciliation_if_proven(
         if persisted_perm is not None and selected_perm != persisted_perm:
             return None
         if any(
-            row.get("perm_id") == selected_perm and row.get("order_id") != order_id
+            row.get("perm_id") == selected_perm
+            and (
+                row.get("client_id") != sender_client_id
+                or row.get("order_id") != order_id
+            )
             for row in validated_rows
         ):
             return None
@@ -1390,7 +1416,10 @@ def _promote_terminal_reconciliation_if_proven(
     # UNKNOWN by design. Fresh execution identity contradictions are checked
     # before any immutable rejection proof can be created.
     if any(
-        row.get("order_id") == order_id
+        (
+            row.get("client_id") == sender_client_id
+            and row.get("order_id") == order_id
+        )
         or (
             persisted_perm is not None
             and row.get("perm_id") == persisted_perm
