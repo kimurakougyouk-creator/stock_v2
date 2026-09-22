@@ -192,6 +192,84 @@ def test_malformed_managed_account_execution_identity_blocks_snapshot(monkeypatc
     assert tuple(row.exec_id for row in snapshot.executions) == ("valid",)
 
 
+def test_mismatched_execution_account_blocks_snapshot(monkeypatch):
+    class ReadyEvent:
+        def wait(self, timeout):
+            return True
+
+    class FakeExecutionFilter:
+        pass
+
+    contract = SimpleNamespace(symbol="AAPL", secType="STK", currency="USD")
+    selected = SimpleNamespace(
+        acctNumber="DU123",
+        side="BOT",
+        shares=1,
+        price=250,
+        orderId=77,
+        permId=88,
+        clientId=681,
+        execId="selected",
+        time="20260922 12:00:00",
+    )
+    other_account = SimpleNamespace(
+        acctNumber="DU999",
+        side="BOT",
+        shares=1,
+        price=250,
+        orderId=78,
+        permId=88,
+        clientId=999,
+        execId="other-account-conflict",
+        time="20260922 12:00:01",
+    )
+
+    class FakeProbe:
+        def __init__(self):
+            self.connected_ready = ReadyEvent()
+            self.accounts_ready = ReadyEvent()
+            self.executions_ready = ReadyEvent()
+            self.accounts = ["DU123"]
+            self.raw_executions = [
+                (contract, selected),
+                (contract, other_account),
+            ]
+            self.commissions = []
+            self.errors = []
+            self.fatal = False
+
+        def connect(self, *args, **kwargs):
+            return None
+
+        def reqManagedAccts(self):
+            return None
+
+        def reqExecutions(self, req_id, execution_filter):
+            return None
+
+        def isConnected(self):
+            return False
+
+    monkeypatch.setattr(subject, "_LivePostFillProbe", FakeProbe)
+    monkeypatch.setattr(subject, "ExecutionFilter", FakeExecutionFilter)
+    monkeypatch.setattr(
+        subject,
+        "Thread",
+        lambda *args, **kwargs: SimpleNamespace(start=lambda: None),
+    )
+
+    snapshot = subject.preview_ibkr_live_postfill_snapshot(
+        confirmation=subject.CONFIRMATION_VALUE,
+        expected_client_id=681,
+        endpoint_port=4001,
+        settle_seconds=0,
+    )
+
+    assert snapshot.ready is False
+    assert snapshot.blocked_reason == "malformed Live execution evidence"
+    assert tuple(row.exec_id for row in snapshot.executions) == ("selected",)
+
+
 def test_execution_row_rejects_coercible_non_integer_broker_identities():
     contract = SimpleNamespace(symbol="AAPL", secType="STK", currency="USD")
     base = dict(

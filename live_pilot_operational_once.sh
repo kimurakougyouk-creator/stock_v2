@@ -14,10 +14,20 @@ set -euo pipefail
 ROOT="${AI_ASSET_PLATFORM_ROOT:-$PWD}"
 cd "$ROOT"
 
-if [[ ! -f .venv/bin/activate ]]; then
-  echo "BLOCKED: .venv is missing. No Live order was sent."
+VENV_PYTHON="$ROOT/.venv/bin/python"
+if [[ ! -x "$VENV_PYTHON" ]]; then
+  echo "BLOCKED: .venv Python is missing or not executable. No Live order was sent."
   exit 2
 fi
+
+shopt -s nullglob
+VENV_SITE_CANDIDATES=("$ROOT"/.venv/lib/python*/site-packages)
+shopt -u nullglob
+if [[ "${#VENV_SITE_CANDIDATES[@]}" -ne 1 || ! -d "${VENV_SITE_CANDIDATES[0]}" ]]; then
+  echo "BLOCKED: expected exactly one .venv site-packages directory. No Live order was sent."
+  exit 2
+fi
+VENV_SITE_PACKAGES="${VENV_SITE_CANDIDATES[0]}"
 
 : "${LIVE_PILOT_INTENT_ID:?BLOCKED: LIVE_PILOT_INTENT_ID is required}"
 : "${LIVE_PILOT_TICKER:?BLOCKED: LIVE_PILOT_TICKER is required}"
@@ -50,6 +60,24 @@ SOURCE_DIRTY="$(git status --porcelain=v1 --untracked-files=all -- \
   live_pilot_operational_once.sh)"
 if [[ -n "$SOURCE_DIRTY" ]]; then
   echo "BLOCKED: tracked or untracked audited source changes are present before Python launch. No Live order was sent."
+  exit 2
+fi
+
+# git status can intentionally suppress worktree checks for assume-unchanged
+# and skip-worktree entries. Reject either index flag in audited source paths
+# before any Python process can execute.
+INDEX_HIDDEN="$(git ls-files -v -- \
+  src \
+  tests \
+  scripts \
+  requirements.txt \
+  pyproject.toml \
+  pytest.ini \
+  .github/workflows/pytest.yml \
+  live_pilot_operational_once.sh | \
+  awk '$1 == "S" || $1 ~ /^[a-z]$/ { print }')"
+if [[ -n "$INDEX_HIDDEN" ]]; then
+  echo "BLOCKED: audited source contains assume-unchanged or skip-worktree index entries. No Live order was sent."
   exit 2
 fi
 
@@ -87,12 +115,30 @@ if [[ -n "$IGNORED_IMPORTABLE" ]]; then
   exit 2
 fi
 
-# shellcheck disable=SC1091
-source .venv/bin/activate
-unset PYTHONPATH
-bash scripts/ensure_exact_checkout_runtime.sh
+# Do not source .venv/bin/activate: it is ignored local state and therefore
+# cannot be trusted as executable shell code.  -I/-P/-S suppress environment,
+# current-directory, user-site, sitecustomize, and .pth startup hooks.  The
+# audited checkout and the venv dependency directory are added explicitly
+# after isolated startup.
+unset PYTHONPATH PYTHONHOME
+PYTHON_BOOTSTRAP='
+import runpy
+import sys
 
-python -P -m ai_asset_platform.execution.live_pilot_operational_entrypoint \
+repo_root = sys.argv[1]
+site_packages = sys.argv[2]
+operational_args = sys.argv[3:]
+sys.path.insert(0, site_packages)
+sys.path.insert(0, repo_root + "/src")
+sys.argv = ["ai_asset_platform.execution.live_pilot_operational_entrypoint", *operational_args]
+runpy.run_module(
+    "ai_asset_platform.execution.live_pilot_operational_entrypoint",
+    run_name="__main__",
+    alter_sys=True,
+)
+'
+
+"$VENV_PYTHON" -I -P -S -c "$PYTHON_BOOTSTRAP" "$ROOT" "$VENV_SITE_PACKAGES" \
   --intent-id "$LIVE_PILOT_INTENT_ID" \
   --ticker "$LIVE_PILOT_TICKER" \
   --side "$LIVE_PILOT_SIDE" \

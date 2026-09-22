@@ -37,6 +37,18 @@ REPORT_SCHEMA_VERSION = 1
 _IMPORTABLE_IGNORED_SUFFIXES = (".py", ".pyc", ".pyo", ".pyz", ".so", ".pyd", ".dylib")
 
 
+def _index_hidden_entries(raw_listing: str) -> tuple[str, ...]:
+    entries: list[str] = []
+    for raw in raw_listing.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        tag = line[0]
+        if tag == "S" or tag.islower():
+            entries.append(f"INDEX_HIDDEN {line}")
+    return tuple(entries)
+
+
 def _ignored_importable_entries(
     raw_listing: str,
     *,
@@ -160,6 +172,16 @@ def audit_live_pilot_source_cutover(
             cwd=repository_root,
             runner=runner,
         )
+        index_text = _run_git(
+            (
+                "ls-files",
+                "-v",
+                "--",
+                *normalized_paths,
+            ),
+            cwd=repository_root,
+            runner=runner,
+        )
         ignored_text = _run_git(
             (
                 "ls-files",
@@ -172,11 +194,15 @@ def audit_live_pilot_source_cutover(
             cwd=repository_root,
             runner=runner,
         )
-        dirty_entries = tuple(
-            line.rstrip() for line in status_text.splitlines() if line.strip()
-        ) + _ignored_importable_entries(
-            ignored_text,
-            repository_root=repository_root,
+        dirty_entries = (
+            tuple(
+                line.rstrip() for line in status_text.splitlines() if line.strip()
+            )
+            + _index_hidden_entries(index_text)
+            + _ignored_importable_entries(
+                ignored_text,
+                repository_root=repository_root,
+            )
         )
     except (OSError, subprocess.SubprocessError):
         # Any inability to prove source identity/cleanliness fails closed.

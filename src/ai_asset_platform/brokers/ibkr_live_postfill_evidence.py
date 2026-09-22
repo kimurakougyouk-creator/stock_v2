@@ -312,6 +312,7 @@ def preview_ibkr_live_postfill_snapshot(
                     getattr(execution, "acctNumber", "") or ""
                 ).strip()
                 if raw_account != account_id:
+                    invalid_execution_evidence = True
                     continue
                 row = _execution_row(contract, execution, account_id)
                 if row is None:

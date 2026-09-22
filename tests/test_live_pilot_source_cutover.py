@@ -24,11 +24,13 @@ class FakeRunner:
         actual_sha: str = SHA,
         status: str = "",
         ignored: str = "",
+        index_flags: str = "",
         fail: bool = False,
     ):
         self.actual_sha = actual_sha
         self.status = status
         self.ignored = ignored
+        self.index_flags = index_flags
         self.fail = fail
         self.calls: list[list[str]] = []
 
@@ -40,6 +42,8 @@ class FakeRunner:
             stdout = self.actual_sha + "\n"
         elif command[1:3] == ["status", "--porcelain=v1"]:
             stdout = self.status
+        elif command[1:3] == ["ls-files", "-v"]:
+            stdout = self.index_flags
         elif command[1:3] == ["ls-files", "--others"]:
             stdout = self.ignored
         else:
@@ -63,8 +67,10 @@ def test_exact_approved_commit_and_clean_audited_paths_are_ready(tmp_path: Path)
     assert result.order_sent is False
     assert result.live_order_sent is False
     status_call = runner.calls[1]
-    ignored_call = runner.calls[2]
+    index_call = runner.calls[2]
+    ignored_call = runner.calls[3]
     assert "--untracked-files=all" in status_call
+    assert index_call[1:3] == ["ls-files", "-v"]
     assert ignored_call[1:5] == [
         "ls-files",
         "--others",
@@ -73,6 +79,7 @@ def test_exact_approved_commit_and_clean_audited_paths_are_ready(tmp_path: Path)
     ]
     for path in AUDITED_PATHS:
         assert path in status_call
+        assert path in index_call
         assert path in ignored_call
 
 
@@ -115,6 +122,36 @@ def test_untracked_file_in_audited_source_fails_closed(tmp_path: Path):
     assert result.ready is False
     assert result.audited_paths_clean is False
     assert result.dirty_entries == ("?? src/sitecustomize.py",)
+
+
+def test_assume_unchanged_audited_entry_fails_closed(tmp_path: Path):
+    runner = FakeRunner(index_flags="h src/ai_asset_platform/execution/live_pilot_operational_entrypoint.py\n")
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is False
+    assert result.dirty_entries == (
+        "INDEX_HIDDEN h src/ai_asset_platform/execution/live_pilot_operational_entrypoint.py",
+    )
+
+
+def test_skip_worktree_audited_entry_fails_closed(tmp_path: Path):
+    runner = FakeRunner(index_flags="S src/ai_asset_platform/execution/live_pilot_operational_entrypoint.py\n")
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is False
+    assert result.dirty_entries == (
+        "INDEX_HIDDEN S src/ai_asset_platform/execution/live_pilot_operational_entrypoint.py",
+    )
 
 
 def test_ignored_importable_artifact_in_audited_source_fails_closed(tmp_path: Path):
@@ -289,19 +326,18 @@ def test_tracked_edit_in_human_wrapper_fails_closed(tmp_path: Path):
     assert result.dirty_entries == (" M live_pilot_operational_once.sh",)
 
 
-def test_human_wrapper_checks_tracked_cleanliness_before_any_python_launch():
+def test_human_wrapper_checks_source_gates_before_isolated_python_launch():
     source = Path("live_pilot_operational_once.sh").read_text(encoding="utf-8")
     cleanliness = source.index("git status --porcelain=v1 --untracked-files=all")
+    index_hidden = source.index("git ls-files -v --")
     ignored_importable = source.index(
         "git ls-files --others --ignored --exclude-standard -- src tests scripts"
     )
-    runtime_gate = source.index("bash scripts/ensure_exact_checkout_runtime.sh")
-    operational_python = source.index(
-        "python -P -m ai_asset_platform.execution.live_pilot_operational_entrypoint"
-    )
+    isolated_python = source.index('"$VENV_PYTHON" -I -P -S -c "$PYTHON_BOOTSTRAP"')
 
-    assert cleanliness < runtime_gate
-    assert ignored_importable < runtime_gate
-    assert cleanliness < operational_python
-    assert ignored_importable < operational_python
-    assert source.index('ACTUAL_SHA="$(git rev-parse HEAD)"') < runtime_gate
+    assert cleanliness < isolated_python
+    assert index_hidden < isolated_python
+    assert ignored_importable < isolated_python
+    assert source.index('ACTUAL_SHA="$(git rev-parse HEAD)"') < isolated_python
+    assert "\nsource .venv/bin/activate\n" not in source
+    assert "bash scripts/ensure_exact_checkout_runtime.sh" not in source
