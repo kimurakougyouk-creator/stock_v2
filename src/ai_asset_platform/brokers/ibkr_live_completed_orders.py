@@ -113,6 +113,7 @@ class _LiveCompletedOrdersProbe(EWrapper, EClient):
         self.orders: list[IbkrLiveCompletedOrderEvidence] = []
         self.errors: list[str] = []
         self.fatal_error: str | None = None
+        self.invalid_order_evidence = False
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.connected_ready.set()
@@ -135,6 +136,7 @@ class _LiveCompletedOrdersProbe(EWrapper, EClient):
             client_id = int(getattr(order, "clientId", -1))
             quantity = float(getattr(order, "totalQuantity", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
+            self.invalid_order_evidence = True
             return
         if (
             order_id <= 0
@@ -143,6 +145,7 @@ class _LiveCompletedOrdersProbe(EWrapper, EClient):
             or not math.isfinite(quantity)
             or quantity <= 0
         ):
+            self.invalid_order_evidence = True
             return
         action = str(getattr(order, "action", "") or "").strip().upper()
         action = {"BOT": "BUY", "SLD": "SELL"}.get(action, action)
@@ -287,6 +290,24 @@ def preview_ibkr_live_completed_orders(
                 orders=(),
                 blocked_reason="Live completed-order snapshot did not complete",
                 errors=tuple(probe.errors),
+            )
+
+        if probe.invalid_order_evidence:
+            return IbkrLiveCompletedOrdersSnapshot(
+                attempted=True,
+                connected=True,
+                ready=False,
+                endpoint_port=int(endpoint_port),
+                account_fingerprint=fingerprint,
+                orders=(),
+                blocked_reason=(
+                    "Live completed-order snapshot contained malformed order evidence"
+                ),
+                errors=tuple(probe.errors),
+                order_sent=False,
+                cancel_sent=False,
+                modify_sent=False,
+                live_order_sent=False,
             )
 
         deduped = _dedupe_exact_completed_orders(probe.orders)
