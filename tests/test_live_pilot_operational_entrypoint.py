@@ -1757,6 +1757,25 @@ def _terminal_reports(*, executions, position):
     return postfill, account, open_orders, paper
 
 
+def _terminal_completed_report(*, orders=None):
+    rows = list(orders or [])
+    return {
+        "schema_version": subject.LIVE_COMPLETED_ORDERS_SCHEMA_VERSION,
+        "ready": True,
+        "checked_at": "2026-09-21T12:39:30+00:00",
+        "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "raw_account_id_persisted": False,
+        "completed_order_count": len(rows),
+        "orders": rows,
+        "order_sent": False,
+        "cancel_sent": False,
+        "modify_sent": False,
+        "live_order_sent": False,
+    }
+
+
 def _terminal_journal(**overrides):
     data = {
         "state": "UNKNOWN",
@@ -2131,6 +2150,7 @@ def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch
         subject.DEFAULT_POSTFILL_REPORT: postfill,
         subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
         subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_LIVE_COMPLETED_ORDERS_REPORT: _terminal_completed_report(),
         subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
     }
     monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
