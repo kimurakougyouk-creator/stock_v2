@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import ai_asset_platform.brokers.ibkr_live_completed_orders as subject
 
 from ai_asset_platform.brokers.ibkr_live_completed_orders import (
     IbkrLiveCompletedOrderEvidence,
@@ -22,6 +25,92 @@ def test_missing_confirmation_blocks_before_live_connection():
     assert snapshot.attempted is False
     assert snapshot.connected is False
     assert snapshot.ready is False
+    assert snapshot.order_sent is False
+    assert snapshot.cancel_sent is False
+    assert snapshot.modify_sent is False
+    assert snapshot.live_order_sent is False
+
+
+def test_malformed_same_account_completed_callback_marks_evidence_invalid():
+    probe = subject._LiveCompletedOrdersProbe()
+    probe.accounts = ["DU123"]
+    contract = SimpleNamespace(
+        symbol="9432",
+        secType="STK",
+        currency="JPY",
+        primaryExchange="TSEJ",
+        exchange="TSEJ",
+    )
+    order = SimpleNamespace(
+        account="DU123",
+        orderId=77,
+        permId=880077,
+        clientId=681,
+        totalQuantity=float("nan"),
+        action="BUY",
+        orderType="LMT",
+        lmtPrice=400.0,
+        orderRef="live-pilot:9432:BUY:100:test",
+    )
+    order_state = SimpleNamespace(
+        status="Filled",
+        completedStatus="Filled",
+        completedTime="20260921 12:39:20 UTC",
+    )
+
+    probe.completedOrder(contract, order, order_state)
+
+    assert probe.invalid_order_evidence is True
+    assert probe.orders == []
+
+
+def test_invalid_completed_order_evidence_blocks_ready_snapshot(monkeypatch):
+    class ReadyEvent:
+        def wait(self, timeout):
+            return True
+
+    class FakeProbe:
+        def __init__(self):
+            self.connected_ready = ReadyEvent()
+            self.accounts_ready = ReadyEvent()
+            self.orders_ready = ReadyEvent()
+            self.accounts = ["DU123"]
+            self.orders = []
+            self.errors = []
+            self.fatal_error = None
+            self.invalid_order_evidence = True
+
+        def connect(self, *args, **kwargs):
+            return None
+
+        def reqManagedAccts(self):
+            return None
+
+        def reqCompletedOrders(self, api_only):
+            assert api_only is False
+
+        def isConnected(self):
+            return False
+
+    monkeypatch.setattr(subject, "_LiveCompletedOrdersProbe", FakeProbe)
+    monkeypatch.setattr(
+        subject,
+        "Thread",
+        lambda *args, **kwargs: SimpleNamespace(start=lambda: None),
+    )
+
+    snapshot = subject.preview_ibkr_live_completed_orders(
+        confirmation=subject.CONFIRMATION_VALUE,
+        endpoint_port=4001,
+    )
+
+    assert snapshot.attempted is True
+    assert snapshot.connected is True
+    assert snapshot.ready is False
+    assert snapshot.orders == ()
+    assert snapshot.blocked_reason == (
+        "Live completed-order snapshot contained malformed order evidence"
+    )
     assert snapshot.order_sent is False
     assert snapshot.cancel_sent is False
     assert snapshot.modify_sent is False
