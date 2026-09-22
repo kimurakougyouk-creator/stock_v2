@@ -34,8 +34,8 @@ jobs:
           pip install ibapi==9.81.1.post1
           pip install -e .
 
-      - name: Emit pinned ibapi runtime manifest candidate
-        run: python scripts/emit_live_ibapi_manifest.py
+      - name: Verify pinned ibapi runtime manifest
+        run: python scripts/emit_live_ibapi_manifest.py --check scripts/live_ibapi_manifest.json
 
       - name: Verify plain-python runtime import (not just pytest's pythonpath=src)
         run: |

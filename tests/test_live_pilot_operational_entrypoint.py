@@ -48,6 +48,22 @@ def _install_wrapper_probe_module(fake_root: Path) -> None:
         "raise SystemExit(2)\n",
         encoding="utf-8",
     )
+    (module_dir / "live_ibapi_runtime_guard.py").write_text(
+        "def install_verified_ibapi_importer(*, package_dir, manifest_path):\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+    scripts_dir = fake_root / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    (scripts_dir / "verify_live_ibapi_runtime.py").write_text(
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    (scripts_dir / "live_ibapi_manifest.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
 
 
 @pytest.fixture(autouse=True)

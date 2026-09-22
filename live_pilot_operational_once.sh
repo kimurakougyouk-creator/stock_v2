@@ -144,18 +144,39 @@ fi
 # The .venv Python link is resolved above to an OS-managed, root-owned,
 # non-writable /usr/bin/python3* target and that resolved path is executed.
 # -I/-P/-S suppress environment, current-directory, user-site, sitecustomize,
-# and .pth startup hooks. The audited checkout and venv dependency directory
-# are added explicitly after isolated startup.
+# and .pth startup hooks.
+#
+# Before any venv code can be imported, use only that trusted system Python and
+# a tracked standard-library-only verifier to prove the exact ibapi source tree
+# against an immutable repository manifest. The operational interpreter never
+# adds the whole venv site-packages directory to sys.path; a tracked meta-path
+# guard loads only manifest-listed ibapi modules and re-hashes the exact source
+# bytes immediately before executing them.
 unset PYTHONPATH PYTHONHOME
+IBAPI_MANIFEST="$ROOT/scripts/live_ibapi_manifest.json"
+IBAPI_VERIFIER="$ROOT/scripts/verify_live_ibapi_runtime.py"
+IBAPI_PACKAGE_DIR="$VENV_SITE_PACKAGES/ibapi"
+if ! "$TRUSTED_PYTHON_REAL" -I -P -S "$IBAPI_VERIFIER" \
+  --site-packages "$VENV_SITE_PACKAGES" \
+  --manifest "$IBAPI_MANIFEST"; then
+  echo "BLOCKED: venv ibapi dependency does not match the pinned runtime manifest. No Live order was sent."
+  exit 2
+fi
+
 PYTHON_BOOTSTRAP='
 import runpy
 import sys
 
 repo_root = sys.argv[1]
-site_packages = sys.argv[2]
-operational_args = sys.argv[3:]
-sys.path.insert(0, site_packages)
+ibapi_package_dir = sys.argv[2]
+ibapi_manifest = sys.argv[3]
+operational_args = sys.argv[4:]
 sys.path.insert(0, repo_root + "/src")
+from ai_asset_platform.execution.live_ibapi_runtime_guard import install_verified_ibapi_importer
+install_verified_ibapi_importer(
+    package_dir=ibapi_package_dir,
+    manifest_path=ibapi_manifest,
+)
 sys.argv = ["ai_asset_platform.execution.live_pilot_operational_entrypoint", *operational_args]
 runpy.run_module(
     "ai_asset_platform.execution.live_pilot_operational_entrypoint",
@@ -164,7 +185,8 @@ runpy.run_module(
 )
 '
 
-"$TRUSTED_PYTHON_REAL" -I -P -S -c "$PYTHON_BOOTSTRAP" "$ROOT" "$VENV_SITE_PACKAGES" \
+"$TRUSTED_PYTHON_REAL" -I -P -S -c "$PYTHON_BOOTSTRAP" \
+  "$ROOT" "$IBAPI_PACKAGE_DIR" "$IBAPI_MANIFEST" \
   --intent-id "$LIVE_PILOT_INTENT_ID" \
   --ticker "$LIVE_PILOT_TICKER" \
   --side "$LIVE_PILOT_SIDE" \
