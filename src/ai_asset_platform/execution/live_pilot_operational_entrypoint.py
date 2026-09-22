@@ -1084,6 +1084,7 @@ def _completed_order_history_consistent_with_rejection(
         "JPY" if request.ticker.strip().upper() == "9432.T" else "USD"
     )
 
+    parsed_rows: list[tuple[dict, int, int, int]] = []
     for row in orders:
         if not isinstance(row, dict):
             return False
@@ -1092,10 +1093,24 @@ def _completed_order_history_consistent_with_rejection(
         row_client = _nonnegative_exact_int(row.get("client_id"))
         if row_order is None or row_perm is None or row_client is None:
             return False
+        parsed_rows.append((row, row_order, row_perm, row_client))
 
+    effective_perm = rejection_perm
+    sender_order_rows = [
+        item
+        for item in parsed_rows
+        if item[1] == order_id and item[3] == sender_client_id
+    ]
+    if effective_perm is None:
+        if len(sender_order_rows) > 1:
+            return False
+        if len(sender_order_rows) == 1:
+            effective_perm = sender_order_rows[0][2]
+
+    for row, row_order, row_perm, row_client in parsed_rows:
         claims_selected_identity = (
-            row_order == order_id
-            or (rejection_perm is not None and row_perm == rejection_perm)
+            (row_order == order_id and row_client == sender_client_id)
+            or (effective_perm is not None and row_perm == effective_perm)
         )
         if not claims_selected_identity:
             continue
@@ -1103,8 +1118,8 @@ def _completed_order_history_consistent_with_rejection(
         if (
             row_order != order_id
             or row_client != sender_client_id
-            or rejection_perm is None
-            or row_perm != rejection_perm
+            or effective_perm is None
+            or row_perm != effective_perm
         ):
             return False
 
