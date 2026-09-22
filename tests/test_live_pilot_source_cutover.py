@@ -146,6 +146,49 @@ def test_ignored_native_extension_in_audited_source_fails_closed(tmp_path: Path)
     )
 
 
+def test_ignored_extensionless_package_symlink_fails_closed(tmp_path: Path):
+    link = tmp_path / "src" / "ai_asset_platform" / "execution" / "live_pilot_operational_entrypoint"
+    link.parent.mkdir(parents=True)
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "__init__.py").write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+    link.symlink_to(payload, target_is_directory=True)
+
+    runner = FakeRunner(
+        ignored="src/ai_asset_platform/execution/live_pilot_operational_entrypoint\n"
+    )
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is False
+    assert result.dirty_entries == (
+        "IGNORED_SYMLINK src/ai_asset_platform/execution/live_pilot_operational_entrypoint",
+    )
+
+
+def test_ignored_importable_package_directory_fails_closed(tmp_path: Path):
+    package = tmp_path / "src" / "shadow_package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+
+    runner = FakeRunner(ignored="src/shadow_package\n")
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is False
+    assert result.dirty_entries == (
+        "IGNORED_IMPORTABLE_PACKAGE src/shadow_package",
+    )
+
+
 def test_ignored_pycache_bytecode_is_allowed(tmp_path: Path):
     runner = FakeRunner(
         ignored="src/ai_asset_platform/__pycache__/settings.cpython-313.pyc\n"

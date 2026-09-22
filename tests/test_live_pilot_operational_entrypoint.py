@@ -770,6 +770,100 @@ def test_human_wrapper_blocks_ignored_importable_before_python_launch(tmp_path):
     assert python_marker.exists() is False
 
 
+def test_human_wrapper_blocks_ignored_package_symlink_before_python_launch(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "live_pilot_operational_once.sh"
+    fake_root = tmp_path / "runtime"
+    (fake_root / ".venv" / "bin").mkdir(parents=True)
+    (fake_root / ".venv" / "bin" / "activate").write_text("", encoding="utf-8")
+    (fake_root / "scripts").mkdir()
+    ensure_marker = tmp_path / "ensure-ran.txt"
+    ensure = fake_root / "scripts" / "ensure_exact_checkout_runtime.sh"
+    ensure.write_text(
+        "#!/usr/bin/env bash\nprintf 'ran\\n' > \"$ENSURE_MARKER\"\n",
+        encoding="utf-8",
+    )
+    ensure.chmod(0o755)
+
+    shadow = (
+        fake_root
+        / "src"
+        / "ai_asset_platform"
+        / "execution"
+        / "live_pilot_operational_entrypoint"
+    )
+    shadow.parent.mkdir(parents=True)
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "__init__.py").write_text(
+        "raise RuntimeError('must not execute')\n",
+        encoding="utf-8",
+    )
+    shadow.symlink_to(payload, target_is_directory=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"rev-parse\" && \"$2\" == \"HEAD\" ]]; then\n"
+        "  printf '%s\\n' \"$LIVE_PILOT_EXPECTED_COMMIT_SHA\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"$1\" == \"status\" && \"$2\" == \"--porcelain=v1\" && \"$3\" == \"--untracked-files=all\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"$1\" == \"ls-files\" && \"$2\" == \"--others\" ]]; then\n"
+        "  printf '%s\\n' 'src/ai_asset_platform/execution/live_pilot_operational_entrypoint'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+
+    python_marker = tmp_path / "python-ran.txt"
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\nprintf 'ran\\n' > \"$PYTHON_MARKER\"\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+            "AI_ASSET_PLATFORM_ROOT": str(fake_root),
+            "LIVE_PILOT_INTENT_ID": _request().intent_id,
+            "LIVE_PILOT_TICKER": "9432.T",
+            "LIVE_PILOT_SIDE": "BUY",
+            "LIVE_PILOT_QUANTITY": "100",
+            "LIVE_PILOT_LIMIT_PRICE": "400",
+            "LIVE_PILOT_NOTIONAL_JPY": "40000",
+            "LIVE_PILOT_NONCE": "nonce-test",
+            "LIVE_PILOT_ACCOUNT_FINGERPRINT": FINGERPRINT,
+            "LIVE_PILOT_EXPECTED_COMMIT_SHA": SHA,
+            "ENSURE_MARKER": str(ensure_marker),
+            "PYTHON_MARKER": str(python_marker),
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "ignored importable artifact, package, or symlink" in completed.stdout
+    assert ensure_marker.exists() is False
+    assert python_marker.exists() is False
+
+
 def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkeypatch):
     journal = {
         "state": "UNKNOWN",

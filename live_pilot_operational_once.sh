@@ -60,17 +60,30 @@ fi
 IGNORED_IMPORTABLE="$(
   git ls-files --others --ignored --exclude-standard -- src tests scripts |
     while IFS= read -r path; do
+      if [[ -L "$path" ]]; then
+        printf '%s\n' "$path"
+        continue
+      fi
       case "$path" in
         */__pycache__/*)
           ;;
         *.py|*.pyc|*.pyo|*.pyz|*.so|*.pyd|*.dylib)
           printf '%s\n' "$path"
           ;;
+        *)
+          if [[ -d "$path" ]] && {
+            [[ -f "$path/__init__.py" ]] ||
+            [[ -f "$path/__init__.pyc" ]] ||
+            compgen -G "$path/__init__*.so" > /dev/null
+          }; then
+            printf '%s\n' "$path"
+          fi
+          ;;
       esac
     done
 )"
 if [[ -n "$IGNORED_IMPORTABLE" ]]; then
-  echo "BLOCKED: ignored importable artifact is present in an audited source path. No Live order was sent."
+  echo "BLOCKED: ignored importable artifact, package, or symlink is present in an audited source path. No Live order was sent."
   exit 2
 fi
 
