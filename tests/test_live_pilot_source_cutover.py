@@ -333,8 +333,10 @@ def test_human_wrapper_checks_source_gates_before_isolated_python_launch():
     ignored_importable = source.index(
         "git ls-files --others --ignored --exclude-standard -- src tests scripts"
     )
-    isolated_python = source.index('"$VENV_PYTHON" -I -P -S -c "$PYTHON_BOOTSTRAP"')
+    interpreter_attestation = source.index('TRUSTED_PYTHON_REAL="$(/usr/bin/readlink -f -- "$VENV_PYTHON_LINK")"')
+    isolated_python = source.index('"$TRUSTED_PYTHON_REAL" -I -P -S -c "$PYTHON_BOOTSTRAP"')
 
+    assert interpreter_attestation < isolated_python
     assert cleanliness < isolated_python
     assert index_hidden < isolated_python
     assert ignored_importable < isolated_python

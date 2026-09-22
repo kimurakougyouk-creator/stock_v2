@@ -1456,6 +1456,13 @@ def _promote_terminal_reconciliation_if_proven(
         if completed_rejection is None:
             return None
         completed_reason, completed_perm = completed_rejection
+        # Completed history may be the first durable source of the broker-global
+        # permId. Before freezing rejection proof, reject any execution claiming
+        # that learned permId: a zero-fill cancellation cannot coexist with it.
+        if completed_perm is not None and any(
+            row.get("perm_id") == completed_perm for row in validated_rows
+        ):
+            return None
         try:
             rejection_evidence = record_definitive_rejection_evidence(
                 request.intent_id,
@@ -1534,7 +1541,10 @@ def _promote_terminal_reconciliation_if_proven(
         rejection_perm = _positive_exact_int(raw_rejection_perm)
         if rejection_perm is None:
             return None
-    if persisted_perm != rejection_perm:
+    # A missing journal permId means the transport attempt never durably bound
+    # that broker-global identity. Exact completed-order history may bind it
+    # later; only an already-persisted permId can contradict rejection proof.
+    if persisted_perm is not None and persisted_perm != rejection_perm:
         return None
     if not _completed_order_history_consistent_with_rejection(
         request,

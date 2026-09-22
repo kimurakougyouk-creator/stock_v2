@@ -35,6 +35,21 @@ def _request(**overrides) -> subject.LivePilotOperationalRequest:
     return subject.LivePilotOperationalRequest(**data)
 
 
+def _install_wrapper_probe_module(fake_root: Path) -> None:
+    module_dir = fake_root / "src" / "ai_asset_platform" / "execution"
+    module_dir.mkdir(parents=True, exist_ok=True)
+    (module_dir.parent / "__init__.py").write_text("", encoding="utf-8")
+    (module_dir / "__init__.py").write_text("", encoding="utf-8")
+    (module_dir / "live_pilot_operational_entrypoint.py").write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['WRAPPER_CAPTURE']).write_text("
+        "json.dumps(sys.argv), encoding='utf-8')\n"
+        "raise SystemExit(2)\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _active_authorization_binding(monkeypatch):
     monkeypatch.setattr(
@@ -574,14 +589,8 @@ def test_human_wrapper_passes_empty_final_confirmation_by_default(tmp_path):
     fake_git.chmod(0o755)
 
     captured = tmp_path / "python-args.txt"
-    fake_python = fake_root / ".venv" / "bin" / "python"
-    fake_python.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf '%s\\n' \"$@\" > \"$WRAPPER_CAPTURE\"\n"
-        "exit 2\n",
-        encoding="utf-8",
-    )
-    fake_python.chmod(0o755)
+    (fake_root / ".venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    _install_wrapper_probe_module(fake_root)
 
     env = os.environ.copy()
     env.update(
@@ -612,7 +621,7 @@ def test_human_wrapper_passes_empty_final_confirmation_by_default(tmp_path):
     )
 
     assert completed.returncode == 2
-    args = captured.read_text(encoding="utf-8").splitlines()
+    args = json.loads(captured.read_text(encoding="utf-8"))
     flag_index = args.index("--final-confirmation")
     assert args[flag_index + 1] == ""
     assert "--live-readonly-confirmation" in args
@@ -654,12 +663,8 @@ def test_human_wrapper_blocks_untracked_source_before_python_launch(tmp_path):
     fake_git.chmod(0o755)
 
     python_marker = tmp_path / "python-ran.txt"
-    fake_python = fake_root / ".venv" / "bin" / "python"
-    fake_python.write_text(
-        "#!/usr/bin/env bash\nprintf 'ran\\n' > \"$PYTHON_MARKER\"\nexit 0\n",
-        encoding="utf-8",
-    )
-    fake_python.chmod(0o755)
+    (fake_root / ".venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    _install_wrapper_probe_module(fake_root)
 
     env = os.environ.copy()
     env.update(
@@ -735,12 +740,8 @@ def test_human_wrapper_blocks_ignored_importable_before_python_launch(tmp_path):
     fake_git.chmod(0o755)
 
     python_marker = tmp_path / "python-ran.txt"
-    fake_python = fake_root / ".venv" / "bin" / "python"
-    fake_python.write_text(
-        "#!/usr/bin/env bash\nprintf 'ran\\n' > \"$PYTHON_MARKER\"\nexit 0\n",
-        encoding="utf-8",
-    )
-    fake_python.chmod(0o755)
+    (fake_root / ".venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    _install_wrapper_probe_module(fake_root)
 
     env = os.environ.copy()
     env.update(
@@ -832,12 +833,8 @@ def test_human_wrapper_blocks_ignored_package_symlink_before_python_launch(tmp_p
     fake_git.chmod(0o755)
 
     python_marker = tmp_path / "python-ran.txt"
-    fake_python = fake_root / ".venv" / "bin" / "python"
-    fake_python.write_text(
-        "#!/usr/bin/env bash\nprintf 'ran\\n' > \"$PYTHON_MARKER\"\nexit 0\n",
-        encoding="utf-8",
-    )
-    fake_python.chmod(0o755)
+    (fake_root / ".venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    _install_wrapper_probe_module(fake_root)
 
     env = os.environ.copy()
     env.update(
@@ -902,12 +899,8 @@ def test_human_wrapper_blocks_index_hidden_source_before_python_launch(tmp_path)
     fake_git.chmod(0o755)
 
     python_marker = tmp_path / "python-ran.txt"
-    fake_python = fake_root / ".venv" / "bin" / "python"
-    fake_python.write_text(
-        "#!/usr/bin/env bash\nprintf 'ran\\n' > \"$PYTHON_MARKER\"\nexit 0\n",
-        encoding="utf-8",
-    )
-    fake_python.chmod(0o755)
+    (fake_root / ".venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    _install_wrapper_probe_module(fake_root)
 
     env = os.environ.copy()
     env.update(
@@ -978,12 +971,8 @@ def test_human_wrapper_never_sources_venv_activate(tmp_path):
     fake_git.chmod(0o755)
 
     captured = tmp_path / "python-args.txt"
-    fake_python = fake_root / ".venv" / "bin" / "python"
-    fake_python.write_text(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$WRAPPER_CAPTURE\"\nexit 2\n",
-        encoding="utf-8",
-    )
-    fake_python.chmod(0o755)
+    (fake_root / ".venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    _install_wrapper_probe_module(fake_root)
 
     env = os.environ.copy()
     env.update(
@@ -1014,9 +1003,42 @@ def test_human_wrapper_never_sources_venv_activate(tmp_path):
 
     assert completed.returncode == 2
     assert activate_marker.exists() is False
-    args = captured.read_text(encoding="utf-8").splitlines()
-    assert args[:3] == ["-I", "-P", "-S"]
-    assert "-c" in args
+    args = json.loads(captured.read_text(encoding="utf-8"))
+    assert "--intent-id" in args
+    source = script.read_text(encoding="utf-8")
+    assert '"$TRUSTED_PYTHON_REAL" -I -P -S -c "$PYTHON_BOOTSTRAP"' in source
+
+
+def test_human_wrapper_rejects_malicious_venv_python_before_execution(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "live_pilot_operational_once.sh"
+    fake_root = tmp_path / "runtime"
+    (fake_root / ".venv" / "bin").mkdir(parents=True)
+
+    marker = tmp_path / "malicious-python-ran.txt"
+    malicious = tmp_path / "malicious-python"
+    malicious.write_text(
+        f"#!/usr/bin/env bash\nprintf 'ran\\n' > '{marker}'\nexit 0\n",
+        encoding="utf-8",
+    )
+    malicious.chmod(0o755)
+    (fake_root / ".venv" / "bin" / "python").symlink_to(malicious)
+
+    env = os.environ.copy()
+    env["AI_ASSET_PLATFORM_ROOT"] = str(fake_root)
+
+    completed = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "approved system Python path" in completed.stdout
+    assert marker.exists() is False
 
 
 def test_unknown_recovery_discovers_unique_perm_id_from_readonly_postfill(monkeypatch):
@@ -2382,12 +2404,21 @@ def test_partial_reconciliation_decimal_overflow_fails_closed(monkeypatch):
     assert subject._promote_terminal_reconciliation_if_proven(_request()) is None
 
 
-def test_post_ack_cancelled_order_is_reconciled_from_completed_order_history(
+@pytest.mark.parametrize(
+    "journal_state,journal_perm_id",
+    [
+        ("ORDER_ACKNOWLEDGED", 880077),
+        ("SEND_ATTEMPT_RECORDED", None),
+    ],
+)
+def test_cancelled_order_is_reconciled_from_completed_history_and_binds_missing_permid(
     monkeypatch,
+    journal_state,
+    journal_perm_id,
 ):
     journal = _terminal_journal(
-        state="ORDER_ACKNOWLEDGED",
-        perm_id=880077,
+        state=journal_state,
+        perm_id=journal_perm_id,
         unknown_reason=None,
     )
     postfill, account, open_orders, paper = _terminal_reports(

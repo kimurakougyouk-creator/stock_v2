@@ -14,9 +14,34 @@ set -euo pipefail
 ROOT="${AI_ASSET_PLATFORM_ROOT:-$PWD}"
 cd "$ROOT"
 
-VENV_PYTHON="$ROOT/.venv/bin/python"
-if [[ ! -x "$VENV_PYTHON" ]]; then
-  echo "BLOCKED: .venv Python is missing or not executable. No Live order was sent."
+VENV_PYTHON_LINK="$ROOT/.venv/bin/python"
+if [[ ! -L "$VENV_PYTHON_LINK" ]]; then
+  echo "BLOCKED: .venv Python must be a symlink to an attested system interpreter. No Live order was sent."
+  exit 2
+fi
+if [[ ! -x /usr/bin/readlink || ! -x /usr/bin/stat ]]; then
+  echo "BLOCKED: system runtime attestation tools are unavailable. No Live order was sent."
+  exit 2
+fi
+TRUSTED_PYTHON_REAL="$(/usr/bin/readlink -f -- "$VENV_PYTHON_LINK")" || {
+  echo "BLOCKED: .venv Python target cannot be resolved. No Live order was sent."
+  exit 2
+}
+if [[ ! "$TRUSTED_PYTHON_REAL" =~ ^/usr/bin/python3(\.[0-9]+)?$ || ! -x "$TRUSTED_PYTHON_REAL" ]]; then
+  echo "BLOCKED: .venv Python does not resolve to an approved system Python path. No Live order was sent."
+  exit 2
+fi
+PYTHON_ATTESTATION="$(/usr/bin/stat -Lc '%u %a' -- "$TRUSTED_PYTHON_REAL")" || {
+  echo "BLOCKED: system Python ownership/mode cannot be attested. No Live order was sent."
+  exit 2
+}
+read -r PYTHON_OWNER_UID PYTHON_MODE <<< "$PYTHON_ATTESTATION"
+if [[ "$PYTHON_OWNER_UID" != "0" || ! "$PYTHON_MODE" =~ ^[0-7]{3,4}$ ]]; then
+  echo "BLOCKED: system Python ownership/mode attestation failed. No Live order was sent."
+  exit 2
+fi
+if (( (8#$PYTHON_MODE & 0022) != 0 )); then
+  echo "BLOCKED: system Python is group/world writable. No Live order was sent."
   exit 2
 fi
 
@@ -115,11 +140,12 @@ if [[ -n "$IGNORED_IMPORTABLE" ]]; then
   exit 2
 fi
 
-# Do not source .venv/bin/activate: it is ignored local state and therefore
-# cannot be trusted as executable shell code.  -I/-P/-S suppress environment,
-# current-directory, user-site, sitecustomize, and .pth startup hooks.  The
-# audited checkout and the venv dependency directory are added explicitly
-# after isolated startup.
+# Do not source .venv/bin/activate or execute a mutable .venv interpreter.
+# The .venv Python link is resolved above to an OS-managed, root-owned,
+# non-writable /usr/bin/python3* target and that resolved path is executed.
+# -I/-P/-S suppress environment, current-directory, user-site, sitecustomize,
+# and .pth startup hooks. The audited checkout and venv dependency directory
+# are added explicitly after isolated startup.
 unset PYTHONPATH PYTHONHOME
 PYTHON_BOOTSTRAP='
 import runpy
@@ -138,7 +164,7 @@ runpy.run_module(
 )
 '
 
-"$VENV_PYTHON" -I -P -S -c "$PYTHON_BOOTSTRAP" "$ROOT" "$VENV_SITE_PACKAGES" \
+"$TRUSTED_PYTHON_REAL" -I -P -S -c "$PYTHON_BOOTSTRAP" "$ROOT" "$VENV_SITE_PACKAGES" \
   --intent-id "$LIVE_PILOT_INTENT_ID" \
   --ticker "$LIVE_PILOT_TICKER" \
   --side "$LIVE_PILOT_SIDE" \
