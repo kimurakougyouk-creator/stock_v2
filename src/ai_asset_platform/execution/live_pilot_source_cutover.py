@@ -1,8 +1,8 @@
 """Fail-closed source/PIN verification for a future Live pilot runtime.
 
 This module proves that the locally executed safety-critical source is exactly at
-one externally approved Git commit and has no tracked edits in the audited code
-paths.  Runtime result/evidence files are deliberately outside the audited
+one externally approved Git commit and has no tracked or untracked changes in the
+audited code paths.  Runtime result/evidence files are deliberately outside the audited
 pathspec because they are expected to change during operation.
 
 The expected commit SHA must come from an independently approved GitHub source
@@ -82,7 +82,7 @@ def audit_live_pilot_source_cutover(
     now: datetime | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> LivePilotSourceCutover:
-    """Verify exact approved commit plus tracked cleanliness of audited code paths."""
+    """Verify exact approved commit plus tracked/untracked cleanliness of audited code paths."""
     current = _utc_now(now)
     expected = str(expected_commit_sha or "").strip().lower()
     if not _SHA_RE.fullmatch(expected):
@@ -106,7 +106,7 @@ def audit_live_pilot_source_cutover(
             (
                 "status",
                 "--porcelain=v1",
-                "--untracked-files=no",
+                "--untracked-files=all",
                 "--",
                 *normalized_paths,
             ),
@@ -143,7 +143,7 @@ def source_cutover_record(result: LivePilotSourceCutover) -> dict:
         "audited_paths": list(AUDITED_PATHS),
         "interpretation": (
             "READY proves only that the audited local source equals the externally "
-            "approved Git commit and has no tracked edits in safety-critical paths. "
+            "approved Git commit and has no tracked or untracked changes in safety-critical paths. "
             "It does not authorize or transmit a Live order."
         ),
     }

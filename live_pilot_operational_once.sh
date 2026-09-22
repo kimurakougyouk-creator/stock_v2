@@ -39,9 +39,17 @@ fi
 # source/PIN audit is still required later, but it is too late to protect
 # against import-time execution if tracked source has been edited after the
 # explicitly approved commit was chosen.
-TRACKED_DIRTY="$(git status --porcelain --untracked-files=no)"
-if [[ -n "$TRACKED_DIRTY" ]]; then
-  echo "BLOCKED: tracked checkout edits are present before Python launch. No Live order was sent."
+SOURCE_DIRTY="$(git status --porcelain=v1 --untracked-files=all -- \
+  src \
+  tests \
+  scripts \
+  requirements.txt \
+  pyproject.toml \
+  pytest.ini \
+  .github/workflows/pytest.yml \
+  live_pilot_operational_once.sh)"
+if [[ -n "$SOURCE_DIRTY" ]]; then
+  echo "BLOCKED: tracked or untracked audited source changes are present before Python launch. No Live order was sent."
   exit 2
 fi
 

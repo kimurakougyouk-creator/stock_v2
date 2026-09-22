@@ -53,6 +53,7 @@ def test_exact_approved_commit_and_clean_audited_paths_are_ready(tmp_path: Path)
     assert result.order_sent is False
     assert result.live_order_sent is False
     status_call = runner.calls[1]
+    assert "--untracked-files=all" in status_call
     for path in AUDITED_PATHS:
         assert path in status_call
 
@@ -82,6 +83,20 @@ def test_tracked_edit_in_audited_source_fails_closed(tmp_path: Path):
     assert result.ready is False
     assert result.audited_paths_clean is False
     assert result.dirty_entries == (" M src/ai_asset_platform/core/settings.py",)
+
+
+def test_untracked_file_in_audited_source_fails_closed(tmp_path: Path):
+    runner = FakeRunner(status="?? src/sitecustomize.py\n")
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is False
+    assert result.audited_paths_clean is False
+    assert result.dirty_entries == ("?? src/sitecustomize.py",)
 
 
 def test_git_audit_failure_fails_closed(tmp_path: Path):
@@ -171,7 +186,7 @@ def test_tracked_edit_in_human_wrapper_fails_closed(tmp_path: Path):
 
 def test_human_wrapper_checks_tracked_cleanliness_before_any_python_launch():
     source = Path("live_pilot_operational_once.sh").read_text(encoding="utf-8")
-    cleanliness = source.index("git status --porcelain --untracked-files=no")
+    cleanliness = source.index("git status --porcelain=v1 --untracked-files=all")
     runtime_gate = source.index("bash scripts/ensure_exact_checkout_runtime.sh")
     operational_python = source.index(
         "python -P -m ai_asset_platform.execution.live_pilot_operational_entrypoint"

@@ -202,17 +202,29 @@ def _execution_row(contract, execution, account_id: str) -> LiveExecutionEvidenc
         return None
     raw_side = str(getattr(execution, "side", "") or "").strip().upper()
     side = {"BOT": "BUY", "SLD": "SELL"}.get(raw_side, raw_side)
+    raw_order_id = getattr(execution, "orderId", None)
+    raw_perm_id = getattr(execution, "permId", None)
+    raw_client_id = getattr(execution, "clientId", None)
+    if (
+        not isinstance(raw_order_id, int)
+        or isinstance(raw_order_id, bool)
+        or raw_order_id <= 0
+        or not isinstance(raw_perm_id, int)
+        or isinstance(raw_perm_id, bool)
+        or raw_perm_id <= 0
+        or not isinstance(raw_client_id, int)
+        or isinstance(raw_client_id, bool)
+        or raw_client_id < 0
+    ):
+        return None
+    order_id = raw_order_id
+    perm_id = raw_perm_id
+    client_id = raw_client_id
     try:
         quantity = float(getattr(execution, "shares", 0) or 0)
         price = float(getattr(execution, "price", 0) or 0)
-        order_id = int(getattr(execution, "orderId", 0) or 0)
-        perm_id = int(getattr(execution, "permId", 0) or 0)
     except (TypeError, ValueError):
         return None
-    raw_client_id = getattr(execution, "clientId", None)
-    if not isinstance(raw_client_id, int) or isinstance(raw_client_id, bool) or raw_client_id < 0:
-        return None
-    client_id = raw_client_id
     exec_id = str(getattr(execution, "execId", "") or "").strip()
     if (
         not exec_id
@@ -293,14 +305,30 @@ def preview_ibkr_live_postfill_snapshot(
                 continue
             if settle_seconds:
                 time.sleep(settle_seconds)
-            rows = [
-                row
-                for contract, execution in probe.raw_executions
-                if (row := _execution_row(contract, execution, account_id)) is not None
-            ]
-            # Keep every row. Duplicate/conflicting exec_id or commission evidence
-            # must remain visible so reconciliation can fail closed rather than
-            # silently overwriting one broker callback with another.
+            rows: list[LiveExecutionEvidence] = []
+            invalid_execution_evidence = False
+            for contract, execution in probe.raw_executions:
+                raw_account = str(
+                    getattr(execution, "acctNumber", "") or ""
+                ).strip()
+                if raw_account != account_id:
+                    continue
+                row = _execution_row(contract, execution, account_id)
+                if row is None:
+                    invalid_execution_evidence = True
+                    continue
+                rows.append(row)
+
+            # Never silently discard malformed evidence for the managed account.
+            # Once all-client execution collection is enabled, a malformed row
+            # could otherwise hide a broker-global permId conflict.
+            blocked_reason = (
+                "malformed Live execution evidence"
+                if invalid_execution_evidence
+                else None
+            )
+            # Keep every valid row. Duplicate/conflicting exec_id or commission
+            # evidence must remain visible so reconciliation can fail closed.
             return IbkrLivePostFillSnapshot(
                 attempted=True,
                 connected=True,
@@ -308,6 +336,7 @@ def preview_ibkr_live_postfill_snapshot(
                 account_fingerprint=_account_fingerprint(account_id),
                 executions=tuple(rows),
                 commissions=tuple(probe.commissions),
+                blocked_reason=blocked_reason,
                 errors=tuple(errors + probe.errors),
             )
         finally:
