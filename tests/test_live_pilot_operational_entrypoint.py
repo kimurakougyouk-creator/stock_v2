@@ -3015,3 +3015,65 @@ def test_completed_order_recovery_matches_order_id_with_sender_client():
     reason, perm_id = observed
     assert reason.endswith("Cancelled")
     assert perm_id == 880077
+
+
+def test_completed_order_recovery_rejects_cross_client_selected_permid_conflict():
+    journal = _terminal_journal(
+        state="ORDER_ACKNOWLEDGED",
+        perm_id=880077,
+        unknown_reason=None,
+    )
+    request = _request()
+    sender_row = {
+        "order_id": 77,
+        "perm_id": 880077,
+        "client_id": 681,
+        "symbol": "9432",
+        "sec_type": "STK",
+        "currency": "JPY",
+        "exchange": "TSEJ",
+        "action": "BUY",
+        "quantity": 100.0,
+        "order_type": "LMT",
+        "limit_price": 400.0,
+        "status": "Cancelled",
+        "completed_status": "Cancelled",
+        "completed_time": "20260921 12:39:20 UTC",
+        "order_ref": request.intent_id,
+        "account_fingerprint": FINGERPRINT,
+    }
+    conflicting_other_client = {
+        **sender_row,
+        "client_id": 999,
+        "status": "Filled",
+        "completed_status": "Filled",
+        "completed_time": "20260921 12:39:21 UTC",
+    }
+    completed = {
+        "schema_version": subject.LIVE_COMPLETED_ORDERS_SCHEMA_VERSION,
+        "ready": True,
+        "checked_at": "2026-09-21T12:39:30+00:00",
+        "connection_mode": "LIVE_READ_ONLY",
+        "endpoint_port": 4001,
+        "account_fingerprint": FINGERPRINT,
+        "raw_account_id_persisted": False,
+        "completed_order_count": 2,
+        "orders": [sender_row, conflicting_other_client],
+        "order_sent": False,
+        "cancel_sent": False,
+        "modify_sent": False,
+        "live_order_sent": False,
+    }
+
+    assert (
+        subject._completed_order_rejection_if_proven(
+            request,
+            journal,
+            completed,
+            endpoint_port=4001,
+            order_id=77,
+            sender_client_id=681,
+            now=datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+        )
+        is None
+    )
