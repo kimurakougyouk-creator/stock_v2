@@ -1019,6 +1019,125 @@ def _completed_order_rejection_if_proven(
     )
 
 
+def _completed_order_history_consistent_with_rejection(
+    request: LivePilotOperationalRequest,
+    completed: dict,
+    *,
+    endpoint_port: int,
+    order_id: int,
+    sender_client_id: int,
+    rejection_perm: int | None,
+    now: datetime,
+) -> bool:
+    """Validate fresh completed-order history against an immutable rejection proof.
+
+    Absence of a relevant completed row is allowed because the immutable proof
+    may have come from a definitive callback. Any row claiming the selected
+    order_id or perm_id must agree on the full broker/authorization identity
+    and remain a definitive rejection; ambiguity fails closed.
+    """
+    if not _clean_live_report(
+        completed,
+        required_schema_version=LIVE_COMPLETED_ORDERS_SCHEMA_VERSION,
+        required_false_flags=(
+            "order_sent",
+            "cancel_sent",
+            "modify_sent",
+            "live_order_sent",
+        ),
+    ):
+        return False
+    if not _fresh(
+        completed,
+        now=now,
+        max_age_seconds=DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
+    ):
+        return False
+
+    fingerprint = request.expected_account_fingerprint.strip().lower()
+    if (
+        completed.get("endpoint_port") != endpoint_port
+        or isinstance(completed.get("endpoint_port"), bool)
+        or str(completed.get("account_fingerprint") or "").strip().lower()
+        != fingerprint
+        or completed.get("raw_account_id_persisted") is not False
+    ):
+        return False
+
+    orders = completed.get("orders")
+    count = completed.get("completed_order_count")
+    if (
+        not isinstance(orders, list)
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or count < 0
+        or count != len(orders)
+    ):
+        return False
+
+    expected_symbol = (
+        "9432"
+        if request.ticker.strip().upper() == "9432.T"
+        else request.ticker.strip().upper()
+    )
+    expected_currency = (
+        "JPY" if request.ticker.strip().upper() == "9432.T" else "USD"
+    )
+
+    for row in orders:
+        if not isinstance(row, dict):
+            return False
+        row_order = _positive_exact_int(row.get("order_id"))
+        row_perm = _positive_exact_int(row.get("perm_id"))
+        row_client = _nonnegative_exact_int(row.get("client_id"))
+        if row_order is None or row_perm is None or row_client is None:
+            return False
+
+        claims_selected_identity = (
+            row_order == order_id
+            or (rejection_perm is not None and row_perm == rejection_perm)
+        )
+        if not claims_selected_identity:
+            continue
+
+        if (
+            row_order != order_id
+            or row_client != sender_client_id
+            or rejection_perm is None
+            or row_perm != rejection_perm
+        ):
+            return False
+
+        quantity = _positive_finite_number(row.get("quantity"))
+        limit_price = _positive_finite_number(row.get("limit_price"))
+        if (
+            str(row.get("symbol") or "").strip().upper() != expected_symbol
+            or str(row.get("sec_type") or "").strip().upper() != "STK"
+            or str(row.get("currency") or "").strip().upper() != expected_currency
+            or str(row.get("action") or "").strip().upper()
+            != request.side.strip().upper()
+            or quantity != float(request.quantity)
+            or str(row.get("order_type") or "").strip().upper() != "LMT"
+            or limit_price != float(request.limit_price)
+            or str(row.get("order_ref") or "").strip() != request.intent_id
+            or str(row.get("account_fingerprint") or "").strip().lower()
+            != fingerprint
+        ):
+            return False
+
+        statuses = [
+            str(row.get(name) or "").strip()
+            for name in ("status", "completed_status")
+            if str(row.get(name) or "").strip()
+        ]
+        if not statuses or any(
+            status not in _DEFINITIVE_REJECTION_STATUSES for status in statuses
+        ):
+            return False
+
+    return True
+
+
 def _promote_terminal_reconciliation_if_proven(
     request: LivePilotOperationalRequest,
 ) -> str | None:
@@ -1253,7 +1372,25 @@ def _promote_terminal_reconciliation_if_proven(
 
     # No matching execution rows: only an explicit broker-side non-acceptance
     # may become REJECTED_RECONCILED. Timeout/disconnect/no-evidence remains
-    # UNKNOWN by design.
+    # UNKNOWN by design. Fresh execution identity contradictions are checked
+    # before any immutable rejection proof can be created.
+    if any(
+        row.get("order_id") == order_id
+        or (
+            persisted_perm is not None
+            and row.get("perm_id") == persisted_perm
+        )
+        for row in validated_rows
+    ):
+        return None
+
+    try:
+        completed = _load_json(DEFAULT_LIVE_COMPLETED_ORDERS_REPORT)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(completed, dict):
+        return None
+
     try:
         rejection_evidence = load_definitive_rejection_evidence(
             request.intent_id,
@@ -1263,12 +1400,6 @@ def _promote_terminal_reconciliation_if_proven(
         return None
 
     if not isinstance(rejection_evidence, dict):
-        try:
-            completed = _load_json(DEFAULT_LIVE_COMPLETED_ORDERS_REPORT)
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-            return None
-        if not isinstance(completed, dict):
-            return None
         completed_rejection = _completed_order_rejection_if_proven(
             request,
             journal,
@@ -1361,13 +1492,14 @@ def _promote_terminal_reconciliation_if_proven(
             return None
     if persisted_perm != rejection_perm:
         return None
-    if any(
-        row.get("order_id") == order_id
-        or (
-            persisted_perm is not None
-            and row.get("perm_id") == persisted_perm
-        )
-        for row in validated_rows
+    if not _completed_order_history_consistent_with_rejection(
+        request,
+        completed,
+        endpoint_port=endpoint_port,
+        order_id=order_id,
+        sender_client_id=sender_client_id,
+        rejection_perm=rejection_perm,
+        now=current,
     ):
         return None
 
