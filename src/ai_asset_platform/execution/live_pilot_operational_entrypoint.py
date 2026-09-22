@@ -1361,7 +1361,14 @@ def _promote_terminal_reconciliation_if_proven(
             return None
     if persisted_perm != rejection_perm:
         return None
-    if any(row.get("order_id") == order_id for row in validated_rows):
+    if any(
+        row.get("order_id") == order_id
+        or (
+            persisted_perm is not None
+            and row.get("perm_id") == persisted_perm
+        )
+        for row in validated_rows
+    ):
         return None
 
     final_position = _target_position_quantity(account, request.ticker)
