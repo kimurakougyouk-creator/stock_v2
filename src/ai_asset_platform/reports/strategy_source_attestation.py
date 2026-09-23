@@ -11,6 +11,7 @@ from typing import Callable
 
 from ai_asset_platform.execution.live_pilot_source_cutover import (
     audit_live_pilot_source_cutover,
+    safe_git_command,
 )
 
 
@@ -119,15 +120,14 @@ def attest_strategy_source(
     # the attested commit even when tracked source is clean.
     try:
         ignored = runner(
-            [
-                "git",
+            safe_git_command(
                 "ls-files",
                 "--others",
                 "--ignored",
                 "--exclude-standard",
                 "--",
                 *STRATEGY_AUDITED_PATHS,
-            ],
+            ),
             cwd=str(repository_root),
             check=True,
             capture_output=True,

@@ -21,8 +21,15 @@ run_isolated() {
     /usr/bin/python3 -I -S "$ROOT/scripts/run_isolated_venv_python.py" "$@"
 }
 
-/usr/bin/git switch main
-/usr/bin/git pull --ff-only origin main
+safe_git() {
+  /usr/bin/git \
+    -c core.fsmonitor=false \
+    -c core.hooksPath=/dev/null \
+    "$@"
+}
+
+safe_git switch main
+safe_git pull --ff-only origin main
 
 run_clean /bin/bash --noprofile --norc scripts/verify_strategy_source_clean.sh
 
