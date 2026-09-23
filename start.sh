@@ -38,23 +38,24 @@ if [ ! -f ".env" ] || ! python setup_wizard.py --check >/dev/null 2>&1; then
   python setup_wizard.py
 fi
 
-# Record the complete trusted shell-function set (the venv activation
-# normally defines `deactivate`). .env may provide data variables, but it must
-# not add, remove, or redefine executable shell functions.
-TRUSTED_SHELL_FUNCTIONS="$(declare -f)"
-
-set -a
-# shellcheck disable=SC1091
+# .env is untrusted local data, never executable shell input. Parse only the
+# documented key/value contract with tracked code and import the resulting
+# literal NUL-delimited pairs without eval/source.
 if [ -f .env ]; then
-  source .env
+  SAFE_ENV_TMP="$(mktemp)"
+  trap 'rm -f "$SAFE_ENV_TMP"' EXIT
+  if ! python scripts/load_start_env.py .env > "$SAFE_ENV_TMP"; then
+    echo "BLOCKED: .env could not be loaded as safe data. No Paper or Live order was sent." >&2
+    exit 2
+  fi
+  while IFS= read -r -d '' SAFE_ENV_KEY && IFS= read -r -d '' SAFE_ENV_VALUE; do
+    printf -v "$SAFE_ENV_KEY" '%s' "$SAFE_ENV_VALUE"
+    export "$SAFE_ENV_KEY"
+  done < "$SAFE_ENV_TMP"
+  rm -f "$SAFE_ENV_TMP"
+  trap - EXIT
+  unset SAFE_ENV_TMP SAFE_ENV_KEY SAFE_ENV_VALUE
 fi
-set +a
-
-if [[ "$(declare -f)" != "$TRUSTED_SHELL_FUNCTIONS" ]]; then
-  echo "BLOCKED: .env changed shell functions; command interception is prohibited. No Paper or Live order was sent." >&2
-  exit 2
-fi
-unset TRUSTED_SHELL_FUNCTIONS
 
 # .env is local/ignored evidence, not part of the attested checkout. It must
 # never be able to change which Python executable/package tree the runtime uses.
