@@ -28,6 +28,7 @@ _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
 preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
 
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _exact_runtime_source_sha(repository_root: Path = Path(".")) -> str:
@@ -123,6 +124,8 @@ def _broker_exec_fills(result: object | None) -> list[dict]:
 
 def execute_approved_signal_via_ibkr_paper(
     *, ticker: str, signal: str, shares: int, order_intent_id: str,
+    process_start_source_sha: str | None = None,
+    strategy_parameters_sha: str | None = None,
     order_log_path: Path = Path("results/paper_orders.jsonl"),
 ) -> SignalExecutionResult:
     if not SETTINGS.enable_paper_trading:
@@ -131,7 +134,22 @@ def execute_approved_signal_via_ibkr_paper(
         return SignalExecutionResult(False, "IBKR Paper disabled")
 
     normalized_signal = str(signal).strip().upper()
+    captured_source_sha = str(process_start_source_sha or "").strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(captured_source_sha):
+        raise RuntimeError(
+            "process-start strategy source SHA is unavailable; Paper order blocked"
+        )
+    normalized_parameters_sha = str(strategy_parameters_sha or "").strip().lower()
+    if not _PARAMETERS_SHA_RE.fullmatch(normalized_parameters_sha):
+        raise RuntimeError(
+            "effective strategy parameter identity is unavailable; Paper order blocked"
+        )
+
     strategy_source_sha = _exact_runtime_source_sha()
+    if strategy_source_sha != captured_source_sha:
+        raise RuntimeError(
+            "strategy checkout changed after process start; Paper order blocked"
+        )
     attest_strategy_source(strategy_source_sha)
     position_guard = evaluate_broker_position_guard(
         ticker=ticker, side=normalized_signal, quantity=int(shares)
@@ -162,6 +180,7 @@ def execute_approved_signal_via_ibkr_paper(
                 broker_exec_fills=_broker_exec_fills(result),
                 broker_order_id=int(raw_order_id) if raw_order_id is not None else None,
                 strategy_source_sha=strategy_source_sha,
+                strategy_parameters_sha=normalized_parameters_sha,
             )
         return execution
     finally:
