@@ -95,6 +95,20 @@ def test_shell_gate_blocks_ignored_importable_startup_artifact(tmp_path: Path):
     assert "ignored importable" in result.stderr
 
 
+
+
+def test_shell_gate_blocks_untracked_root_ai_asset_platform_shadow(tmp_path: Path):
+    root = _repo(tmp_path)
+    shadow = root / "ai_asset_platform"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("VALUE = 'shadow'\n", encoding="utf-8")
+
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "tracked or untracked strategy source changes" in result.stderr
+
+
 def test_shell_gate_blocks_ignored_pycache_bytecode(tmp_path: Path):
     root = _repo(tmp_path)
     (root / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
@@ -223,3 +237,24 @@ def test_python_dont_write_bytecode_environment_prevents_import_cache(tmp_path: 
     )
     assert completed.returncode == 0, completed.stderr
     assert not (package / "__pycache__").exists()
+
+
+def test_start_sh_verifies_exact_checkout_before_repository_python():
+    root = Path(__file__).parents[1]
+    source = (root / "start.sh").read_text(encoding="utf-8")
+
+    activate_index = source.index("source .venv/bin/activate")
+    unset_index = source.index("unset PYTHONPATH")
+    verify_index = source.index("bash scripts/ensure_exact_checkout_runtime.sh")
+
+    assert activate_index < unset_index < verify_index
+
+    for marker in (
+        "python setup_wizard.py",
+        "python main_simple_step8.py",
+        "python -m signal_runner",
+        "python -m dashboard",
+        "python -m candidate_dashboard",
+        "python -m change_tracker",
+    ):
+        assert verify_index < source.index(marker), marker
