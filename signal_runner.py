@@ -29,8 +29,28 @@ def _capture_process_start_strategy_source_sha() -> str | None:
 _PROCESS_START_STRATEGY_SOURCE_SHA = _capture_process_start_strategy_source_sha()
 
 
-def _strategy_parameters_sha(settings: dict[str, Any]) -> str:
-    """Stable identity for the effective MA/RSI/ATR settings actually used."""
+def _strategy_parameters_sha(
+    settings: dict[str, Any],
+    *,
+    ai_provider: Any | None,
+    require_order_identity: bool = False,
+) -> str:
+    """Stable identity for technical parameters plus the effective AI strategy."""
+    if ai_provider is None:
+        ai_provider_name = "none"
+        ai_model_name = "none"
+    else:
+        ai_provider_name = str(getattr(ai_provider, "name", "") or "").strip().lower()
+        ai_model_name = str(getattr(ai_provider, "model", "") or "").strip()
+        if require_order_identity and (not ai_provider_name or not ai_model_name):
+            raise ValueError(
+                "AI provider/model identity is required before a natural Paper order"
+            )
+        if not ai_provider_name:
+            ai_provider_name = "unknown"
+        if not ai_model_name:
+            ai_model_name = "unspecified"
+
     payload = {
         "ma_short": int(settings["ma_short"]),
         "ma_middle": int(settings["ma_middle"]),
@@ -38,6 +58,8 @@ def _strategy_parameters_sha(settings: dict[str, Any]) -> str:
         "rsi_low": int(settings["rsi_low"]),
         "rsi_high": int(settings["rsi_high"]),
         "atr_multiplier": float(settings["atr_multiplier"]),
+        "ai_provider": ai_provider_name,
+        "ai_model": ai_model_name,
     }
     encoded = json.dumps(
         payload,
@@ -311,7 +333,11 @@ def run_signal_scan(
 
         try:
             settings = get_ticker_settings(ticker, all_settings)
-            strategy_parameters_sha = _strategy_parameters_sha(settings)
+            strategy_parameters_sha = _strategy_parameters_sha(
+                settings,
+                ai_provider=ai_provider,
+                require_order_identity=allow_orders,
+            )
             prepared = add_indicators(
                 df.copy(),
                 ma_short=settings["ma_short"],
