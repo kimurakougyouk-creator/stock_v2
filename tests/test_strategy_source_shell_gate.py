@@ -55,6 +55,16 @@ def _run_gate(root: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_strategy_source_shell_gate_has_valid_bash_syntax():
+    completed = subprocess.run(
+        ["bash", "-n", str(SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_shell_gate_accepts_clean_exact_source(tmp_path: Path):
     root = _repo(tmp_path)
     result = _run_gate(root)
