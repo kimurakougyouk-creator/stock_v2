@@ -317,12 +317,22 @@ def test_start_sh_verifies_exact_checkout_before_repository_python():
     safe_env_index = source.index("python scripts/load_start_env.py .env")
     restore_path_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', safe_env_index)
     second_unset_index = source.index("unset PYTHONPATH PYTHONHOME", safe_env_index)
+    second_source_gate_index = source.index(
+        "bash scripts/verify_strategy_source_clean.sh",
+        source.index("bash scripts/verify_strategy_source_clean.sh") + 1,
+    )
     second_verify_index = source.index(
         "bash scripts/ensure_exact_checkout_runtime.sh",
         first_verify_index + 1,
     )
 
-    assert safe_env_index < restore_path_index < second_unset_index < second_verify_index
+    assert (
+        safe_env_index
+        < restore_path_index
+        < second_unset_index
+        < second_source_gate_index
+        < second_verify_index
+    )
 
     for marker in (
         "python main_simple_step8.py",
@@ -332,6 +342,27 @@ def test_start_sh_verifies_exact_checkout_before_repository_python():
         "python -m change_tracker",
     ):
         assert second_verify_index < source.index(marker), marker
+
+
+
+
+def test_start_sh_rechecks_full_source_boundary_after_setup_and_env_data():
+    root = Path(__file__).parents[1]
+    source = (root / "start.sh").read_text(encoding="utf-8")
+
+    first_gate = source.index("bash scripts/verify_strategy_source_clean.sh")
+    safe_env = source.index("python scripts/load_start_env.py .env")
+    second_gate = source.index(
+        "bash scripts/verify_strategy_source_clean.sh",
+        first_gate + 1,
+    )
+    second_import_verify = source.index(
+        "bash scripts/ensure_exact_checkout_runtime.sh",
+        source.index("bash scripts/ensure_exact_checkout_runtime.sh") + 1,
+    )
+    first_application = source.index("python main_simple_step8.py")
+
+    assert first_gate < safe_env < second_gate < second_import_verify < first_application
 
 
 def test_start_sh_restores_trusted_path_after_env_source():
