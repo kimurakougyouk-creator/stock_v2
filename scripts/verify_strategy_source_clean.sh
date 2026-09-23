@@ -5,6 +5,8 @@ set -euo pipefail
 
 AUDITED_PATHS=(
   src
+  ai_asset_platform
+  ai_asset_platform.py
   signal_runner.py
   config.py
   requirements.txt
