@@ -324,14 +324,14 @@ def test_start_sh_verifies_exact_checkout_before_repository_python():
     assert 'VENV_PYTHON="$PWD/.venv/bin/python"' in source
 
     first_source_gate = source.index("/bin/bash scripts/verify_strategy_source_clean.sh")
-    first_runtime_gate = source.index("verify_exact_checkout_runtime")
+    first_runtime_gate = source.index("\nverify_exact_checkout_runtime\n")
     safe_env_index = source.index('"$VENV_PYTHON" scripts/load_start_env.py .env')
     second_source_gate = source.index(
         "/bin/bash scripts/verify_strategy_source_clean.sh",
         first_source_gate + 1,
     )
     second_runtime_gate = source.index(
-        "verify_exact_checkout_runtime",
+        "\nverify_exact_checkout_runtime\n",
         first_runtime_gate + 1,
     )
     first_application = source.index('"$VENV_PYTHON" main_simple_step8.py')
