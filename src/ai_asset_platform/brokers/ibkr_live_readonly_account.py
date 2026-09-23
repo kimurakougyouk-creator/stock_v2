@@ -154,6 +154,7 @@ def preview_ibkr_live_readonly_account_snapshot(
     *,
     timeout: float = 10.0,
     confirmation: str | None = None,
+    endpoint_port: int | None = None,
 ) -> IbkrLiveReadOnlyAccountSnapshot:
     """Read one complete Live account snapshot without any order API request."""
     if timeout <= 0:
@@ -167,8 +168,12 @@ def preview_ibkr_live_readonly_account_snapshot(
     if supplied != CONFIRMATION_VALUE:
         return _blocked("exact Live read-only confirmation is missing")
 
+    if endpoint_port is not None and endpoint_port not in {LIVE_GATEWAY_PORT, LIVE_TWS_PORT}:
+        raise ValueError("endpoint_port must identify an audited Live endpoint")
+
+    ports = (endpoint_port,) if endpoint_port is not None else (LIVE_GATEWAY_PORT, LIVE_TWS_PORT)
     collected: list[str] = []
-    for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
+    for index, port in enumerate(ports, start=1):
         probe = _AccountSnapshotProbe()
         client_id = 370 + index
         try:

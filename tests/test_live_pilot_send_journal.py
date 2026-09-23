@@ -9,10 +9,16 @@ import pytest
 import ai_asset_platform.execution.live_pilot_send_journal as journal
 from ai_asset_platform.execution.live_pilot_send_journal import (
     create_consumed_authorization_journal,
+    load_definitive_rejection_evidence,
     load_send_journal,
+    load_terminal_reconciliation_marker,
     mark_order_acknowledged,
+    mark_partial_reconciled,
     mark_postfill_proven,
+    mark_rejected_reconciled,
     mark_unknown,
+    record_definitive_rejection_evidence,
+    record_order_id_before_transport,
     record_send_attempt,
     send_attempt_permitted,
     send_attempt_recorded,
@@ -39,13 +45,49 @@ def _isolated_canonical_journal_root(monkeypatch, tmp_path: Path):
 
 
 def _consumed(**overrides) -> dict:
-    payload = {"status": "CONSUMED", "intent_id": INTENT, "nonce": NONCE, "order_sent": False, "live_order_sent": False}
+    payload = {
+        "status": "CONSUMED",
+        "intent_id": INTENT,
+        "nonce": NONCE,
+        "ticker": "9432.T",
+        "side": "BUY",
+        "quantity": 100,
+        "limit_price": 400.0,
+        "estimated_notional_jpy": 40_000.0,
+        "account_fingerprint": "a" * 64,
+        "endpoint_port": 4001,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
     payload.update(overrides)
     return payload
 
 
 def _create(tmp_path: Path):
     return create_consumed_authorization_journal(intent_id=INTENT, nonce=NONCE, consumed_authorization=_consumed(), directory=tmp_path, now=NOW)
+
+
+def _record_rejection_evidence(
+    tmp_path: Path,
+    *,
+    reason: str = "broker orderStatus callback reported non-accepted status: Cancelled",
+):
+    return record_definitive_rejection_evidence(
+        INTENT,
+        nonce=NONCE,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        account_fingerprint="a" * 64,
+        endpoint_port=4001,
+        order_id=101,
+        client_id=681,
+        rejection_reason=reason,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
 
 
 def test_unconsumed_or_mismatched_authorization_cannot_create_journal(tmp_path: Path):
@@ -443,3 +485,746 @@ def test_module_contains_no_broker_transport_or_automatic_recovery_action():
     forbidden = (".placeOrder(", ".cancelOrder(", "reqOpenOrders(", "reqAllOpenOrders(", "reqExecutions(", "enable_live_trading = True", "automatic_resend_allowed=True", "automatic_cancel_allowed=True", "automatic_modify_allowed=True", "automatic_flatten_allowed=True", "automatic_close_allowed=True")
     for token in forbidden:
         assert token not in source
+
+
+def test_order_id_is_durably_bound_before_transport_and_survives_unknown(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    bound = record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert bound["state"] == "SEND_ATTEMPT_RECORDED"
+    assert bound["order_id"] == 101
+    assert bound["sender_client_id"] == 681
+    assert bound["perm_id"] is None
+    assert bound["recovery_required"] is True
+
+    unknown = mark_unknown(
+        INTENT,
+        reason="acknowledgement timed out",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+    assert unknown["state"] == "UNKNOWN"
+    assert unknown["order_id"] == 101
+    assert unknown["perm_id"] is None
+    assert unknown["automatic_resend_allowed"] is False
+
+
+def test_pretransport_order_id_binding_is_fail_closed(tmp_path: Path):
+    _create(tmp_path)
+    with pytest.raises(PermissionError, match="marker is missing|send attempt is recorded"):
+        record_order_id_before_transport(
+            INTENT,
+            order_id=101,
+        client_id=681,
+            directory=tmp_path,
+            now=NOW,
+        )
+
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    with pytest.raises(ValueError, match="positive exact int"):
+        record_order_id_before_transport(
+            INTENT,
+            order_id=True,
+        client_id=681,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=2),
+        )
+
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+    with pytest.raises(PermissionError, match="conflicts"):
+        record_order_id_before_transport(
+            INTENT,
+            order_id=102,
+        client_id=681,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
+
+
+def test_pretransport_order_id_rename_is_directory_fsynced(tmp_path: Path, monkeypatch):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+
+    calls = []
+    original = journal._fsync_parent_dir
+
+    def spy(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(journal, "_fsync_parent_dir", spy)
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert any(call.parent == tmp_path for call in calls)
+    persisted = load_send_journal(INTENT, directory=tmp_path)
+    assert persisted is not None
+    assert persisted["order_id"] == 101
+
+
+def test_postfill_proven_can_recover_directly_from_send_attempt_state(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    proven = mark_postfill_proven(
+        INTENT,
+        exec_id="exec-crash-recovery",
+        order_id=101,
+        perm_id=202,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert proven["state"] == "POSTFILL_PROVEN"
+    assert proven["order_id"] == 101
+    assert proven["perm_id"] == 202
+    assert proven["recovery_required"] is False
+    assert proven["automatic_resend_allowed"] is False
+    assert proven["automatic_cancel_allowed"] is False
+    assert proven["automatic_modify_allowed"] is False
+    assert proven["automatic_flatten_allowed"] is False
+    assert proven["automatic_close_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    ("order_id", "perm_id"),
+    [
+        ("101", 202),
+        (101.0, 202),
+        (True, 202),
+        (101, "202"),
+        (101, 202.0),
+        (101, True),
+    ],
+)
+def test_postfill_proven_rejects_non_exact_broker_ids(
+    tmp_path: Path, order_id, perm_id
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    with pytest.raises(ValueError, match="positive exact ints"):
+        mark_postfill_proven(
+            INTENT,
+            exec_id="exec-1",
+            order_id=order_id,
+            perm_id=perm_id,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+
+@pytest.mark.parametrize(
+    ("order_id", "perm_id"),
+    [
+        ("101", 202),
+        (101.0, 202),
+        (True, 202),
+        (101, "202"),
+        (101, 202.0),
+        (101, True),
+    ],
+)
+def test_order_acknowledgement_rejects_non_exact_broker_ids(
+    tmp_path: Path, order_id, perm_id
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+
+    with pytest.raises(ValueError, match="positive exact ints"):
+        mark_order_acknowledged(
+            INTENT,
+            order_id=order_id,
+            perm_id=perm_id,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=2),
+        )
+
+
+
+def test_pretransport_sender_client_id_is_exact_and_conflict_checked(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+
+    for bad_client_id in ("681", 681.0, True, -1):
+        with pytest.raises(ValueError, match="client_id must be a non-negative exact int"):
+            record_order_id_before_transport(
+                INTENT,
+                order_id=101,
+                client_id=bad_client_id,
+                directory=tmp_path,
+                now=NOW + timedelta(seconds=2),
+            )
+
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+    with pytest.raises(PermissionError, match="client_id conflicts"):
+        record_order_id_before_transport(
+            INTENT,
+            order_id=101,
+            client_id=682,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
+
+
+
+def test_consumed_authorization_binding_is_persisted_for_recovery(tmp_path: Path):
+    created = _create(tmp_path)
+    assert created["authorized_ticker"] == "9432.T"
+    assert created["authorized_side"] == "BUY"
+    assert created["authorized_quantity"] == 100
+    assert created["authorized_limit_price"] == 400.0
+    assert created["authorized_estimated_notional_jpy"] == 40_000.0
+    assert created["authorized_account_fingerprint"] == "a" * 64
+    assert created["authorized_endpoint_port"] == 4001
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("ticker", ""),
+        ("side", "HOLD"),
+        ("quantity", "100"),
+        ("limit_price", "400"),
+        ("account_fingerprint", "bad"),
+        ("endpoint_port", 4002),
+    ],
+)
+def test_missing_or_malformed_consumed_binding_fails_closed(
+    tmp_path: Path, field, value
+):
+    consumed = _consumed(**{field: value})
+    with pytest.raises(PermissionError, match="authorization"):
+        create_consumed_authorization_journal(
+            intent_id=INTENT,
+            nonce=NONCE,
+            consumed_authorization=consumed,
+            directory=tmp_path,
+            now=NOW,
+        )
+
+
+
+def test_partial_reconciliation_is_durable_terminal_and_never_reenables_send(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    result = mark_partial_reconciled(
+        INTENT,
+        exec_ids=("exec-1", "exec-2"),
+        order_id=101,
+        perm_id=202,
+        filled_quantity=40.0,
+        commission_total=12.5,
+        commission_currency="JPY",
+        final_position_quantity=40.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert result["state"] == "PARTIAL_RECONCILED"
+    marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["state"] == "PARTIAL_RECONCILED"
+    assert marker["exec_ids"] == ["exec-1", "exec-2"]
+    assert marker["filled_quantity"] == 40.0
+    assert marker["commission_total"] == 12.5
+    assert marker["final_position_quantity"] == 40.0
+    assert marker["nonce"] == NONCE
+    assert marker["authorized_ticker"] == "9432.T"
+    assert marker["automatic_resend_allowed"] is False
+    assert result["exec_ids"] == ["exec-1", "exec-2"]
+    assert result["filled_quantity"] == 40.0
+    assert result["recovery_required"] is False
+    assert result["automatic_resend_allowed"] is False
+    assert result["automatic_cancel_allowed"] is False
+    assert result["automatic_modify_allowed"] is False
+    assert result["automatic_flatten_allowed"] is False
+    assert result["automatic_close_allowed"] is False
+    assert send_attempt_permitted(INTENT, directory=tmp_path) is False
+    with pytest.raises(PermissionError, match="reconciled evidence"):
+        mark_unknown(
+            INTENT,
+            reason="later timeout",
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
+
+
+def test_late_terminal_rejection_proof_survives_timeout_unknown_race(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason="broker acknowledgement timed out",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    evidence = record_definitive_rejection_evidence(
+        INTENT,
+        nonce=NONCE,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        account_fingerprint="a" * 64,
+        endpoint_port=4001,
+        order_id=101,
+        client_id=681,
+        rejection_reason=(
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+
+    assert evidence["rejection_reason"].endswith("Cancelled")
+    assert load_send_journal(INTENT, directory=tmp_path)["state"] == "UNKNOWN"
+
+
+def test_post_ack_cancelled_rejection_keeps_acknowledged_perm_id(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_order_acknowledged(
+        INTENT,
+        order_id=101,
+        perm_id=202,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    evidence = record_definitive_rejection_evidence(
+        INTENT,
+        nonce=NONCE,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        account_fingerprint="a" * 64,
+        endpoint_port=4001,
+        order_id=101,
+        client_id=681,
+        perm_id=202,
+        rejection_reason=(
+            "broker completedOrder callback reported terminal status: Cancelled"
+        ),
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+    assert evidence["perm_id"] == 202
+
+    result = mark_rejected_reconciled(
+        INTENT,
+        rejection_reason=(
+            "broker completedOrder callback reported terminal status: Cancelled"
+        ),
+        order_id=101,
+        perm_id=202,
+        final_position_quantity=0.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert result["state"] == "REJECTED_RECONCILED"
+    assert result["perm_id"] == 202
+    terminal = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert terminal is not None
+    assert terminal["perm_id"] == 202
+
+
+def test_rejected_reconciliation_is_durable_terminal_and_never_retries(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    rejection = _record_rejection_evidence(tmp_path)
+    assert rejection["rejection_reason"].endswith("Cancelled")
+    assert load_definitive_rejection_evidence(INTENT, directory=tmp_path) == rejection
+
+    mark_unknown(
+        INTENT,
+        reason="broker orderStatus callback reported non-accepted status: Cancelled",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    result = mark_rejected_reconciled(
+        INTENT,
+        rejection_reason="broker orderStatus callback reported non-accepted status: Cancelled",
+        order_id=101,
+        final_position_quantity=0.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+
+    assert result["state"] == "REJECTED_RECONCILED"
+    marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["state"] == "REJECTED_RECONCILED"
+    assert marker["rejection_reason"].endswith("Cancelled")
+    assert marker["final_position_quantity"] == 0.0
+    assert marker["nonce"] == NONCE
+    assert marker["automatic_resend_allowed"] is False
+    assert result["recovery_required"] is False
+    assert result["automatic_resend_allowed"] is False
+    assert result["automatic_cancel_allowed"] is False
+    assert result["automatic_modify_allowed"] is False
+    assert result["automatic_flatten_allowed"] is False
+    assert result["automatic_close_allowed"] is False
+    assert send_attempt_permitted(INTENT, directory=tmp_path) is False
+
+
+def test_terminal_marker_survives_crash_before_summary_replacement(
+    tmp_path: Path, monkeypatch
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    monkeypatch.setattr(
+        journal,
+        "_atomic_replace",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("simulated crash after terminal marker")
+        ),
+    )
+
+    with pytest.raises(OSError, match="simulated crash"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["state"] == "PARTIAL_RECONCILED"
+    assert marker["exec_ids"] == ["exec-1"]
+    assert marker["terminal_recorded_at"] == (NOW + timedelta(seconds=3)).isoformat(
+        timespec="seconds"
+    )
+
+
+def test_terminal_transition_rejects_malformed_global_attempt_marker(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    global_path = journal._global_attempt_path(tmp_path)
+    payload = journal.load_global_send_attempt_marker(directory=tmp_path)
+    assert payload is not None
+    payload["intent_id"] = "different-intent"
+    global_path.write_text(
+        __import__("json").dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PermissionError, match="marker binding"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+def test_terminal_marker_is_exclusive_and_cannot_be_replaced(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_partial_reconciled(
+        INTENT,
+        exec_ids=("exec-1",),
+        order_id=101,
+        perm_id=202,
+        filled_quantity=40.0,
+        commission_total=12.5,
+        commission_currency="JPY",
+        final_position_quantity=40.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    marker_path = journal._terminal_path(INTENT, tmp_path)
+    original = marker_path.read_bytes()
+    with pytest.raises(FileExistsError):
+        journal._atomic_new(marker_path, {"state": "FABRICATED"})
+    assert marker_path.read_bytes() == original
+
+
+def test_terminal_marker_rejects_corrupted_authorization_binding(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    journal_path = journal._path(INTENT, tmp_path)
+    payload = load_send_journal(INTENT, directory=tmp_path)
+    assert payload is not None
+    payload["authorized_endpoint_port"] = 4002
+    journal_path.write_text(
+        __import__("json").dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PermissionError, match="endpoint binding"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "broker orderStatus callback reported non-accepted status: Inactive",
+        "broker acknowledgement timed out",
+        "77:399:Order message error",
+        "77:2104:Market data farm connection is OK",
+    ],
+)
+def test_rejected_terminal_marker_requires_definitive_broker_rejection(
+    tmp_path: Path, reason
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason=reason,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    with pytest.raises(ValueError, match="terminal broker rejection"):
+        mark_rejected_reconciled(
+            INTENT,
+            rejection_reason=reason,
+            order_id=101,
+            final_position_quantity=0.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
+
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+def test_terminal_transition_requires_exact_global_attempt_timestamp(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    global_path = journal._global_attempt_path(tmp_path)
+    global_marker = journal.load_global_send_attempt_marker(directory=tmp_path)
+    assert global_marker is not None
+    global_marker["recorded_at"] = NOW.isoformat(timespec="seconds")
+    global_path.write_text(
+        __import__("json").dumps(global_marker),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PermissionError, match="timestamps conflict"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+def test_rejected_transition_cannot_be_created_from_mutable_unknown_reason_alone(
+    tmp_path: Path,
+):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason="101:201:fabricated mutable rejection",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    with pytest.raises(PermissionError, match="rejection evidence is missing"):
+        mark_rejected_reconciled(
+            INTENT,
+            rejection_reason="101:201:fabricated mutable rejection",
+            order_id=101,
+            final_position_quantity=0.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
+
+    assert load_definitive_rejection_evidence(INTENT, directory=tmp_path) is None
+    assert load_terminal_reconciliation_marker(INTENT, directory=tmp_path) is None
+
+
+def test_broker_identity_corruption_fails_closed_without_typeerror(tmp_path: Path):
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    journal_path = journal._path(INTENT, tmp_path)
+    payload = load_send_journal(INTENT, directory=tmp_path)
+    assert payload is not None
+    payload["order_id"] = []
+    journal_path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="conflicts"):
+        mark_partial_reconciled(
+            INTENT,
+            exec_ids=("exec-1",),
+            order_id=101,
+            perm_id=202,
+            filled_quantity=40.0,
+            commission_total=12.5,
+            commission_currency="JPY",
+            final_position_quantity=40.0,
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )

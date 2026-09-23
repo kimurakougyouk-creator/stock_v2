@@ -86,6 +86,8 @@ class FakeClient:
         account: str = PINNED_ACCOUNT,
         ack: bool = True,
         place_error: Exception | None = None,
+        order_error: str | None = None,
+        broker_status: str | None = None,
     ):
         from threading import Event
 
@@ -103,6 +105,9 @@ class FakeClient:
         self.account = account
         self.ack = ack
         self.place_error = place_error
+        self.forced_order_error = order_error
+        self.forced_broker_status = broker_status
+        self.definitive_rejection_recorder = None
         self.place_calls = []
         self.connected = False
 
@@ -123,8 +128,17 @@ class FakeClient:
         if self.place_error is not None:
             raise self.place_error
         if self.ack:
-            self.broker_status = "Submitted"
-            self.ack_perm_id = 880077
+            if self.forced_order_error is not None:
+                self.broker_status = self.forced_broker_status
+                definitive = subject._definitive_terminal_rejection_reason(
+                    self.forced_order_error
+                )
+                if definitive is not None and self.definitive_rejection_recorder is not None:
+                    self.definitive_rejection_recorder(definitive)
+                self.order_error = self.forced_order_error
+            else:
+                self.broker_status = "Submitted"
+                self.ack_perm_id = 880077
             self.ack_ready.set()
 
     def isConnected(self):
@@ -181,6 +195,11 @@ def _patch_prereqs(
     )
     monkeypatch.setattr(
         subject,
+        "record_order_id_before_transport",
+        lambda *args, **kwargs: events.append("order_id") or {},
+    )
+    monkeypatch.setattr(
+        subject,
         "mark_order_acknowledged",
         lambda *args, **kwargs: events.append("ack") or {},
     )
@@ -188,6 +207,11 @@ def _patch_prereqs(
         subject,
         "mark_unknown",
         lambda *args, **kwargs: events.append("unknown") or {},
+    )
+    monkeypatch.setattr(
+        subject,
+        "record_definitive_rejection_evidence",
+        lambda *args, **kwargs: events.append("rejection_evidence") or {},
     )
     return events
 
@@ -226,7 +250,7 @@ def test_acknowledged_path_calls_place_order_exactly_once(monkeypatch):
     assert result.perm_id == 880077
     assert result.account_fingerprint == PINNED_FINGERPRINT
     assert len(client.place_calls) == 1
-    assert events == ["journal", "attempt", "ack"]
+    assert events == ["journal", "attempt", "order_id", "ack"]
 
     order_id, contract, order = client.place_calls[0]
     assert order_id == 77
@@ -254,7 +278,7 @@ def test_stop_at_last_possible_point_spends_attempt_without_transport(monkeypatc
     assert result.sent is False
     assert result.recovery_required is True
     assert client.place_calls == []
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
 
 
 def test_stale_evidence_after_stop_check_blocks_before_transport(monkeypatch):
@@ -275,7 +299,7 @@ def test_stale_evidence_after_stop_check_blocks_before_transport(monkeypatch):
     assert result.order_id == 77
     assert result.recovery_required is True
     assert client.place_calls == []
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
 
 
 def test_transport_exception_becomes_unknown_and_never_retries(monkeypatch):
@@ -288,7 +312,7 @@ def test_transport_exception_becomes_unknown_and_never_retries(monkeypatch):
     assert result.acknowledged is False
     assert result.recovery_required is True
     assert len(client.place_calls) == 1
-    assert events == ["journal", "attempt", "unknown"]
+    assert events == ["journal", "attempt", "order_id", "unknown"]
 
 
 def test_ack_timeout_becomes_unknown_and_never_retries(monkeypatch):
@@ -298,7 +322,44 @@ def test_ack_timeout_becomes_unknown_and_never_retries(monkeypatch):
 
     assert result.status == "UNKNOWN"
     assert len(client.place_calls) == 1
-    assert events == ["journal", "attempt", "unknown"]
+    assert events == ["journal", "attempt", "order_id", "unknown"]
+
+
+def test_definitive_rejection_is_persisted_before_mutable_unknown(monkeypatch):
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient(
+        order_error=(
+            "broker orderStatus callback reported non-accepted status: Cancelled"
+        ),
+        broker_status="Cancelled",
+    )
+
+    result = _send(monkeypatch, client)
+
+    assert result.status == "UNKNOWN"
+    assert result.recovery_required is True
+    assert len(client.place_calls) == 1
+    assert events == [
+        "journal",
+        "attempt",
+        "order_id",
+        "rejection_evidence",
+        "unknown",
+    ]
+
+
+def test_nonterminal_or_unclassified_error_never_creates_rejection_proof(monkeypatch):
+    events = _patch_prereqs(monkeypatch)
+    client = FakeClient(
+        order_error="77:399:Order message error",
+        broker_status=None,
+    )
+
+    result = _send(monkeypatch, client)
+
+    assert result.status == "UNKNOWN"
+    assert "rejection_evidence" not in events
+    assert events == ["journal", "attempt", "order_id", "unknown"]
 
 
 def test_same_session_account_mismatch_blocks_before_authorization_consumption(monkeypatch):
@@ -524,7 +585,7 @@ def test_stale_evidence_after_durable_attempt_recording_blocks_transport(monkeyp
     # The irreversible attempt marker must already have been recorded before
     # this check runs -- it is not skipped/rolled back just because transport
     # is subsequently blocked.
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
 
 
 def test_freshness_is_rechecked_before_the_final_stop_check(monkeypatch):
@@ -560,7 +621,7 @@ def test_freshness_is_rechecked_before_the_final_stop_check(monkeypatch):
 
     assert result.status == "BLOCKED_STALE_AFTER_ATTEMPT"
     assert client.place_calls == []
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
     # There are two stop checks in the whole function: an early one before
     # ever connecting, and the final one immediately before placeOrder. Only
     # the early one should have run; the final one must never be reached
@@ -596,7 +657,7 @@ def test_expired_authorization_after_durable_attempt_recording_blocks_transport(
     assert result.sent is False
     assert result.recovery_required is True
     assert client.place_calls == []
-    assert events == ["journal", "attempt"]
+    assert events == ["journal", "attempt", "order_id"]
 
 
 def test_fixed_clock_callable_still_works_for_simple_deterministic_tests(monkeypatch):
@@ -609,7 +670,7 @@ def test_fixed_clock_callable_still_works_for_simple_deterministic_tests(monkeyp
     client = FakeClient()
     result = _send(monkeypatch, client, clock=lambda: NOW)
     assert result.status == "ORDER_ACKNOWLEDGED"
-    assert events == ["journal", "attempt", "ack"]
+    assert events == ["journal", "attempt", "order_id", "ack"]
 
 
 def test_bare_datetime_is_no_longer_accepted_as_clock(monkeypatch):
@@ -670,6 +731,35 @@ def test_inactive_open_order_status_does_not_falsely_acknowledge():
     # Codex P2: the decisive rejection status must be recorded, not left
     # stuck at None.
     assert client.broker_status == "Inactive"
+
+
+def test_definitive_callback_persists_proof_before_waking_waiter():
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+    events = []
+    client.definitive_rejection_recorder = lambda reason: events.append(
+        ("proof", reason)
+    )
+    client.ack_ready = SimpleNamespace(set=lambda: events.append(("wake", None)))
+
+    client.orderStatus(
+        77,
+        "Cancelled",
+        0.0,
+        100.0,
+        0.0,
+        0,
+        0,
+        0.0,
+        0,
+        "",
+        0.0,
+    )
+
+    assert events[0][0] == "proof"
+    assert events[0][1].endswith("Cancelled")
+    assert events[1] == ("wake", None)
 
 
 def test_accepted_open_order_status_still_acknowledges():

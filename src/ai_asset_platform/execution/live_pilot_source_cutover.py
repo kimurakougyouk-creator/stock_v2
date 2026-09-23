@@ -1,8 +1,8 @@
 """Fail-closed source/PIN verification for a future Live pilot runtime.
 
 This module proves that the locally executed safety-critical source is exactly at
-one externally approved Git commit and has no tracked edits in the audited code
-paths.  Runtime result/evidence files are deliberately outside the audited
+one externally approved Git commit and has no tracked or untracked changes in the
+audited code paths.  Runtime result/evidence files are deliberately outside the audited
 pathspec because they are expected to change during operation.
 
 The expected commit SHA must come from an independently approved GitHub source
@@ -30,9 +30,69 @@ AUDITED_PATHS: tuple[str, ...] = (
     "pyproject.toml",
     "pytest.ini",
     ".github/workflows/pytest.yml",
+    "live_pilot_operational_once.sh",
 )
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REPORT_SCHEMA_VERSION = 1
+_IMPORTABLE_IGNORED_SUFFIXES = (".py", ".pyc", ".pyo", ".pyz", ".so", ".pyd", ".dylib")
+
+
+def _index_hidden_entries(raw_listing: str) -> tuple[str, ...]:
+    entries: list[str] = []
+    for raw in raw_listing.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        tag = line[0]
+        if tag == "S" or tag.islower():
+            entries.append(f"INDEX_HIDDEN {line}")
+    return tuple(entries)
+
+
+def _ignored_importable_entries(
+    raw_listing: str,
+    *,
+    repository_root: Path,
+) -> tuple[str, ...]:
+    entries: list[str] = []
+    for raw in raw_listing.splitlines():
+        path = raw.strip()
+        if not path:
+            continue
+        normalized = path.replace("\\", "/")
+        candidate = repository_root / path
+
+        # An extensionless symlink can still be importable when it points at a
+        # package directory. Never follow/trust ignored symlinks in audited
+        # source paths.
+        if candidate.is_symlink():
+            entries.append(f"IGNORED_SYMLINK {path}")
+            continue
+
+        if "/__pycache__/" in f"/{normalized}":
+            continue
+        if normalized.lower().endswith(_IMPORTABLE_IGNORED_SUFFIXES):
+            entries.append(f"IGNORED_IMPORTABLE {path}")
+            continue
+
+        # git ls-files normally emits files, but fail closed if a directory
+        # entry is returned and it already looks like an importable package.
+        if candidate.is_dir():
+            try:
+                names = tuple(child.name.lower() for child in candidate.iterdir())
+            except OSError:
+                entries.append(f"IGNORED_PACKAGE_UNREADABLE {path}")
+                continue
+            if (
+                "__init__.py" in names
+                or "__init__.pyc" in names
+                or any(
+                    name.startswith("__init__") and name.endswith(".so")
+                    for name in names
+                )
+            ):
+                entries.append(f"IGNORED_IMPORTABLE_PACKAGE {path}")
+    return tuple(entries)
 
 
 @dataclass(frozen=True)
@@ -81,7 +141,7 @@ def audit_live_pilot_source_cutover(
     now: datetime | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> LivePilotSourceCutover:
-    """Verify exact approved commit plus tracked cleanliness of audited code paths."""
+    """Verify exact approved commit plus tracked/untracked cleanliness of audited code paths."""
     current = _utc_now(now)
     expected = str(expected_commit_sha or "").strip().lower()
     if not _SHA_RE.fullmatch(expected):
@@ -105,15 +165,44 @@ def audit_live_pilot_source_cutover(
             (
                 "status",
                 "--porcelain=v1",
-                "--untracked-files=no",
+                "--untracked-files=all",
                 "--",
                 *normalized_paths,
             ),
             cwd=repository_root,
             runner=runner,
         )
-        dirty_entries = tuple(
-            line.rstrip() for line in status_text.splitlines() if line.strip()
+        index_text = _run_git(
+            (
+                "ls-files",
+                "-v",
+                "--",
+                *normalized_paths,
+            ),
+            cwd=repository_root,
+            runner=runner,
+        )
+        ignored_text = _run_git(
+            (
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--",
+                *normalized_paths,
+            ),
+            cwd=repository_root,
+            runner=runner,
+        )
+        dirty_entries = (
+            tuple(
+                line.rstrip() for line in status_text.splitlines() if line.strip()
+            )
+            + _index_hidden_entries(index_text)
+            + _ignored_importable_entries(
+                ignored_text,
+                repository_root=repository_root,
+            )
         )
     except (OSError, subprocess.SubprocessError):
         # Any inability to prove source identity/cleanliness fails closed.
@@ -142,7 +231,7 @@ def source_cutover_record(result: LivePilotSourceCutover) -> dict:
         "audited_paths": list(AUDITED_PATHS),
         "interpretation": (
             "READY proves only that the audited local source equals the externally "
-            "approved Git commit and has no tracked edits in safety-critical paths. "
+            "approved Git commit and has no tracked/untracked changes or ignored importable artifacts/packages/symlinks in safety-critical paths. "
             "It does not authorize or transmit a Live order."
         ),
     }

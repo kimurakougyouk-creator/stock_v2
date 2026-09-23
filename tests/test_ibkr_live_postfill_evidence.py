@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import ai_asset_platform.brokers.ibkr_live_postfill_evidence as subject
 from ai_asset_platform.brokers.ibkr_live_postfill_evidence import (
     IbkrLivePostFillSnapshot,
     LiveCommissionEvidence,
@@ -20,6 +22,7 @@ def _execution(**overrides):
         exec_id="exec-1",
         order_id=77,
         perm_id=88,
+        client_id=681,
         symbol="AAPL",
         sec_type="STK",
         currency="USD",
@@ -60,6 +63,242 @@ def test_missing_exact_readonly_confirmation_blocks_before_connection():
     assert result.live_order_sent is False
 
 
+def test_collection_keeps_cross_client_executions_visible(monkeypatch):
+    class ReadyEvent:
+        def wait(self, timeout):
+            return True
+
+    class FakeExecutionFilter:
+        pass
+
+    class FakeProbe:
+        def __init__(self):
+            self.connected_ready = ReadyEvent()
+            self.accounts_ready = ReadyEvent()
+            self.executions_ready = ReadyEvent()
+            self.accounts = ["DU123"]
+            self.raw_executions = []
+            self.commissions = []
+            self.errors = []
+            self.fatal = False
+
+        def connect(self, *args, **kwargs):
+            return None
+
+        def reqManagedAccts(self):
+            return None
+
+        def reqExecutions(self, req_id, execution_filter):
+            assert req_id == 1997
+            assert not hasattr(execution_filter, "clientId")
+
+        def isConnected(self):
+            return False
+
+    monkeypatch.setattr(subject, "_LivePostFillProbe", FakeProbe)
+    monkeypatch.setattr(subject, "ExecutionFilter", FakeExecutionFilter)
+    monkeypatch.setattr(
+        subject,
+        "Thread",
+        lambda *args, **kwargs: SimpleNamespace(start=lambda: None),
+    )
+
+    snapshot = subject.preview_ibkr_live_postfill_snapshot(
+        confirmation=subject.CONFIRMATION_VALUE,
+        expected_client_id=681,
+        endpoint_port=4001,
+        settle_seconds=0,
+    )
+
+    assert snapshot.ready is True
+    assert snapshot.executions == ()
+
+
+def test_malformed_managed_account_execution_identity_blocks_snapshot(monkeypatch):
+    class ReadyEvent:
+        def wait(self, timeout):
+            return True
+
+    class FakeExecutionFilter:
+        pass
+
+    valid_contract = SimpleNamespace(symbol="AAPL", secType="STK", currency="USD")
+    valid_execution = SimpleNamespace(
+        acctNumber="DU123",
+        side="BOT",
+        shares=1,
+        price=250,
+        orderId=77,
+        permId=88,
+        clientId=681,
+        execId="valid",
+        time="20260922 12:00:00",
+    )
+    malformed_execution = SimpleNamespace(
+        acctNumber="DU123",
+        side="BOT",
+        shares=1,
+        price=250,
+        orderId=78,
+        permId=88,
+        clientId="999",
+        execId="malformed",
+        time="20260922 12:00:01",
+    )
+
+    class FakeProbe:
+        def __init__(self):
+            self.connected_ready = ReadyEvent()
+            self.accounts_ready = ReadyEvent()
+            self.executions_ready = ReadyEvent()
+            self.accounts = ["DU123"]
+            self.raw_executions = [
+                (valid_contract, valid_execution),
+                (valid_contract, malformed_execution),
+            ]
+            self.commissions = []
+            self.errors = []
+            self.fatal = False
+
+        def connect(self, *args, **kwargs):
+            return None
+
+        def reqManagedAccts(self):
+            return None
+
+        def reqExecutions(self, req_id, execution_filter):
+            return None
+
+        def isConnected(self):
+            return False
+
+    monkeypatch.setattr(subject, "_LivePostFillProbe", FakeProbe)
+    monkeypatch.setattr(subject, "ExecutionFilter", FakeExecutionFilter)
+    monkeypatch.setattr(
+        subject,
+        "Thread",
+        lambda *args, **kwargs: SimpleNamespace(start=lambda: None),
+    )
+
+    snapshot = subject.preview_ibkr_live_postfill_snapshot(
+        confirmation=subject.CONFIRMATION_VALUE,
+        expected_client_id=681,
+        endpoint_port=4001,
+        settle_seconds=0,
+    )
+
+    assert snapshot.ready is False
+    assert snapshot.blocked_reason == "malformed Live execution evidence"
+    assert tuple(row.exec_id for row in snapshot.executions) == ("valid",)
+
+
+def test_mismatched_execution_account_blocks_snapshot(monkeypatch):
+    class ReadyEvent:
+        def wait(self, timeout):
+            return True
+
+    class FakeExecutionFilter:
+        pass
+
+    contract = SimpleNamespace(symbol="AAPL", secType="STK", currency="USD")
+    selected = SimpleNamespace(
+        acctNumber="DU123",
+        side="BOT",
+        shares=1,
+        price=250,
+        orderId=77,
+        permId=88,
+        clientId=681,
+        execId="selected",
+        time="20260922 12:00:00",
+    )
+    other_account = SimpleNamespace(
+        acctNumber="DU999",
+        side="BOT",
+        shares=1,
+        price=250,
+        orderId=78,
+        permId=88,
+        clientId=999,
+        execId="other-account-conflict",
+        time="20260922 12:00:01",
+    )
+
+    class FakeProbe:
+        def __init__(self):
+            self.connected_ready = ReadyEvent()
+            self.accounts_ready = ReadyEvent()
+            self.executions_ready = ReadyEvent()
+            self.accounts = ["DU123"]
+            self.raw_executions = [
+                (contract, selected),
+                (contract, other_account),
+            ]
+            self.commissions = []
+            self.errors = []
+            self.fatal = False
+
+        def connect(self, *args, **kwargs):
+            return None
+
+        def reqManagedAccts(self):
+            return None
+
+        def reqExecutions(self, req_id, execution_filter):
+            return None
+
+        def isConnected(self):
+            return False
+
+    monkeypatch.setattr(subject, "_LivePostFillProbe", FakeProbe)
+    monkeypatch.setattr(subject, "ExecutionFilter", FakeExecutionFilter)
+    monkeypatch.setattr(
+        subject,
+        "Thread",
+        lambda *args, **kwargs: SimpleNamespace(start=lambda: None),
+    )
+
+    snapshot = subject.preview_ibkr_live_postfill_snapshot(
+        confirmation=subject.CONFIRMATION_VALUE,
+        expected_client_id=681,
+        endpoint_port=4001,
+        settle_seconds=0,
+    )
+
+    assert snapshot.ready is False
+    assert snapshot.blocked_reason == "malformed Live execution evidence"
+    assert tuple(row.exec_id for row in snapshot.executions) == ("selected",)
+
+
+def test_execution_row_rejects_coercible_non_integer_broker_identities():
+    contract = SimpleNamespace(symbol="AAPL", secType="STK", currency="USD")
+    base = dict(
+        acctNumber="DU123",
+        side="BOT",
+        shares=1,
+        price=250,
+        orderId=77,
+        permId=88,
+        clientId=681,
+        execId="exec-identity",
+        time="20260922 12:00:00",
+    )
+
+    for field, value in (
+        ("orderId", 77.5),
+        ("orderId", "77"),
+        ("permId", 88.0),
+        ("permId", "88"),
+        ("clientId", 681.0),
+        ("clientId", "681"),
+        ("clientId", True),
+    ):
+        data = dict(base)
+        data[field] = value
+        execution = SimpleNamespace(**data)
+        assert subject._execution_row(contract, execution, "DU123") is None
+
+
 def test_exact_execution_and_commission_prove_native_cash_effect():
     result = match_live_postfill(
         _snapshot(),
@@ -69,6 +308,7 @@ def test_exact_execution_and_commission_prove_native_cash_effect():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is True
     assert result.execution is not None
@@ -100,6 +340,7 @@ def test_split_fill_aggregates_all_exec_ids_and_commissions():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is True
     assert result.filled_quantity == 1.0
@@ -125,6 +366,7 @@ def test_split_fill_missing_one_commission_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert result.native_cash_effect is None
@@ -150,6 +392,7 @@ def test_split_fill_under_or_over_quantity_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     ).ready is False
 
     over = _snapshot(
@@ -170,6 +413,7 @@ def test_split_fill_under_or_over_quantity_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     ).ready is False
 
 
@@ -189,6 +433,7 @@ def test_duplicate_execution_or_commission_evidence_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any("duplicate exec_id" in item for item in result.blockers)
@@ -204,6 +449,7 @@ def test_duplicate_execution_or_commission_evidence_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any("found 2" in item for item in result.blockers)
@@ -218,6 +464,7 @@ def test_wrong_order_identity_fails_closed():
         quantity=1,
         order_id=999,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert result.execution is None
@@ -232,6 +479,7 @@ def test_missing_commission_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert result.execution is not None
@@ -247,6 +495,7 @@ def test_wrong_account_fingerprint_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
 
@@ -260,6 +509,7 @@ def test_commission_currency_mismatch_fails_closed():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert result.native_cash_effect is None
@@ -282,6 +532,7 @@ def test_execution_currency_must_match_ticker_expected_instrument_currency():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any(
@@ -299,6 +550,7 @@ def test_unbounded_ticker_has_no_instrument_currency_mapping():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any(
@@ -330,6 +582,7 @@ def test_quantity_requires_exact_decimal_equality_not_isclose():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any("does not equal expected total" in item for item in result.blockers)
@@ -349,6 +602,7 @@ def test_non_finite_aggregate_from_extreme_values_fails_closed_not_crashes():
         quantity=1,
         order_id=77,
         perm_id=88,
+        expected_client_id=681,
     )
     assert result.ready is False
     assert any(
@@ -369,3 +623,51 @@ def test_module_contains_no_order_transport():
     )
     for token in forbidden:
         assert token not in source
+
+
+
+def test_match_live_postfill_requires_expected_sender_client_id():
+    wrong_client = _snapshot(
+        executions=(_execution(client_id=672),),
+    )
+    result = match_live_postfill(
+        wrong_client,
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+        expected_client_id=681,
+    )
+    assert result.ready is False
+    assert "no matching Live execution rows were found" in result.blockers
+
+    correct = match_live_postfill(
+        _snapshot(),
+        expected_account_fingerprint=FP,
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        order_id=77,
+        perm_id=88,
+        expected_client_id=681,
+    )
+    assert correct.ready is True
+
+
+
+def test_match_live_postfill_rejects_invalid_expected_client_id():
+    for bad_client_id in (None, -1, True, 681.0, "681"):
+        result = match_live_postfill(
+            _snapshot(),
+            expected_account_fingerprint=FP,
+            ticker="AAPL",
+            side="BUY",
+            quantity=1,
+            order_id=77,
+            perm_id=88,
+            expected_client_id=bad_client_id,
+        )
+        assert result.ready is False, bad_client_id
+        assert "expected_client_id must be a non-negative exact int" in result.blockers

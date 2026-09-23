@@ -65,6 +65,14 @@ def _attempt_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.attempted.json"
 
 
+def _terminal_path(intent_id: str, directory: Path) -> Path:
+    return directory / f"{_stem(intent_id)}.terminal.json"
+
+
+def _rejection_evidence_path(intent_id: str, directory: Path) -> Path:
+    return directory / f"{_stem(intent_id)}.rejection.json"
+
+
 def _resolve_machine_state_root() -> Path:
     """Resolve checkout-independent durable operator state for the campaign marker."""
     try:
@@ -180,6 +188,7 @@ def _atomic_replace(path: Path, payload: dict) -> None:
     finally:
         os.close(descriptor)
     os.replace(temporary, path)
+    _fsync_parent_dir(path)
 
 
 def _load_json(path: Path, *, label: str) -> dict:
@@ -233,6 +242,36 @@ def global_send_attempt_recorded(*, directory: Path = DEFAULT_JOURNAL_DIR) -> bo
     return _global_attempt_path(directory).exists()
 
 
+def load_terminal_reconciliation_marker(
+    intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    """Load the exclusive terminal-reconciliation proof, if it exists.
+
+    This record is created exactly once before the mutable summary journal is
+    advanced to PARTIAL_RECONCILED or REJECTED_RECONCILED.  Recovery treats
+    this marker, not the mutable summary, as the durable state-specific proof.
+    """
+    path = _terminal_path(intent_id, directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="terminal reconciliation marker")
+
+
+def load_definitive_rejection_evidence(
+    intent_id: str, *, directory: Path = DEFAULT_JOURNAL_DIR
+) -> dict | None:
+    """Load immutable broker-callback rejection evidence, if it exists.
+
+    The sender creates this record exactly once after a definitive terminal
+    broker callback and before the mutable summary journal is changed to
+    UNKNOWN. Recovery must never infer rejection from unknown_reason alone.
+    """
+    path = _rejection_evidence_path(intent_id, directory)
+    if not path.exists():
+        return None
+    return _load_json(path, label="definitive rejection evidence")
+
+
 def load_global_send_attempt_marker(
     *, directory: Path = DEFAULT_JOURNAL_DIR
 ) -> dict | None:
@@ -271,6 +310,50 @@ def create_consumed_authorization_journal(
         "live_order_sent"
     ):
         raise PermissionError("consumed authorization record is not pre-send evidence")
+
+    ticker = str(consumed_authorization.get("ticker") or "").strip().upper()
+    side = str(consumed_authorization.get("side") or "").strip().upper()
+    quantity = consumed_authorization.get("quantity")
+    limit_price = consumed_authorization.get("limit_price")
+    estimated_notional_jpy = consumed_authorization.get("estimated_notional_jpy")
+    account_fingerprint = str(
+        consumed_authorization.get("account_fingerprint") or ""
+    ).strip().lower()
+    endpoint_port = consumed_authorization.get("endpoint_port")
+    if not ticker:
+        raise PermissionError("consumed authorization ticker binding is missing")
+    if side not in {"BUY", "SELL"}:
+        raise PermissionError("consumed authorization side binding is invalid")
+    if (
+        not isinstance(quantity, int)
+        or isinstance(quantity, bool)
+        or quantity <= 0
+    ):
+        raise PermissionError("consumed authorization quantity binding is invalid")
+    for name, value in (
+        ("limit_price", limit_price),
+        ("estimated_notional_jpy", estimated_notional_jpy),
+    ):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+            or value != value
+            or value in {float("inf"), float("-inf")}
+        ):
+            raise PermissionError(f"consumed authorization {name} binding is invalid")
+    if (
+        len(account_fingerprint) != 64
+        or any(ch not in "0123456789abcdef" for ch in account_fingerprint)
+    ):
+        raise PermissionError("consumed authorization account binding is invalid")
+    if (
+        not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in {4001, 7496}
+    ):
+        raise PermissionError("consumed authorization endpoint binding is invalid")
+
     if send_attempt_recorded(intent, directory=directory):
         raise PermissionError("a Live send attempt is already recorded for this intent")
 
@@ -280,6 +363,13 @@ def create_consumed_authorization_journal(
         "nonce": safe_nonce,
         "state": "AUTHORIZATION_CONSUMED",
         "created_at": _now(now),
+        "authorized_ticker": ticker,
+        "authorized_side": side,
+        "authorized_quantity": quantity,
+        "authorized_limit_price": float(limit_price),
+        "authorized_estimated_notional_jpy": float(estimated_notional_jpy),
+        "authorized_account_fingerprint": account_fingerprint,
+        "authorized_endpoint_port": endpoint_port,
         "send_attempt_count": 0,
         "order_id": None,
         "perm_id": None,
@@ -375,6 +465,53 @@ def _require_attempt_marker(intent_id: str, directory: Path) -> None:
         raise PermissionError("irreversible Live send-attempt marker is missing")
 
 
+
+def record_order_id_before_transport(
+    intent_id: str,
+    *,
+    order_id: int,
+    client_id: int,
+    directory: Path = DEFAULT_JOURNAL_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Durably bind the locally assigned broker order id before transport.
+
+    The order id is available after nextValidId and before placeOrder. Persisting
+    it while the irreversible send-attempt marker already exists gives later
+    read-only UNKNOWN recovery a stable broker key even if acknowledgement (and
+    therefore permId) never arrives. This does not authorize, transmit, retry,
+    cancel, modify, flatten, or close an order.
+    """
+    _require_attempt_marker(intent_id, directory)
+    payload = load_send_journal(intent_id, directory=directory)
+    if payload is None or payload.get("state") != "SEND_ATTEMPT_RECORDED":
+        raise PermissionError(
+            "pre-transport broker identity is only valid after the send attempt is recorded"
+        )
+    if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
+        raise ValueError("order_id must be a positive exact int")
+    if not isinstance(client_id, int) or isinstance(client_id, bool) or client_id < 0:
+        raise ValueError("client_id must be a non-negative exact int")
+    existing = payload.get("order_id")
+    if existing is not None and existing != order_id:
+        raise PermissionError("pre-transport broker order_id conflicts with persisted identity")
+    existing_client = payload.get("sender_client_id")
+    if existing_client is not None and existing_client != client_id:
+        raise PermissionError("pre-transport broker client_id conflicts with persisted identity")
+    payload.update(
+        order_id=order_id,
+        sender_client_id=client_id,
+        order_id_recorded_at=_now(now),
+        recovery_required=True,
+        automatic_resend_allowed=False,
+        automatic_cancel_allowed=False,
+        automatic_modify_allowed=False,
+        automatic_flatten_allowed=False,
+        automatic_close_allowed=False,
+    )
+    _atomic_replace(_path(intent_id, directory), payload)
+    return payload
+
 def mark_order_acknowledged(
     intent_id: str,
     *,
@@ -387,12 +524,19 @@ def mark_order_acknowledged(
     payload = load_send_journal(intent_id, directory=directory)
     if payload is None or payload.get("state") != "SEND_ATTEMPT_RECORDED":
         raise PermissionError("order acknowledgement is not valid in the current state")
-    if int(order_id) <= 0 or int(perm_id) <= 0:
-        raise ValueError("order_id and perm_id must be positive")
+    if (
+        not isinstance(order_id, int)
+        or isinstance(order_id, bool)
+        or order_id <= 0
+        or not isinstance(perm_id, int)
+        or isinstance(perm_id, bool)
+        or perm_id <= 0
+    ):
+        raise ValueError("order_id and perm_id must be positive exact ints")
     payload.update(
         state="ORDER_ACKNOWLEDGED",
-        order_id=int(order_id),
-        perm_id=int(perm_id),
+        order_id=order_id,
+        perm_id=perm_id,
         acknowledged_at=_now(now),
         recovery_required=True,
     )
@@ -411,8 +555,13 @@ def mark_unknown(
     payload = load_send_journal(intent_id, directory=directory)
     if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("UNKNOWN is only valid after the single send attempt")
-    if payload.get("state") in {"POSTFILL_PROVEN", "COMPLETE"}:
-        raise PermissionError("completed evidence cannot be changed to UNKNOWN")
+    if payload.get("state") in {
+        "POSTFILL_PROVEN",
+        "COMPLETE",
+        "PARTIAL_RECONCILED",
+        "REJECTED_RECONCILED",
+    }:
+        raise PermissionError("reconciled evidence cannot be changed to UNKNOWN")
     normalized = str(reason or "").strip()
     if not normalized:
         raise ValueError("UNKNOWN reason is required")
@@ -421,6 +570,578 @@ def mark_unknown(
         unknown_at=_now(now),
         unknown_reason=normalized,
         recovery_required=True,
+        automatic_resend_allowed=False,
+        automatic_cancel_allowed=False,
+        automatic_modify_allowed=False,
+        automatic_flatten_allowed=False,
+        automatic_close_allowed=False,
+    )
+    _atomic_replace(_path(intent_id, directory), payload)
+    return payload
+
+
+def _validated_attempt_marker_timestamp(
+    payload: dict,
+    *,
+    intent_id: str,
+    directory: Path,
+) -> str:
+    """Validate both irreversible attempt markers before a terminal transition."""
+    try:
+        attempt = load_send_attempt_marker(intent_id, directory=directory)
+        global_attempt = load_global_send_attempt_marker(directory=directory)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise PermissionError("irreversible attempt marker evidence is unreadable") from exc
+    if not isinstance(attempt, dict) or not isinstance(global_attempt, dict):
+        raise PermissionError("both irreversible attempt markers are required")
+    if (
+        attempt.get("schema_version") != REPORT_SCHEMA_VERSION
+        or global_attempt.get("schema_version") != REPORT_SCHEMA_VERSION
+        or attempt.get("state") != "SEND_ATTEMPT_RECORDED"
+        or str(attempt.get("intent_id") or "") != intent_id
+        or str(global_attempt.get("intent_id") or "") != intent_id
+        or str(attempt.get("nonce") or "") != str(payload.get("nonce") or "")
+        or attempt.get("automatic_resend_allowed") is not False
+        or global_attempt.get("automatic_resend_allowed") is not False
+    ):
+        raise PermissionError("irreversible attempt marker binding is invalid")
+    for flag in (
+        "automatic_cancel_allowed",
+        "automatic_modify_allowed",
+        "automatic_flatten_allowed",
+        "automatic_close_allowed",
+    ):
+        if attempt.get(flag) is not False:
+            raise PermissionError("irreversible attempt marker action flags are invalid")
+
+    recorded_at = str(attempt.get("recorded_at") or "").strip()
+    global_recorded_at = str(global_attempt.get("recorded_at") or "").strip()
+    journal_recorded_at = str(payload.get("send_attempt_recorded_at") or "").strip()
+    try:
+        attempt_time = datetime.fromisoformat(recorded_at)
+        global_time = datetime.fromisoformat(global_recorded_at)
+        journal_time = datetime.fromisoformat(journal_recorded_at)
+    except ValueError as exc:
+        raise PermissionError("irreversible attempt marker timestamp is invalid") from exc
+    for observed in (attempt_time, global_time, journal_time):
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise PermissionError("irreversible attempt marker timestamp is not timezone-aware")
+    attempt_time = attempt_time.astimezone(timezone.utc)
+    global_time = global_time.astimezone(timezone.utc)
+    journal_time = journal_time.astimezone(timezone.utc)
+    if global_time != attempt_time or journal_time != attempt_time:
+        raise PermissionError("irreversible attempt marker timestamps conflict")
+    return attempt_time.isoformat(timespec="seconds")
+
+
+def record_definitive_rejection_evidence(
+    intent_id: str,
+    *,
+    nonce: str,
+    ticker: str,
+    side: str,
+    quantity: int,
+    limit_price: float,
+    estimated_notional_jpy: float,
+    account_fingerprint: str,
+    endpoint_port: int,
+    order_id: int,
+    client_id: int,
+    rejection_reason: str,
+    perm_id: int | None = None,
+    directory: Path = DEFAULT_JOURNAL_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Persist terminal broker-rejection proof before mutable UNKNOWN state."""
+    intent = _safe(intent_id, "intent_id")
+    safe_nonce = _safe(nonce, "nonce")
+    normalized_ticker = str(ticker or "").strip().upper()
+    normalized_side = str(side or "").strip().upper()
+    fingerprint = str(account_fingerprint or "").strip().lower()
+    reason = _definitive_terminal_rejection_reason(rejection_reason)
+    if reason is None:
+        raise ValueError("rejection_reason must prove a terminal broker rejection")
+    if not normalized_ticker or normalized_side not in {"BUY", "SELL"}:
+        raise ValueError("rejection evidence authorization binding is invalid")
+    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
+        raise ValueError("rejection evidence quantity must be a positive exact int")
+    for name, value in (
+        ("limit_price", limit_price),
+        ("estimated_notional_jpy", estimated_notional_jpy),
+    ):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+            or value != value
+            or value in {float("inf"), float("-inf")}
+        ):
+            raise ValueError(f"rejection evidence {name} must be positive and finite")
+    if (
+        len(fingerprint) != 64
+        or any(ch not in "0123456789abcdef" for ch in fingerprint)
+    ):
+        raise ValueError("rejection evidence account fingerprint is invalid")
+    if (
+        not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in {4001, 7496}
+    ):
+        raise ValueError("rejection evidence Live endpoint is invalid")
+    if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
+        raise ValueError("rejection evidence order_id must be a positive exact int")
+    if not isinstance(client_id, int) or isinstance(client_id, bool) or client_id < 0:
+        raise ValueError("rejection evidence client_id must be a non-negative exact int")
+    if perm_id is not None and (
+        not isinstance(perm_id, int)
+        or isinstance(perm_id, bool)
+        or perm_id <= 0
+    ):
+        raise ValueError("rejection evidence perm_id must be a positive exact int")
+
+    payload = load_send_journal(intent, directory=directory)
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
+        raise PermissionError("rejection evidence requires the recorded send attempt")
+    if payload.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
+        raise PermissionError("rejection evidence is not valid in the current state")
+    expected_pairs = (
+        (payload.get("nonce"), safe_nonce),
+        (str(payload.get("authorized_ticker") or "").strip().upper(), normalized_ticker),
+        (str(payload.get("authorized_side") or "").strip().upper(), normalized_side),
+        (payload.get("authorized_quantity"), quantity),
+        (payload.get("authorized_limit_price"), float(limit_price)),
+        (payload.get("authorized_estimated_notional_jpy"), float(estimated_notional_jpy)),
+        (str(payload.get("authorized_account_fingerprint") or "").strip().lower(), fingerprint),
+        (payload.get("authorized_endpoint_port"), endpoint_port),
+        (payload.get("order_id"), order_id),
+        (payload.get("sender_client_id"), client_id),
+    )
+    if any(observed != expected for observed, expected in expected_pairs):
+        raise PermissionError("rejection evidence does not match durable send identity")
+    persisted_perm = payload.get("perm_id")
+    if persisted_perm is not None:
+        if (
+            not isinstance(persisted_perm, int)
+            or isinstance(persisted_perm, bool)
+            or persisted_perm <= 0
+            or perm_id != persisted_perm
+        ):
+            raise PermissionError(
+                "rejection evidence perm_id conflicts with durable send identity"
+            )
+
+    attempt_recorded_at = _validated_attempt_marker_timestamp(
+        payload,
+        intent_id=intent,
+        directory=directory,
+    )
+    evidence = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "intent_id": intent,
+        "nonce": safe_nonce,
+        "ticker": normalized_ticker,
+        "side": normalized_side,
+        "quantity": quantity,
+        "limit_price": float(limit_price),
+        "estimated_notional_jpy": float(estimated_notional_jpy),
+        "account_fingerprint": fingerprint,
+        "endpoint_port": endpoint_port,
+        "order_id": order_id,
+        "perm_id": perm_id,
+        "sender_client_id": client_id,
+        "send_attempt_recorded_at": attempt_recorded_at,
+        "rejection_recorded_at": _now(now),
+        "rejection_reason": reason,
+        "automatic_resend_allowed": False,
+        "automatic_cancel_allowed": False,
+        "automatic_modify_allowed": False,
+        "automatic_flatten_allowed": False,
+        "automatic_close_allowed": False,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
+    try:
+        _atomic_new(_rejection_evidence_path(intent, directory), evidence)
+    except FileExistsError as exc:
+        raise PermissionError(
+            "definitive rejection evidence already exists for this intent"
+        ) from exc
+    return evidence
+
+
+def _terminal_marker_base(
+    payload: dict,
+    *,
+    intent_id: str,
+    state: str,
+    order_id: int,
+    recorded_at: str,
+    reconciled_at: str,
+) -> dict:
+    sender_client_id = payload.get("sender_client_id")
+    ticker = str(payload.get("authorized_ticker") or "").strip().upper()
+    side = str(payload.get("authorized_side") or "").strip().upper()
+    quantity = payload.get("authorized_quantity")
+    limit_price = payload.get("authorized_limit_price")
+    notional = payload.get("authorized_estimated_notional_jpy")
+    fingerprint = str(
+        payload.get("authorized_account_fingerprint") or ""
+    ).strip().lower()
+    endpoint_port = payload.get("authorized_endpoint_port")
+    if (
+        not isinstance(sender_client_id, int)
+        or isinstance(sender_client_id, bool)
+        or sender_client_id < 0
+    ):
+        raise PermissionError("terminal reconciliation sender client_id is invalid")
+    if not ticker or side not in {"BUY", "SELL"}:
+        raise PermissionError("terminal reconciliation authorization binding is invalid")
+    if (
+        not isinstance(quantity, int)
+        or isinstance(quantity, bool)
+        or quantity <= 0
+    ):
+        raise PermissionError("terminal reconciliation quantity binding is invalid")
+    for name, value in (("limit_price", limit_price), ("notional", notional)):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+            or value != value
+            or value in {float("inf"), float("-inf")}
+        ):
+            raise PermissionError(
+                f"terminal reconciliation {name} binding is invalid"
+            )
+    if (
+        len(fingerprint) != 64
+        or any(ch not in "0123456789abcdef" for ch in fingerprint)
+    ):
+        raise PermissionError("terminal reconciliation account binding is invalid")
+    if (
+        not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in {4001, 7496}
+    ):
+        raise PermissionError("terminal reconciliation endpoint binding is invalid")
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "intent_id": intent_id,
+        "nonce": str(payload.get("nonce") or ""),
+        "state": state,
+        "authorized_ticker": ticker,
+        "authorized_side": side,
+        "authorized_quantity": quantity,
+        "authorized_limit_price": float(limit_price),
+        "authorized_estimated_notional_jpy": float(notional),
+        "authorized_account_fingerprint": fingerprint,
+        "authorized_endpoint_port": endpoint_port,
+        "send_attempt_count": 1,
+        "send_attempt_recorded_at": recorded_at,
+        "terminal_recorded_at": reconciled_at,
+        "order_id": order_id,
+        "sender_client_id": sender_client_id,
+        "recovery_required": False,
+        "automatic_resend_allowed": False,
+        "automatic_cancel_allowed": False,
+        "automatic_modify_allowed": False,
+        "automatic_flatten_allowed": False,
+        "automatic_close_allowed": False,
+        "order_sent": False,
+        "live_order_sent": False,
+    }
+
+
+def mark_partial_reconciled(
+    intent_id: str,
+    *,
+    exec_ids: tuple[str, ...],
+    order_id: int,
+    perm_id: int,
+    filled_quantity: float,
+    commission_total: float,
+    commission_currency: str,
+    final_position_quantity: float,
+    directory: Path = DEFAULT_JOURNAL_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Persist a terminal, read-only reconciled partial-fill outcome.
+
+    This never authorizes or sends the unfilled remainder.
+    """
+    _require_attempt_marker(intent_id, directory)
+    payload = load_send_journal(intent_id, directory=directory)
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
+        raise PermissionError("partial reconciliation requires the recorded send attempt")
+    if payload.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
+        raise PermissionError("partial reconciliation is not valid in the current state")
+    if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
+        raise ValueError("order_id must be a positive exact int")
+    if not isinstance(perm_id, int) or isinstance(perm_id, bool) or perm_id <= 0:
+        raise ValueError("perm_id must be a positive exact int")
+    normalized_exec_ids = tuple(_safe(value, "exec_id") for value in exec_ids)
+    if not normalized_exec_ids or len(normalized_exec_ids) != len(set(normalized_exec_ids)):
+        raise ValueError("partial reconciliation requires unique execution ids")
+    for name, value in (
+        ("filled_quantity", filled_quantity),
+        ("commission_total", commission_total),
+        ("final_position_quantity", final_position_quantity),
+    ):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"{name} must be numeric")
+        if value != value or value in {float("inf"), float("-inf")}:
+            raise ValueError(f"{name} must be finite")
+    if float(filled_quantity) <= 0:
+        raise ValueError("filled_quantity must be positive")
+    currency = str(commission_currency or "").strip().upper()
+    if len(currency) != 3:
+        raise ValueError("commission_currency must be a three-letter code")
+    existing_order = payload.get("order_id")
+    existing_perm = payload.get("perm_id")
+    if existing_order is not None and existing_order != order_id:
+        raise PermissionError("partial reconciliation order_id conflicts with journal")
+    if existing_perm is not None and existing_perm != perm_id:
+        raise PermissionError("partial reconciliation perm_id conflicts with journal")
+
+    attempt_recorded_at = _validated_attempt_marker_timestamp(
+        payload,
+        intent_id=intent_id,
+        directory=directory,
+    )
+    reconciled_at = _now(now)
+    terminal_marker = _terminal_marker_base(
+        payload,
+        intent_id=intent_id,
+        state="PARTIAL_RECONCILED",
+        order_id=order_id,
+        recorded_at=attempt_recorded_at,
+        reconciled_at=reconciled_at,
+    )
+    terminal_marker.update(
+        perm_id=perm_id,
+        exec_ids=list(normalized_exec_ids),
+        filled_quantity=float(filled_quantity),
+        commission_total=float(commission_total),
+        commission_currency=currency,
+        final_position_quantity=float(final_position_quantity),
+    )
+    try:
+        _atomic_new(_terminal_path(intent_id, directory), terminal_marker)
+    except FileExistsError as exc:
+        raise PermissionError(
+            "terminal reconciliation marker already exists for this intent"
+        ) from exc
+
+    payload.update(
+        state="PARTIAL_RECONCILED",
+        order_id=order_id,
+        perm_id=perm_id,
+        exec_ids=list(normalized_exec_ids),
+        filled_quantity=float(filled_quantity),
+        commission_total=float(commission_total),
+        commission_currency=currency,
+        final_position_quantity=float(final_position_quantity),
+        reconciled_at=reconciled_at,
+        recovery_required=False,
+        automatic_resend_allowed=False,
+        automatic_cancel_allowed=False,
+        automatic_modify_allowed=False,
+        automatic_flatten_allowed=False,
+        automatic_close_allowed=False,
+    )
+    _atomic_replace(_path(intent_id, directory), payload)
+    return payload
+
+
+def _definitive_terminal_rejection_reason(value: object) -> str | None:
+    reason = str(value or "").strip()
+    for prefix in (
+        "broker orderStatus callback reported non-accepted status:",
+        "broker openOrder callback reported non-accepted status:",
+        "broker completedOrder callback reported terminal status:",
+    ):
+        if reason.startswith(prefix):
+            status = reason[len(prefix) :].strip()
+            return reason if status in {"Cancelled", "ApiCancelled"} else None
+    parts = reason.split(":", 2)
+    if (
+        len(parts) == 3
+        and parts[0].isdigit()
+        and parts[1].isdigit()
+        and int(parts[1]) in {201, 202}
+    ):
+        return reason
+    return None
+
+
+def mark_rejected_reconciled(
+    intent_id: str,
+    *,
+    rejection_reason: str,
+    order_id: int,
+    final_position_quantity: float,
+    perm_id: int | None = None,
+    directory: Path = DEFAULT_JOURNAL_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Persist a terminal rejected/no-fill outcome proven by read-only evidence."""
+    _require_attempt_marker(intent_id, directory)
+    payload = load_send_journal(intent_id, directory=directory)
+    if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
+        raise PermissionError("rejection reconciliation requires the recorded send attempt")
+    if payload.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
+        raise PermissionError("rejection reconciliation is not valid in the current state")
+    if not isinstance(order_id, int) or isinstance(order_id, bool) or order_id <= 0:
+        raise ValueError("order_id must be a positive exact int")
+    if perm_id is not None and (
+        not isinstance(perm_id, int)
+        or isinstance(perm_id, bool)
+        or perm_id <= 0
+    ):
+        raise ValueError("perm_id must be a positive exact int when provided")
+    reason = _definitive_terminal_rejection_reason(rejection_reason)
+    if reason is None:
+        raise ValueError("rejection_reason must prove a terminal broker rejection")
+    if not isinstance(final_position_quantity, (int, float)) or isinstance(
+        final_position_quantity, bool
+    ):
+        raise ValueError("final_position_quantity must be numeric")
+    if final_position_quantity != final_position_quantity or final_position_quantity in {
+        float("inf"),
+        float("-inf"),
+    }:
+        raise ValueError("final_position_quantity must be finite")
+    existing_order = payload.get("order_id")
+    if existing_order is not None and existing_order != order_id:
+        raise PermissionError("rejection reconciliation order_id conflicts with journal")
+    existing_perm = payload.get("perm_id")
+    if existing_perm is not None:
+        if (
+            not isinstance(existing_perm, int)
+            or isinstance(existing_perm, bool)
+            or existing_perm <= 0
+            or perm_id != existing_perm
+        ):
+            raise PermissionError(
+                "rejection reconciliation perm_id conflicts with journal"
+            )
+
+    try:
+        immutable_rejection = load_definitive_rejection_evidence(
+            intent_id,
+            directory=directory,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise PermissionError("definitive rejection evidence is unreadable") from exc
+    if not isinstance(immutable_rejection, dict):
+        raise PermissionError("definitive rejection evidence is missing")
+    if (
+        immutable_rejection.get("schema_version") != REPORT_SCHEMA_VERSION
+        or str(immutable_rejection.get("intent_id") or "") != intent_id
+        or str(immutable_rejection.get("nonce") or "") != str(payload.get("nonce") or "")
+        or str(immutable_rejection.get("ticker") or "").strip().upper()
+        != str(payload.get("authorized_ticker") or "").strip().upper()
+        or str(immutable_rejection.get("side") or "").strip().upper()
+        != str(payload.get("authorized_side") or "").strip().upper()
+        or immutable_rejection.get("quantity") != payload.get("authorized_quantity")
+        or isinstance(immutable_rejection.get("quantity"), bool)
+        or immutable_rejection.get("limit_price") != payload.get("authorized_limit_price")
+        or immutable_rejection.get("estimated_notional_jpy")
+        != payload.get("authorized_estimated_notional_jpy")
+        or str(immutable_rejection.get("account_fingerprint") or "").strip().lower()
+        != str(payload.get("authorized_account_fingerprint") or "").strip().lower()
+        or immutable_rejection.get("endpoint_port")
+        != payload.get("authorized_endpoint_port")
+        or isinstance(immutable_rejection.get("endpoint_port"), bool)
+        or immutable_rejection.get("order_id") != order_id
+        or immutable_rejection.get("perm_id") != perm_id
+        or immutable_rejection.get("sender_client_id") != payload.get("sender_client_id")
+        or immutable_rejection.get("rejection_reason") != reason
+        or immutable_rejection.get("automatic_resend_allowed") is not False
+        or immutable_rejection.get("automatic_cancel_allowed") is not False
+        or immutable_rejection.get("automatic_modify_allowed") is not False
+        or immutable_rejection.get("automatic_flatten_allowed") is not False
+        or immutable_rejection.get("automatic_close_allowed") is not False
+        or immutable_rejection.get("order_sent") is not False
+        or immutable_rejection.get("live_order_sent") is not False
+    ):
+        raise PermissionError("definitive rejection evidence binding is invalid")
+
+    attempt_recorded_at = _validated_attempt_marker_timestamp(
+        payload,
+        intent_id=intent_id,
+        directory=directory,
+    )
+    try:
+        rejection_attempt_time = datetime.fromisoformat(
+            str(immutable_rejection.get("send_attempt_recorded_at") or "")
+        )
+        rejection_recorded_time = datetime.fromisoformat(
+            str(immutable_rejection.get("rejection_recorded_at") or "")
+        )
+        expected_attempt_time = datetime.fromisoformat(attempt_recorded_at)
+    except ValueError as exc:
+        raise PermissionError("definitive rejection evidence timestamp is invalid") from exc
+    if any(
+        observed.tzinfo is None or observed.utcoffset() is None
+        for observed in (
+            rejection_attempt_time,
+            rejection_recorded_time,
+            expected_attempt_time,
+        )
+    ):
+        raise PermissionError(
+            "definitive rejection evidence timestamp is not timezone-aware"
+        )
+    rejection_attempt_time = rejection_attempt_time.astimezone(timezone.utc)
+    rejection_recorded_time = rejection_recorded_time.astimezone(timezone.utc)
+    expected_attempt_time = expected_attempt_time.astimezone(timezone.utc)
+    if (
+        rejection_attempt_time != expected_attempt_time
+        or rejection_recorded_time < expected_attempt_time
+    ):
+        raise PermissionError("definitive rejection evidence timestamp conflicts")
+    reconciled_at = _now(now)
+    terminal_marker = _terminal_marker_base(
+        payload,
+        intent_id=intent_id,
+        state="REJECTED_RECONCILED",
+        order_id=order_id,
+        recorded_at=attempt_recorded_at,
+        reconciled_at=reconciled_at,
+    )
+    terminal_marker.update(
+        perm_id=perm_id,
+        rejection_reason=reason,
+        final_position_quantity=float(final_position_quantity),
+    )
+    try:
+        _atomic_new(_terminal_path(intent_id, directory), terminal_marker)
+    except FileExistsError as exc:
+        raise PermissionError(
+            "terminal reconciliation marker already exists for this intent"
+        ) from exc
+
+    payload.update(
+        state="REJECTED_RECONCILED",
+        order_id=order_id,
+        perm_id=perm_id,
+        rejection_reason=reason,
+        final_position_quantity=float(final_position_quantity),
+        reconciled_at=reconciled_at,
+        recovery_required=False,
         automatic_resend_allowed=False,
         automatic_cancel_allowed=False,
         automatic_modify_allowed=False,
@@ -444,17 +1165,28 @@ def mark_postfill_proven(
     payload = load_send_journal(intent_id, directory=directory)
     if payload is None or not _is_exact_int(payload.get("send_attempt_count"), 1):
         raise PermissionError("post-fill proof requires the single recorded send attempt")
-    if payload.get("state") not in {"ORDER_ACKNOWLEDGED", "UNKNOWN"}:
+    if payload.get("state") not in {
+        "SEND_ATTEMPT_RECORDED",
+        "ORDER_ACKNOWLEDGED",
+        "UNKNOWN",
+    }:
         raise PermissionError("post-fill proof is not valid in the current state")
     execution = _safe(exec_id, "exec_id")
-    if int(order_id) <= 0 or int(perm_id) <= 0:
-        raise ValueError("order_id and perm_id must be positive")
+    if (
+        not isinstance(order_id, int)
+        or isinstance(order_id, bool)
+        or order_id <= 0
+        or not isinstance(perm_id, int)
+        or isinstance(perm_id, bool)
+        or perm_id <= 0
+    ):
+        raise ValueError("order_id and perm_id must be positive exact ints")
     existing_order = payload.get("order_id")
     existing_perm = payload.get("perm_id")
-    if existing_order not in {None, int(order_id)} or existing_perm not in {
-        None,
-        int(perm_id),
-    }:
+    if (
+        (existing_order is not None and existing_order != order_id)
+        or (existing_perm is not None and existing_perm != perm_id)
+    ):
         raise PermissionError("post-fill broker identity conflicts with acknowledged order")
     payload.update(
         state="POSTFILL_PROVEN",

@@ -28,8 +28,17 @@ def _journal(**overrides) -> dict:
         "nonce": NONCE,
         "state": "POSTFILL_PROVEN",
         "send_attempt_count": 1,
+        "send_attempt_recorded_at": _stamp(-1),
         "order_id": 77,
         "perm_id": 880077,
+        "sender_client_id": 681,
+        "authorized_ticker": "9432.T",
+        "authorized_side": "BUY",
+        "authorized_quantity": 100,
+        "authorized_limit_price": 400.0,
+        "authorized_estimated_notional_jpy": 40_000.0,
+        "authorized_account_fingerprint": FINGERPRINT,
+        "authorized_endpoint_port": 4001,
         "exec_id": EXEC_ID,
         "recovery_required": False,
         "automatic_resend_allowed": False,
@@ -48,7 +57,7 @@ def _attempt_marker(**overrides) -> dict:
         "intent_id": INTENT,
         "nonce": NONCE,
         "state": "SEND_ATTEMPT_RECORDED",
-        "recorded_at": _stamp(),
+        "recorded_at": _stamp(-1),
         "automatic_resend_allowed": False,
         "automatic_cancel_allowed": False,
         "automatic_modify_allowed": False,
@@ -63,7 +72,7 @@ def _global_attempt_marker(**overrides) -> dict:
     data = {
         "schema_version": 2,
         "intent_id": INTENT,
-        "recorded_at": _stamp(),
+        "recorded_at": _stamp(-1),
         "automatic_resend_allowed": False,
     }
     data.update(overrides)
@@ -72,7 +81,7 @@ def _global_attempt_marker(**overrides) -> dict:
 
 def _postfill(**overrides) -> dict:
     data = {
-        "schema_version": 2,
+        "schema_version": 3,
         "ready": True,
         "checked_at": _stamp(),
         "connection_mode": "LIVE_READ_ONLY",
@@ -83,6 +92,7 @@ def _postfill(**overrides) -> dict:
                 "exec_id": EXEC_ID,
                 "order_id": 77,
                 "perm_id": 880077,
+                "client_id": 681,
                 "symbol": "9432",
                 "sec_type": "STK",
                 "currency": "JPY",
@@ -207,6 +217,26 @@ def test_exact_complete_buy_evidence_is_complete():
     assert result.endpoint_port == 4001
 
 
+def test_full_fill_completion_requires_exact_attempt_timestamp_chain():
+    stale_global = _evaluate(
+        global_send_attempt_marker=_global_attempt_marker(recorded_at=_stamp(-2))
+    )
+    assert stale_global.complete is False
+    assert any(
+        "timestamps" in item and "irreversible attempt" in item
+        for item in stale_global.blockers
+    )
+
+    mismatched_journal = _evaluate(
+        send_journal=_journal(send_attempt_recorded_at=_stamp(-2))
+    )
+    assert mismatched_journal.complete is False
+    assert any(
+        "timestamps" in item and "irreversible attempt" in item
+        for item in mismatched_journal.blockers
+    )
+
+
 def test_split_fill_completion_aggregates_exec_ids_vwap_and_commissions():
     second = "0001.abc.02"
     result = _evaluate(
@@ -216,6 +246,7 @@ def test_split_fill_completion_aggregates_exec_ids_vwap_and_commissions():
                     "exec_id": EXEC_ID,
                     "order_id": 77,
                     "perm_id": 880077,
+                "client_id": 681,
                     "symbol": "9432",
                     "sec_type": "STK",
                     "currency": "JPY",
@@ -228,6 +259,7 @@ def test_split_fill_completion_aggregates_exec_ids_vwap_and_commissions():
                     "exec_id": second,
                     "order_id": 77,
                     "perm_id": 880077,
+                "client_id": 681,
                     "symbol": "9432",
                     "sec_type": "STK",
                     "currency": "JPY",
@@ -265,6 +297,7 @@ def test_split_fill_underfilled_or_overfilled_never_completes():
                 "exec_id": EXEC_ID,
                 "order_id": 77,
                 "perm_id": 880077,
+                "client_id": 681,
                 "symbol": "9432",
                 "sec_type": "STK",
                 "currency": "JPY",
@@ -277,6 +310,7 @@ def test_split_fill_underfilled_or_overfilled_never_completes():
                 "exec_id": second,
                 "order_id": 77,
                 "perm_id": 880077,
+                "client_id": 681,
                 "symbol": "9432",
                 "sec_type": "STK",
                 "currency": "JPY",
@@ -341,13 +375,14 @@ def test_journal_anchor_exec_id_must_exist_in_final_execution_set():
 def test_sell_completion_requires_final_flat_position():
     result = _evaluate(
         side="SELL",
-        send_journal=_journal(),
+        send_journal=_journal(authorized_side="SELL"),
         postfill_report=_postfill(
             executions=[
                 {
                     "exec_id": EXEC_ID,
                     "order_id": 77,
                     "perm_id": 880077,
+                "client_id": 681,
                     "symbol": "9432",
                     "sec_type": "STK",
                     "currency": "JPY",
@@ -1182,3 +1217,215 @@ def test_module_contains_no_broker_transport():
     )
     for token in forbidden:
         assert token not in source
+
+
+def test_completion_rejects_type_invalid_execution_broker_identity():
+    malformed = _postfill()
+    malformed["executions"] = [
+        {
+            "exec_id": EXEC_ID,
+            "order_id": "+77",
+            "perm_id": 880077,
+                "client_id": 681,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 100.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    ]
+
+    result = _evaluate(postfill_report=malformed)
+
+    assert result.complete is False
+    assert result.status == "BLOCKED"
+    assert any(
+        "type-invalid or non-positive broker identity" in blocker
+        for blocker in result.blockers
+    )
+
+
+def test_completion_rejects_type_invalid_journal_broker_identity():
+    result = _evaluate(
+        send_journal=_journal(order_id="77", perm_id=880077),
+    )
+
+    assert result.complete is False
+    assert result.status == "BLOCKED"
+    assert any(
+        "durable send journal is not in exact POSTFILL_PROVEN state" in blocker
+        for blocker in result.blockers
+    )
+
+
+
+def test_completion_ignores_unrelated_cross_client_order_id_reuse():
+    postfill = _postfill()
+    postfill["executions"].append(
+        {
+            "exec_id": "other-client-unrelated",
+            "order_id": 77,
+            "perm_id": 990088,
+            "client_id": 999,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    )
+
+    result = _evaluate(postfill_report=postfill)
+
+    assert result.complete is True
+    assert result.status == "COMPLETE"
+    assert result.exec_ids == (EXEC_ID,)
+
+
+def test_completion_rejects_cross_client_global_permid_collision():
+    postfill = _postfill()
+    postfill["executions"].append(
+        {
+            "exec_id": "other-client-conflict",
+            "order_id": 78,
+            "perm_id": 880077,
+            "client_id": 999,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    )
+
+    result = _evaluate(postfill_report=postfill)
+
+    assert result.complete is False
+    assert any(
+        "reuses the reconciled perm_id with a different client/order identity" in item
+        for item in result.blockers
+    )
+
+
+def test_completion_rejects_order_id_reused_with_different_perm_id():
+    postfill = _postfill()
+    postfill["executions"].append(
+        {
+            "exec_id": "conflict-order-reuse",
+            "order_id": 77,
+            "perm_id": 990088,
+                "client_id": 681,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    )
+
+    result = _evaluate(postfill_report=postfill)
+
+    assert result.complete is False
+    assert any(
+        "reuses the reconciled order_id with a different perm_id" in item
+        for item in result.blockers
+    )
+
+
+def test_completion_rejects_perm_id_reused_with_different_order_id():
+    postfill = _postfill()
+    postfill["executions"].append(
+        {
+            "exec_id": "conflict-perm-reuse",
+            "order_id": 78,
+            "perm_id": 880077,
+                "client_id": 681,
+            "symbol": "9432",
+            "sec_type": "STK",
+            "currency": "JPY",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 402.0,
+            "account_fingerprint": FINGERPRINT,
+        }
+    )
+
+    result = _evaluate(postfill_report=postfill)
+
+    assert result.complete is False
+    assert any(
+        "reuses the reconciled perm_id with a different client/order identity" in item
+        for item in result.blockers
+    )
+
+
+
+def test_completion_requires_paper_monitor_strictly_after_send_attempt():
+    equal = _evaluate(
+        send_attempt_marker=_attempt_marker(recorded_at=_stamp()),
+        paper_monitor_report=_paper(checked_at=_stamp()),
+    )
+    assert equal.complete is False
+    assert equal.evidence_fresh is False
+    assert any(
+        "Paper safety monitor evidence does not strictly postdate the send attempt"
+        in item
+        for item in equal.blockers
+    )
+
+    before = _evaluate(
+        send_attempt_marker=_attempt_marker(recorded_at=_stamp()),
+        paper_monitor_report=_paper(checked_at=_stamp(-1)),
+    )
+    assert before.complete is False
+    assert before.evidence_fresh is False
+    assert any(
+        "Paper safety monitor evidence does not strictly postdate the send attempt"
+        in item
+        for item in before.blockers
+    )
+
+
+def test_completion_accepts_fresh_safe_paper_monitor_after_send_attempt():
+    result = _evaluate(
+        send_attempt_marker=_attempt_marker(recorded_at=_stamp(-1)),
+        paper_monitor_report=_paper(checked_at=_stamp()),
+    )
+    assert result.complete is True
+    assert result.paper_monitor_safe is True
+    assert result.evidence_fresh is True
+
+
+
+def test_completion_rejects_request_that_differs_from_consumed_authorization():
+    wrong_ticker = _evaluate(ticker="AAPL")
+    assert wrong_ticker.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_ticker.blockers)
+
+    wrong_side = _evaluate(side="SELL")
+    assert wrong_side.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_side.blockers)
+
+    wrong_quantity = _evaluate(quantity=99)
+    assert wrong_quantity.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_quantity.blockers)
+
+    wrong_account = _evaluate(expected_account_fingerprint="b" * 64)
+    assert wrong_account.complete is False
+    assert any("POSTFILL_PROVEN" in item for item in wrong_account.blockers)
+
+
+def test_completion_rejects_endpoint_different_from_consumed_authorization():
+    result = _evaluate(
+        send_journal=_journal(authorized_endpoint_port=7496),
+    )
+    assert result.complete is False
+    assert any("endpoint does not match" in item for item in result.blockers)

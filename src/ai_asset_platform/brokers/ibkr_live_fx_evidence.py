@@ -41,6 +41,19 @@ from ai_asset_platform.brokers.ibkr_thread_runner import run_ibapi_message_loop_
 
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_fx_evidence_latest.json")
 REPORT_SCHEMA_VERSION = 1
+_VALID_LIVE_ENDPOINT_PORTS = {LIVE_GATEWAY_PORT, LIVE_TWS_PORT}
+
+
+def _candidate_live_ports(endpoint_port: int | None) -> tuple[int, ...]:
+    if endpoint_port is None:
+        return (LIVE_GATEWAY_PORT, LIVE_TWS_PORT)
+    if (
+        not isinstance(endpoint_port, int)
+        or isinstance(endpoint_port, bool)
+        or endpoint_port not in _VALID_LIVE_ENDPOINT_PORTS
+    ):
+        raise ValueError("endpoint_port must identify an audited Live endpoint")
+    return (endpoint_port,)
 
 
 def _blocked(base: str, quote: str, reason: str) -> IbkrFxSnapshotResult:
@@ -73,6 +86,7 @@ def _request_live_market_snapshot(
     quote_currency: str,
     market_data_type: int,
     timeout: float,
+    endpoint_port: int | None = None,
 ) -> IbkrFxSnapshotResult:
     contract = build_fx_discovery_contract(
         base_currency=base_currency,
@@ -87,7 +101,7 @@ def _request_live_market_snapshot(
     collected: list[str] = []
     offset = {1: 560, 3: 563, 4: 564}.get(int(market_data_type), 565)
 
-    for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
+    for index, port in enumerate(_candidate_live_ports(endpoint_port), start=1):
         probe = _FxSnapshotProbe()
         try:
             try:
@@ -148,6 +162,7 @@ def _request_live_account_fx(
     quote_currency: str,
     timeout: float,
     confirmation: str,
+    endpoint_port: int | None = None,
 ) -> IbkrFxSnapshotResult:
     """Read ExchangeRate only when its quote semantics are proven for this account.
 
@@ -158,6 +173,7 @@ def _request_live_account_fx(
     account_snapshot = preview_ibkr_live_readonly_account_snapshot(
         timeout=timeout,
         confirmation=confirmation,
+        endpoint_port=endpoint_port,
     )
     observed_account_base = str(account_snapshot.base_currency or "").strip().upper()
     snapshot_errors = list(account_snapshot.errors)
@@ -199,7 +215,7 @@ def _request_live_account_fx(
         )
 
     collected: list[str] = snapshot_errors
-    for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
+    for index, port in enumerate(_candidate_live_ports(endpoint_port), start=1):
         probe = _AccountFxProbe(currency=base_currency)
         try:
             try:
@@ -266,6 +282,7 @@ def resolve_ibkr_live_fx_evidence(
     quote_currency: str,
     timeout: float = 10.0,
     confirmation: str | None = None,
+    endpoint_port: int | None = None,
 ) -> IbkrFxSnapshotResult:
     """Resolve Live-session FX evidence without any order API request."""
     if timeout <= 0:
@@ -300,6 +317,7 @@ def resolve_ibkr_live_fx_evidence(
             quote_currency=quote,
             market_data_type=market_data_type,
             timeout=timeout,
+            endpoint_port=endpoint_port,
         )
         if market.ready:
             return IbkrFxSnapshotResult(
@@ -322,6 +340,7 @@ def resolve_ibkr_live_fx_evidence(
         quote_currency=quote,
         timeout=timeout,
         confirmation=supplied,
+        endpoint_port=endpoint_port,
     )
     return IbkrFxSnapshotResult(
         connected=account.connected,

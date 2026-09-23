@@ -11,6 +11,7 @@ from ai_asset_platform.execution.live_pilot_one_shot_authorization import (
     authorization_consumed,
     consume_live_pilot_authorization,
     issue_live_pilot_authorization,
+    load_live_pilot_authorization_binding,
 )
 
 
@@ -72,10 +73,72 @@ def test_authorization_binds_exact_pilot_and_is_single_use(tmp_path: Path):
 
     consumed = _consume(tmp_path, authorization.nonce)
     assert consumed["status"] == "CONSUMED"
+    assert consumed["ticker"] == "AAPL"
+    assert consumed["side"] == "BUY"
+    assert consumed["quantity"] == 1
+    assert consumed["limit_price"] == 250.0
+    assert consumed["estimated_notional_jpy"] == 37_500.0
+    assert consumed["account_fingerprint"] == FINGERPRINT
+    assert consumed["endpoint_port"] == 4001
     assert authorization_consumed(authorization.nonce, authorization_dir=tmp_path) is True
 
     with pytest.raises(PermissionError, match="already been consumed"):
         _consume(tmp_path, authorization.nonce)
+
+
+def test_active_authorization_binding_can_be_read_without_consuming(tmp_path: Path):
+    authorization = _issue(tmp_path)
+
+    observed = load_live_pilot_authorization_binding(
+        nonce=authorization.nonce,
+        intent_id="live-pilot:AAPL:BUY:1:20260907",
+        ticker="AAPL",
+        side="BUY",
+        quantity=1,
+        limit_price=250.0,
+        estimated_notional_jpy=37_500.0,
+        account_fingerprint=FINGERPRINT,
+        authorization_dir=tmp_path,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert observed["endpoint_port"] == 4001
+    assert observed["status"] == "AUTHORIZED_ONCE"
+    assert authorization_consumed(authorization.nonce, authorization_dir=tmp_path) is False
+
+
+def test_active_authorization_binding_reader_fails_closed(tmp_path: Path):
+    authorization = _issue(tmp_path, ttl_seconds=10.0)
+
+    with pytest.raises(PermissionError, match="limit_price"):
+        load_live_pilot_authorization_binding(
+            nonce=authorization.nonce,
+            intent_id="live-pilot:AAPL:BUY:1:20260907",
+            ticker="AAPL",
+            side="BUY",
+            quantity=1,
+            limit_price=249.0,
+            estimated_notional_jpy=37_500.0,
+            account_fingerprint=FINGERPRINT,
+            authorization_dir=tmp_path,
+            now=NOW + timedelta(seconds=1),
+        )
+
+    with pytest.raises(PermissionError, match="expired"):
+        load_live_pilot_authorization_binding(
+            nonce=authorization.nonce,
+            intent_id="live-pilot:AAPL:BUY:1:20260907",
+            ticker="AAPL",
+            side="BUY",
+            quantity=1,
+            limit_price=250.0,
+            estimated_notional_jpy=37_500.0,
+            account_fingerprint=FINGERPRINT,
+            authorization_dir=tmp_path,
+            now=NOW + timedelta(seconds=11),
+        )
+
+    assert authorization_consumed(authorization.nonce, authorization_dir=tmp_path) is False
 
 
 def test_mismatched_limit_price_fails_without_consuming(tmp_path: Path):

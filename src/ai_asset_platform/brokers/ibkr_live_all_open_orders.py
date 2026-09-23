@@ -87,7 +87,10 @@ def _blocked(reason: str) -> IbkrLiveAllOpenOrdersSnapshot:
 
 
 def preview_ibkr_live_all_open_orders(
-    *, timeout: float = 10.0, confirmation: str | None = None,
+    *,
+    timeout: float = 10.0,
+    confirmation: str | None = None,
+    endpoint_port: int | None = None,
 ) -> IbkrLiveAllOpenOrdersSnapshot:
     """Collect all currently open Live orders without taking broker action."""
     if timeout <= 0:
@@ -100,8 +103,12 @@ def preview_ibkr_live_all_open_orders(
     if supplied != CONFIRMATION_VALUE:
         return _blocked("exact Live read-only confirmation is missing")
 
+    if endpoint_port is not None and endpoint_port not in {LIVE_GATEWAY_PORT, LIVE_TWS_PORT}:
+        raise ValueError("endpoint_port must identify an audited Live endpoint")
+
+    ports = (endpoint_port,) if endpoint_port is not None else (LIVE_GATEWAY_PORT, LIVE_TWS_PORT)
     collected: list[str] = []
-    for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
+    for index, port in enumerate(ports, start=1):
         probe = _LiveAllOpenOrdersProbe()
         try:
             try:

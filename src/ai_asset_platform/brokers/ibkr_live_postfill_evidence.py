@@ -37,7 +37,7 @@ from ai_asset_platform.execution.live_pilot_same_run_preflight import (
 )
 
 DEFAULT_REPORT_PATH = Path("results/ibkr_live_postfill_evidence_latest.json")
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,7 @@ class LiveExecutionEvidence:
     exec_id: str
     order_id: int
     perm_id: int
+    client_id: int
     symbol: str
     sec_type: str
     currency: str
@@ -201,11 +202,27 @@ def _execution_row(contract, execution, account_id: str) -> LiveExecutionEvidenc
         return None
     raw_side = str(getattr(execution, "side", "") or "").strip().upper()
     side = {"BOT": "BUY", "SLD": "SELL"}.get(raw_side, raw_side)
+    raw_order_id = getattr(execution, "orderId", None)
+    raw_perm_id = getattr(execution, "permId", None)
+    raw_client_id = getattr(execution, "clientId", None)
+    if (
+        not isinstance(raw_order_id, int)
+        or isinstance(raw_order_id, bool)
+        or raw_order_id <= 0
+        or not isinstance(raw_perm_id, int)
+        or isinstance(raw_perm_id, bool)
+        or raw_perm_id <= 0
+        or not isinstance(raw_client_id, int)
+        or isinstance(raw_client_id, bool)
+        or raw_client_id < 0
+    ):
+        return None
+    order_id = raw_order_id
+    perm_id = raw_perm_id
+    client_id = raw_client_id
     try:
         quantity = float(getattr(execution, "shares", 0) or 0)
         price = float(getattr(execution, "price", 0) or 0)
-        order_id = int(getattr(execution, "orderId", 0) or 0)
-        perm_id = int(getattr(execution, "permId", 0) or 0)
     except (TypeError, ValueError):
         return None
     exec_id = str(getattr(execution, "execId", "") or "").strip()
@@ -222,6 +239,7 @@ def _execution_row(contract, execution, account_id: str) -> LiveExecutionEvidenc
         exec_id=exec_id,
         order_id=order_id,
         perm_id=perm_id,
+        client_id=client_id,
         symbol=str(getattr(contract, "symbol", "") or "").strip().upper(),
         sec_type=str(getattr(contract, "secType", "") or "").strip().upper(),
         currency=str(getattr(contract, "currency", "") or "").strip().upper(),
@@ -234,16 +252,31 @@ def _execution_row(contract, execution, account_id: str) -> LiveExecutionEvidenc
 
 
 def preview_ibkr_live_postfill_snapshot(
-    *, timeout: float = 10.0, settle_seconds: float = 0.25, confirmation: str | None = None,
+    *,
+    timeout: float = 10.0,
+    settle_seconds: float = 0.25,
+    confirmation: str | None = None,
+    expected_client_id: int | None = None,
+    endpoint_port: int | None = None,
 ) -> IbkrLivePostFillSnapshot:
     supplied = str(confirmation).strip() if confirmation is not None else os.getenv(CONFIRMATION_ENV, "").strip()
     if supplied != CONFIRMATION_VALUE:
         return IbkrLivePostFillSnapshot(False, False, None, None, blocked_reason="exact Live read-only confirmation is missing")
     if timeout <= 0 or settle_seconds < 0 or settle_seconds > 2:
         raise ValueError("invalid timeout or settle_seconds")
+    if expected_client_id is not None and (
+        not isinstance(expected_client_id, int)
+        or isinstance(expected_client_id, bool)
+        or expected_client_id < 0
+    ):
+        raise ValueError("expected_client_id must be a non-negative exact int")
 
+    if endpoint_port is not None and endpoint_port not in {LIVE_GATEWAY_PORT, LIVE_TWS_PORT}:
+        raise ValueError("endpoint_port must identify an audited Live endpoint")
+
+    ports = (endpoint_port,) if endpoint_port is not None else (LIVE_GATEWAY_PORT, LIVE_TWS_PORT)
     errors: list[str] = []
-    for index, port in enumerate((LIVE_GATEWAY_PORT, LIVE_TWS_PORT), start=1):
+    for index, port in enumerate(ports, start=1):
         probe = _LivePostFillProbe()
         try:
             try:
@@ -261,20 +294,42 @@ def preview_ibkr_live_postfill_snapshot(
                 errors.append(f"{port}: expected exactly one managed Live account")
                 continue
             account_id = probe.accounts[0]
-            probe.reqExecutions(1997, ExecutionFilter())
+            execution_filter = ExecutionFilter()
+            # Do not filter by API client at the broker. IBKR order IDs are
+            # client-scoped, but permIds are broker-global. Cross-client rows
+            # must remain visible so downstream reconciliation can detect a
+            # conflicting claim on the selected permId.
+            probe.reqExecutions(1997, execution_filter)
             if not probe.executions_ready.wait(timeout) or probe.fatal:
                 errors.extend(probe.errors)
                 continue
             if settle_seconds:
                 time.sleep(settle_seconds)
-            rows = [
-                row
-                for contract, execution in probe.raw_executions
-                if (row := _execution_row(contract, execution, account_id)) is not None
-            ]
-            # Keep every row. Duplicate/conflicting exec_id or commission evidence
-            # must remain visible so reconciliation can fail closed rather than
-            # silently overwriting one broker callback with another.
+            rows: list[LiveExecutionEvidence] = []
+            invalid_execution_evidence = False
+            for contract, execution in probe.raw_executions:
+                raw_account = str(
+                    getattr(execution, "acctNumber", "") or ""
+                ).strip()
+                if raw_account != account_id:
+                    invalid_execution_evidence = True
+                    continue
+                row = _execution_row(contract, execution, account_id)
+                if row is None:
+                    invalid_execution_evidence = True
+                    continue
+                rows.append(row)
+
+            # Never silently discard malformed evidence for the managed account.
+            # Once all-client execution collection is enabled, a malformed row
+            # could otherwise hide a broker-global permId conflict.
+            blocked_reason = (
+                "malformed Live execution evidence"
+                if invalid_execution_evidence
+                else None
+            )
+            # Keep every valid row. Duplicate/conflicting exec_id or commission
+            # evidence must remain visible so reconciliation can fail closed.
             return IbkrLivePostFillSnapshot(
                 attempted=True,
                 connected=True,
@@ -282,6 +337,7 @@ def preview_ibkr_live_postfill_snapshot(
                 account_fingerprint=_account_fingerprint(account_id),
                 executions=tuple(rows),
                 commissions=tuple(probe.commissions),
+                blocked_reason=blocked_reason,
                 errors=tuple(errors + probe.errors),
             )
         finally:
@@ -292,8 +348,14 @@ def preview_ibkr_live_postfill_snapshot(
 
 def match_live_postfill(
     snapshot: IbkrLivePostFillSnapshot,
-    *, expected_account_fingerprint: str, ticker: str, side: str, quantity: int,
-    order_id: int, perm_id: int,
+    *,
+    expected_account_fingerprint: str,
+    ticker: str,
+    side: str,
+    quantity: int,
+    order_id: int,
+    perm_id: int,
+    expected_client_id: int,
 ) -> LivePostFillMatch:
     blockers: list[str] = []
     if not snapshot.ready:
@@ -305,6 +367,12 @@ def match_live_postfill(
     symbol = "9432" if str(ticker).strip().upper() == "9432.T" else str(ticker).strip().upper()
     normalized_side = str(side).strip().upper()
     expected_quantity = _positive_decimal(quantity)
+    if (
+        not isinstance(expected_client_id, int)
+        or isinstance(expected_client_id, bool)
+        or expected_client_id < 0
+    ):
+        blockers.append("expected_client_id must be a non-negative exact int")
     if normalized_side not in {"BUY", "SELL"}:
         blockers.append("side must be BUY or SELL")
     if expected_quantity is None:
@@ -318,6 +386,7 @@ def match_live_postfill(
         and row.side == normalized_side
         and row.order_id == int(order_id)
         and row.perm_id == int(perm_id)
+        and row.client_id == expected_client_id
         and row.account_fingerprint == expected_fp
     ]
     if not matches:

@@ -107,6 +107,16 @@ def _fresh(report: dict | None, *, now: datetime, max_age_seconds: float) -> boo
     return 0.0 <= age <= max_age_seconds
 
 
+def _parse_aware_timestamp(value: object) -> datetime | None:
+    try:
+        observed = datetime.fromisoformat(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        return None
+    return observed.astimezone(timezone.utc)
+
+
 def _finite(value: object) -> float | None:
     try:
         parsed = float(value)
@@ -162,6 +172,18 @@ def _is_exact_int(value: object, expected: int) -> bool:
 
 def _is_exact_zero_int(value: object) -> bool:
     return _is_exact_int(value, 0)
+
+
+def _positive_exact_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
+def _nonnegative_exact_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    return value
 
 
 def _paper_safe(report: dict | None) -> bool:
@@ -256,6 +278,7 @@ def _execution_identity(row: dict) -> tuple:
     return (
         _lenient_int(row.get("order_id")),
         _lenient_int(row.get("perm_id")),
+        _lenient_int(row.get("client_id")),
         str(row.get("symbol") or "").strip().upper(),
         str(row.get("sec_type") or "").strip().upper(),
         str(row.get("side") or "").strip().upper(),
@@ -339,14 +362,21 @@ def evaluate_live_pilot_completion(
 
     order_id: int | None = None
     perm_id: int | None = None
+    sender_client_id: int | None = None
+    authorized_endpoint_port: int | None = None
     exec_id: str | None = None
     journal_ready = False
     if isinstance(send_journal, dict):
-        try:
-            order_id = int(send_journal.get("order_id"))
-            perm_id = int(send_journal.get("perm_id"))
-        except (TypeError, ValueError):
-            order_id = perm_id = None
+        order_id = _positive_exact_int(send_journal.get("order_id"))
+        perm_id = _positive_exact_int(send_journal.get("perm_id"))
+        sender_client_id = _nonnegative_exact_int(send_journal.get("sender_client_id"))
+        raw_authorized_endpoint = send_journal.get("authorized_endpoint_port")
+        if (
+            isinstance(raw_authorized_endpoint, int)
+            and not isinstance(raw_authorized_endpoint, bool)
+            and raw_authorized_endpoint in _VALID_LIVE_PORTS
+        ):
+            authorized_endpoint_port = raw_authorized_endpoint
         exec_id = str(send_journal.get("exec_id") or "").strip() or None
         journal_ready = bool(
             _is_exact_int(send_journal.get("schema_version"), _REQUIRED_SEND_JOURNAL_SCHEMA_VERSION)
@@ -357,6 +387,19 @@ def evaluate_live_pilot_completion(
             and order_id > 0
             and perm_id is not None
             and perm_id > 0
+            and sender_client_id is not None
+            and authorized_endpoint_port is not None
+            and str(send_journal.get("authorized_ticker") or "").strip().upper()
+            == normalized_ticker
+            and str(send_journal.get("authorized_side") or "").strip().upper()
+            == normalized_side
+            and _is_exact_int(
+                send_journal.get("authorized_quantity"), normalized_quantity
+            )
+            and str(
+                send_journal.get("authorized_account_fingerprint") or ""
+            ).strip().lower()
+            == fingerprint
             and exec_id
             and send_journal.get("recovery_required") is False
             and send_journal.get("automatic_resend_allowed") is False
@@ -413,11 +456,73 @@ def evaluate_live_pilot_completion(
             "different intent, or inconsistent"
         )
 
+    # All three durable records are created from the same send-attempt clock
+    # sample. Exact timestamp equality proves the per-intent marker, campaign
+    # marker, and mutable journal all refer to that same irreversible attempt.
+    marker_attempt_time = _parse_aware_timestamp(
+        send_attempt_marker.get("recorded_at")
+        if isinstance(send_attempt_marker, dict)
+        else None
+    )
+    global_attempt_time = _parse_aware_timestamp(
+        global_send_attempt_marker.get("recorded_at")
+        if isinstance(global_send_attempt_marker, dict)
+        else None
+    )
+    journal_attempt_time = _parse_aware_timestamp(
+        send_journal.get("send_attempt_recorded_at")
+        if isinstance(send_journal, dict)
+        else None
+    )
+    attempt_timestamp_chain_ready = bool(
+        marker_attempt_time is not None
+        and global_attempt_time is not None
+        and journal_attempt_time is not None
+        and marker_attempt_time == global_attempt_time == journal_attempt_time
+    )
+    if not attempt_timestamp_chain_ready:
+        blockers.append(
+            "send-attempt marker timestamps do not identify the same irreversible attempt"
+        )
+
     postfill_fresh = _fresh(postfill_report, now=current, max_age_seconds=max_age)
     account_fresh = _fresh(final_account_report, now=current, max_age_seconds=max_age)
     open_orders_fresh = _fresh(final_open_orders_report, now=current, max_age_seconds=max_age)
     paper_fresh = _fresh(paper_monitor_report, now=current, max_age_seconds=max_age)
-    evidence_fresh = all((postfill_fresh, account_fresh, open_orders_fresh, paper_fresh))
+
+    # Completion must use Paper safety evidence collected after the irreversible
+    # send-attempt marker, not merely a still-fresh pre-send monitor snapshot.
+    # The marker/report timestamps are persisted at second precision, so equal
+    # timestamps remain ambiguous and fail closed.
+    attempt_recorded_at = _parse_aware_timestamp(
+        send_attempt_marker.get("recorded_at")
+        if isinstance(send_attempt_marker, dict)
+        else None
+    )
+    paper_checked_at = _parse_aware_timestamp(
+        paper_monitor_report.get("checked_at")
+        if isinstance(paper_monitor_report, dict)
+        else None
+    )
+    paper_after_send_attempt = bool(
+        attempt_recorded_at is not None
+        and paper_checked_at is not None
+        and paper_checked_at > attempt_recorded_at
+    )
+    if not paper_after_send_attempt:
+        blockers.append(
+            "Paper safety monitor evidence does not strictly postdate the send attempt"
+        )
+
+    evidence_fresh = all(
+        (
+            postfill_fresh,
+            account_fresh,
+            open_orders_fresh,
+            paper_fresh,
+            paper_after_send_attempt,
+        )
+    )
     if not postfill_fresh:
         blockers.append("Live post-fill evidence is missing or stale")
     if not account_fresh:
@@ -463,6 +568,10 @@ def evaluate_live_pilot_completion(
     endpoint_port = ports[0] if len(ports) == 3 and len(set(ports)) == 1 else None
     if endpoint_port is None:
         blockers.append("final Live evidence is not bound to one Live endpoint")
+    elif authorized_endpoint_port is None or endpoint_port != authorized_endpoint_port:
+        blockers.append(
+            "final Live evidence endpoint does not match the consumed authorization"
+        )
 
     for label, report in (
         ("post-fill", postfill_report),
@@ -493,6 +602,7 @@ def evaluate_live_pilot_completion(
         expected_identity = (
             order_id,
             perm_id,
+            sender_client_id,
             expected_symbol,
             "STK",
             normalized_side,
@@ -500,14 +610,38 @@ def evaluate_live_pilot_completion(
         )
         for row in executions:
             if not isinstance(row, dict):
+                blockers.append("final Live executions contain a non-object row")
                 continue
-            try:
-                row_order = int(row.get("order_id"))
-                row_perm = int(row.get("perm_id"))
-            except (TypeError, ValueError):
+            row_order = _positive_exact_int(row.get("order_id"))
+            row_perm = _positive_exact_int(row.get("perm_id"))
+            row_client = _nonnegative_exact_int(row.get("client_id"))
+            if row_order is None or row_perm is None or row_client is None:
+                blockers.append(
+                    "final Live execution contains type-invalid or non-positive broker identity"
+                )
                 continue
+            # orderId is scoped to the API client; the same numeric orderId
+            # from another client is unrelated unless it also claims the
+            # selected broker-global permId.
             if (
-                row_order == order_id
+                row_client == sender_client_id
+                and row_order == order_id
+                and row_perm != perm_id
+            ):
+                blockers.append(
+                    "final Live execution reuses the reconciled order_id with a different perm_id"
+                )
+            # permId is broker-global. Any other client or order claiming the
+            # selected permId is contradictory evidence.
+            if row_perm == perm_id and (
+                row_client != sender_client_id or row_order != order_id
+            ):
+                blockers.append(
+                    "final Live execution reuses the reconciled perm_id with a different client/order identity"
+                )
+            if (
+                row_client == sender_client_id
+                and row_order == order_id
                 and row_perm == perm_id
                 and _execution_identity(row) != expected_identity
             ):
@@ -518,6 +652,7 @@ def evaluate_live_pilot_completion(
             if (
                 row_order == order_id
                 and row_perm == perm_id
+                and row_client == sender_client_id
                 and str(row.get("symbol") or "").strip().upper() == expected_symbol
                 and str(row.get("sec_type") or "").strip().upper() == "STK"
                 and str(row.get("side") or "").strip().upper() == normalized_side
