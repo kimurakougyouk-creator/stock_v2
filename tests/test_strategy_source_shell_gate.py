@@ -179,3 +179,46 @@ def test_promotion_wrapper_invalidates_stale_pass_when_shell_gate_blocks(tmp_pat
     assert payload["promotion_policy_passed"] is False
     assert payload["normal_live_strategy_deployment_allowed"] is False
     assert payload["live_trading"] == "PROHIBITED"
+
+
+def test_strategy_operational_wrappers_disable_python_bytecode_before_python_tools():
+    root = Path(__file__).parents[1]
+    for name in (
+        "strategy_promotion_policy_once.sh",
+        "ibkr_strategy_profitability_evidence_once.sh",
+        "ibkr_verified_paper_runtime_once.sh",
+    ):
+        source = (root / name).read_text(encoding="utf-8")
+        export_index = source.find("export PYTHONDONTWRITEBYTECODE=1")
+        assert export_index >= 0, name
+        for marker in (
+            "source .venv/bin/activate",
+            "bash scripts/ensure_exact_checkout_runtime.sh",
+            "pytest -q",
+            "python -m ",
+        ):
+            marker_index = source.find(marker)
+            if marker_index >= 0:
+                assert export_index < marker_index, (name, marker)
+
+
+def test_python_dont_write_bytecode_environment_prevents_import_cache(tmp_path: Path):
+    package = tmp_path / "samplepkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("VALUE = 7\n", encoding="utf-8")
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONPATH"] = str(tmp_path)
+    completed = subprocess.run(
+        [
+            "python",
+            "-c",
+            "import samplepkg; assert samplepkg.VALUE == 7",
+        ],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert not (package / "__pycache__").exists()
