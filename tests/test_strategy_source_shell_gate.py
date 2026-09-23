@@ -71,6 +71,37 @@ def test_shell_gate_blocks_tracked_edit_before_python(tmp_path: Path):
 
 
 
+
+
+def test_shell_gate_blocks_tracked_root_startup_module_edit(tmp_path: Path):
+    root = _repo(tmp_path)
+    dashboard = root / "dashboard.py"
+    dashboard.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(root, "add", "dashboard.py")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "root startup fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    dashboard.write_text("VALUE = 2\n", encoding="utf-8")
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "tracked or untracked strategy source changes" in result.stderr
+
+
 def test_shell_gate_blocks_tracked_runtime_binding_verifier_edit(tmp_path: Path):
     root = _repo(tmp_path)
     verifier = root / "scripts" / "verify_exact_checkout_import.py"
@@ -277,17 +308,37 @@ def test_start_sh_verifies_exact_checkout_before_repository_python():
     source = (root / "start.sh").read_text(encoding="utf-8")
 
     activate_index = source.index("source .venv/bin/activate")
-    unset_index = source.index("unset PYTHONPATH")
-    verify_index = source.index("bash scripts/ensure_exact_checkout_runtime.sh")
+    first_unset_index = source.index("unset PYTHONPATH PYTHONHOME")
+    first_verify_index = source.index("bash scripts/ensure_exact_checkout_runtime.sh")
 
-    assert activate_index < unset_index < verify_index
+    assert activate_index < first_unset_index < first_verify_index
+
+    env_source_index = source.index("source .env")
+    restore_path_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', env_source_index)
+    second_unset_index = source.index("unset PYTHONPATH PYTHONHOME", env_source_index)
+    second_verify_index = source.index(
+        "bash scripts/ensure_exact_checkout_runtime.sh",
+        first_verify_index + 1,
+    )
+
+    assert env_source_index < restore_path_index < second_unset_index < second_verify_index
 
     for marker in (
-        "python setup_wizard.py",
         "python main_simple_step8.py",
         "python -m signal_runner",
         "python -m dashboard",
         "python -m candidate_dashboard",
         "python -m change_tracker",
     ):
-        assert verify_index < source.index(marker), marker
+        assert second_verify_index < source.index(marker), marker
+
+
+def test_start_sh_restores_trusted_path_after_env_source():
+    root = Path(__file__).parents[1]
+    source = (root / "start.sh").read_text(encoding="utf-8")
+
+    capture_index = source.index('TRUSTED_PYTHON_PATH="$PATH"')
+    env_index = source.index("source .env")
+    restore_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', env_index)
+
+    assert capture_index < env_index < restore_index
