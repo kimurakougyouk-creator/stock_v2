@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="${AI_ASSET_PLATFORM_ROOT:-$HOME/stock_v2_latest}"
 cd "$ROOT"
 
+# Keep the attested source tree bytecode-free for every subsequent Python process.
+export PYTHONDONTWRITEBYTECODE=1
+
 persist_shell_blocked_decision() {
   local report="results/strategy_promotion_decision_latest.json"
   local temporary="${report}.tmp"
