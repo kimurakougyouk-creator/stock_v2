@@ -20,6 +20,11 @@ import subprocess
 from typing import Any
 
 from ai_asset_platform.reports.performance import calculate_performance
+from ai_asset_platform.reports.strategy_profitability_evidence import (
+    audit_strategy_profitability_evidence,
+    evidence_record as profitability_evidence_record,
+    persist_strategy_profitability_evidence,
+)
 from ai_asset_platform.reports.strategy_source_attestation import (
     attest_strategy_source,
 )
@@ -685,11 +690,21 @@ def persist_strategy_promotion_decision(
 def main() -> int:
     try:
         policy = load_strategy_promotion_policy(DEFAULT_POLICY_PATH)
-        profitability = _load_json_object(
-            DEFAULT_PROFITABILITY_REPORT_PATH,
-            label="strategy profitability report",
-        )
         source_sha = _git_head()
+
+        # Never trust the mutable ignored profitability JSON as the authority
+        # for promotion. Rebuild it from the raw Paper fill and commission
+        # ledgers in this same attested source run, persist that canonical
+        # artifact, and evaluate the exact in-memory record just generated.
+        profitability_result = audit_strategy_profitability_evidence()
+        persist_strategy_profitability_evidence(
+            profitability_result,
+            source_sha=source_sha,
+        )
+        profitability = profitability_evidence_record(
+            profitability_result,
+            source_sha=source_sha,
+        )
         decision = evaluate_strategy_promotion(
             profitability,
             policy,
