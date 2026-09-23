@@ -23,6 +23,21 @@ def _repository_root() -> Path:
     return root
 
 
+def _verify_matching_venv_interpreter(root: Path) -> None:
+    venv_python = root / ".venv" / "bin" / "python"
+    if not venv_python.exists():
+        _fail("virtualenv Python is missing")
+    try:
+        matches = venv_python.samefile(Path(sys.executable))
+    except OSError:
+        _fail("virtualenv Python identity could not be verified")
+    if not matches:
+        _fail(
+            "virtualenv Python does not match the trusted bootstrap interpreter; "
+            "recreate .venv with /usr/bin/python3"
+        )
+
+
 def _venv_site_packages(root: Path) -> Path:
     candidates = {
         path.resolve()
@@ -71,6 +86,7 @@ def main() -> int:
         _fail("bootstrap must be launched with -I -S")
     root = _repository_root()
     os.chdir(root)
+    _verify_matching_venv_interpreter(root)
     site_packages = _venv_site_packages(root)
     _prepare_sys_path(root, site_packages)
 

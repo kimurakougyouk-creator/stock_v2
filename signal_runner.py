@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -11,18 +12,41 @@ _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _capture_process_start_strategy_source_sha() -> str | None:
-    """Capture git HEAD before importing strategy/application modules."""
+    """Attest clean strategy source before importing strategy/application modules."""
+    clean_env = {
+        "HOME": os.environ.get("HOME", ""),
+        "USER": os.environ.get("USER", ""),
+        "LOGNAME": os.environ.get("LOGNAME", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
     try:
         completed = subprocess.run(
-            ["/usr/bin/git", "rev-parse", "HEAD"],
+            [
+                "/bin/bash",
+                "--noprofile",
+                "--norc",
+                "scripts/verify_strategy_source_clean.sh",
+            ],
             cwd=Path("."),
+            env=clean_env,
             check=True,
             capture_output=True,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError):
         return None
-    sha = completed.stdout.strip().lower()
+
+    prefix = "STRATEGY_SOURCE_SHA="
+    matches = [
+        line[len(prefix):].strip().lower()
+        for line in completed.stdout.splitlines()
+        if line.startswith(prefix)
+    ]
+    if len(matches) != 1:
+        return None
+    sha = matches[0]
     return sha if _SOURCE_SHA_RE.fullmatch(sha) else None
 
 
