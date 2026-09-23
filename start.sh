@@ -23,7 +23,8 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-unset PYTHONPATH
+unset PYTHONPATH PYTHONHOME
+TRUSTED_PYTHON_PATH="$PATH"
 
 # Verify that plain operational Python resolves ai_asset_platform only from
 # this exact checkout before setup_wizard or any application module can run.
@@ -43,6 +44,13 @@ if [ -f .env ]; then
   source .env
 fi
 set +a
+
+# .env is local/ignored evidence, not part of the attested checkout. It must
+# never be able to change which Python executable/package tree the runtime uses.
+PATH="$TRUSTED_PYTHON_PATH"
+export PATH
+unset PYTHONPATH PYTHONHOME
+bash scripts/ensure_exact_checkout_runtime.sh
 
 echo "バックテストを開始します..."
 python main_simple_step8.py
