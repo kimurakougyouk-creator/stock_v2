@@ -84,6 +84,37 @@ def test_shell_gate_blocks_tracked_edit_before_python(tmp_path: Path):
 
 
 
+
+
+def test_shell_gate_blocks_tracked_ticker_universe_edit(tmp_path: Path):
+    root = _repo(tmp_path)
+    tickers = root / "tickers.csv"
+    tickers.write_text("Ticker\n9432.T\n", encoding="utf-8")
+    _git(root, "add", "tickers.csv")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "ticker universe fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    tickers.write_text("Ticker\n9432.T\nAAPL\n", encoding="utf-8")
+
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "tracked or untracked strategy source changes" in result.stderr
+
+
 def test_shell_gate_blocks_tracked_root_startup_module_edit(tmp_path: Path):
     root = _repo(tmp_path)
     dashboard = root / "dashboard.py"
