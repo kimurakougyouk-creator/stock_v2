@@ -69,6 +69,39 @@ def test_shell_gate_blocks_tracked_edit_before_python(tmp_path: Path):
     assert "tracked or untracked strategy source changes" in result.stderr
 
 
+
+
+def test_shell_gate_blocks_tracked_runtime_binding_verifier_edit(tmp_path: Path):
+    root = _repo(tmp_path)
+    verifier = root / "scripts" / "verify_exact_checkout_import.py"
+    verifier.write_text("print('trusted')\n", encoding="utf-8")
+    gate = root / "scripts" / "ensure_exact_checkout_runtime.sh"
+    gate.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    _git(root, "add", "scripts/verify_exact_checkout_import.py", "scripts/ensure_exact_checkout_runtime.sh")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "runtime gate fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    verifier.write_text("print('tampered')\n", encoding="utf-8")
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "tracked or untracked strategy source changes" in result.stderr
+
+
 def test_shell_gate_blocks_ignored_importable_startup_artifact(tmp_path: Path):
     root = _repo(tmp_path)
     (root / ".gitignore").write_text("sitecustomize.pyc\n", encoding="utf-8")
