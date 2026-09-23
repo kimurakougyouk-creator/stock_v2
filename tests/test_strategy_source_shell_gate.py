@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import os
 import shutil
 import subprocess
 
@@ -91,3 +93,89 @@ def test_shell_gate_blocks_ignored_importable_startup_artifact(tmp_path: Path):
     result = _run_gate(root)
     assert result.returncode != 0
     assert "ignored importable" in result.stderr
+
+
+def test_shell_gate_blocks_ignored_pycache_bytecode(tmp_path: Path):
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    _git(root, "add", ".gitignore")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "ignore pycache fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    cache = root / "src" / "shadow" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "payload.cpython-313.pyc").write_bytes(b"executable-cache")
+    result = _run_gate(root)
+    assert result.returncode != 0
+    assert "ignored importable" in result.stderr
+
+
+def test_promotion_wrapper_invalidates_stale_pass_when_shell_gate_blocks(tmp_path: Path):
+    root = _repo(tmp_path)
+    shutil.copy2(
+        Path(__file__).parents[1] / "strategy_promotion_policy_once.sh",
+        root / "strategy_promotion_policy_once.sh",
+    )
+    (root / ".gitignore").write_text("__pycache__/\nresults/\n", encoding="utf-8")
+    _git(root, "add", ".gitignore", "strategy_promotion_policy_once.sh")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "wrapper fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    cache = root / "src" / "shadow" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "payload.cpython-313.pyc").write_bytes(b"executable-cache")
+    results = root / "results"
+    results.mkdir()
+    decision = results / "strategy_promotion_decision_latest.json"
+    decision.write_text(
+        json.dumps(
+            {
+                "status": "PROMOTION_POLICY_PASS",
+                "promotion_policy_passed": True,
+                "normal_live_strategy_deployment_allowed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["AI_ASSET_PLATFORM_ROOT"] = str(root)
+    completed = subprocess.run(
+        ["bash", "strategy_promotion_policy_once.sh"],
+        cwd=root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode != 0
+    payload = json.loads(decision.read_text(encoding="utf-8"))
+    assert payload["status"] == "PROMOTION_POLICY_BLOCKED"
+    assert payload["promotion_policy_passed"] is False
+    assert payload["normal_live_strategy_deployment_allowed"] is False
+    assert payload["live_trading"] == "PROHIBITED"
