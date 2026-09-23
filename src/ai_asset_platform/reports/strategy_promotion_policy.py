@@ -367,6 +367,10 @@ def evaluate_strategy_promotion(
         blockers.append("fees_accounted is not proven true")
     if profitability_report.get("fee_aware") is not True:
         blockers.append("fee_aware is not proven true")
+    if profitability_report.get("broker_provenance_verified") is not True:
+        blockers.append(
+            "raw Paper fill/commission ledger provenance is not independently authenticated"
+        )
 
     closed_trades: int | None = None
     net_profit: float | None = None
