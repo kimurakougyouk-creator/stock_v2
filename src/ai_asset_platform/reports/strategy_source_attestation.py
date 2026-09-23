@@ -17,6 +17,13 @@ from ai_asset_platform.execution.live_pilot_source_cutover import (
 STRATEGY_AUDITED_PATHS: tuple[str, ...] = (
     "src",
     ":(top,glob)*.py",
+    ":(top,glob)*.pyc",
+    ":(top,glob)*.pyo",
+    ":(top,glob)*.pyz",
+    ":(top,glob)*.so",
+    ":(top,glob)*.pyd",
+    ":(top,glob)*.dylib",
+    "tests",
     "ai_asset_platform",
     "ai_asset_platform.py",
     "signal_runner.py",
