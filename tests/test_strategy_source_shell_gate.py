@@ -184,6 +184,7 @@ def test_promotion_wrapper_invalidates_stale_pass_when_shell_gate_blocks(tmp_pat
 def test_strategy_operational_wrappers_disable_python_bytecode_before_python_tools():
     root = Path(__file__).parents[1]
     for name in (
+        "start.sh",
         "strategy_promotion_policy_once.sh",
         "ibkr_strategy_profitability_evidence_once.sh",
         "ibkr_verified_paper_runtime_once.sh",
