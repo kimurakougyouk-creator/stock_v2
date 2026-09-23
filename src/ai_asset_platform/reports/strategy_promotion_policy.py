@@ -19,6 +19,11 @@ import re
 import subprocess
 from typing import Any
 
+from ai_asset_platform.reports.performance import calculate_performance
+from ai_asset_platform.reports.strategy_source_attestation import (
+    attest_strategy_source,
+)
+
 POLICY_SCHEMA_VERSION = 1
 DECISION_SCHEMA_VERSION = 1
 EXPECTED_PROFITABILITY_SCHEMA_VERSION = 4
@@ -233,6 +238,12 @@ def _profit_factor(net_performance: dict) -> float:
     return _finite_number(raw, field="net_performance.profit_factor", minimum=0.0)
 
 
+def _same_number(left: float, right: float) -> bool:
+    if math.isinf(left) or math.isinf(right):
+        return left == right
+    return math.isclose(left, right, rel_tol=1e-12, abs_tol=1e-9)
+
+
 def _trade_times(realized_trades: object) -> tuple[datetime, datetime]:
     if not isinstance(realized_trades, list) or not realized_trades:
         raise StrategyPromotionPolicyError(
@@ -373,23 +384,96 @@ def evaluate_strategy_promotion(
         net_performance = profitability_report.get("net_performance")
         if not isinstance(net_performance, dict):
             raise StrategyPromotionPolicyError("net_performance is missing")
-        maximum_drawdown = _finite_number(
-            net_performance.get("maximum_drawdown"),
-            field="net_performance.maximum_drawdown",
-            minimum=0.0,
-        )
-        win_rate = _finite_number(
-            net_performance.get("win_rate"),
-            field="net_performance.win_rate",
-            minimum=0.0,
-            maximum=100.0,
-        )
-        profit_factor = _profit_factor(net_performance)
         trades = profitability_report.get("realized_trades")
         if not isinstance(trades, list) or len(trades) != closed_trades:
             raise StrategyPromotionPolicyError(
                 "realized_trades count does not match closed_trade_count"
             )
+
+        trade_pnls: list[float] = []
+        for trade_index, trade in enumerate(trades, start=1):
+            if not isinstance(trade, dict):
+                raise StrategyPromotionPolicyError(
+                    f"realized trade #{trade_index} is not an object"
+                )
+            trade_pnls.append(
+                _finite_number(
+                    trade.get("net_realized_pnl_account"),
+                    field=(
+                        f"realized trade #{trade_index} "
+                        "net_realized_pnl_account"
+                    ),
+                )
+            )
+        recomputed = calculate_performance(trade_pnls)
+        expected_status = (
+            "NET_POSITIVE_AFTER_FEES"
+            if recomputed.net_profit > 0
+            else "NET_NON_POSITIVE_AFTER_FEES"
+        )
+        if profitability_report.get("evidence_status") != expected_status:
+            raise StrategyPromotionPolicyError(
+                "profitability evidence_status is inconsistent with realized trades"
+            )
+        if not _same_number(net_profit, float(recomputed.net_profit)):
+            raise StrategyPromotionPolicyError(
+                "top-level net_realized_pnl is inconsistent with realized trades"
+            )
+
+        reported_total = _exact_int(
+            net_performance.get("total_trades"),
+            field="net_performance.total_trades",
+            minimum=0,
+        )
+        if reported_total != recomputed.total_trades:
+            raise StrategyPromotionPolicyError(
+                "net_performance.total_trades is inconsistent with realized trades"
+            )
+        reported_net_profit = _finite_number(
+            net_performance.get("net_profit"),
+            field="net_performance.net_profit",
+        )
+        reported_drawdown = _finite_number(
+            net_performance.get("maximum_drawdown"),
+            field="net_performance.maximum_drawdown",
+            minimum=0.0,
+        )
+        reported_win_rate = _finite_number(
+            net_performance.get("win_rate"),
+            field="net_performance.win_rate",
+            minimum=0.0,
+            maximum=100.0,
+        )
+        reported_profit_factor = _profit_factor(net_performance)
+
+        if not _same_number(reported_net_profit, float(recomputed.net_profit)):
+            raise StrategyPromotionPolicyError(
+                "net_performance.net_profit is inconsistent with realized trades"
+            )
+        if not _same_number(
+            reported_drawdown,
+            float(recomputed.maximum_drawdown),
+        ):
+            raise StrategyPromotionPolicyError(
+                "net_performance.maximum_drawdown is inconsistent with realized trades"
+            )
+        if not _same_number(reported_win_rate, float(recomputed.win_rate)):
+            raise StrategyPromotionPolicyError(
+                "net_performance.win_rate is inconsistent with realized trades"
+            )
+        if not _same_number(
+            reported_profit_factor,
+            float(recomputed.profit_factor),
+        ):
+            raise StrategyPromotionPolicyError(
+                "net_performance.profit_factor is inconsistent with realized trades"
+            )
+
+        net_profit = float(recomputed.net_profit)
+        maximum_drawdown = float(recomputed.maximum_drawdown)
+        win_rate = float(recomputed.win_rate)
+        profit_factor = float(recomputed.profit_factor)
+
         first_time, latest_sold = _trade_times(trades)
         observation_span_seconds = max(
             0,
@@ -526,7 +610,48 @@ def _git_head(repository_root: Path = Path(".")) -> str:
         raise StrategyPromotionPolicyError(
             "git HEAD is not an exact 40-character lowercase SHA"
         )
+    try:
+        attest_strategy_source(sha, repository_root=repository_root)
+    except RuntimeError as exc:
+        raise StrategyPromotionPolicyError(str(exc)) from exc
     return sha
+
+
+def persist_blocked_strategy_promotion_failure(
+    reason: str,
+    *,
+    report_path: Path = DEFAULT_DECISION_REPORT_PATH,
+) -> None:
+    payload = {
+        "schema_version": DECISION_SCHEMA_VERSION,
+        "status": "PROMOTION_POLICY_BLOCKED",
+        "policy_version": "UNAVAILABLE",
+        "source_sha": None,
+        "strategy_source_sha": None,
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "promotion_policy_passed": False,
+        "normal_live_strategy_deployment_allowed": False,
+        "blockers": [str(reason)],
+        "observed_closed_trades": None,
+        "observed_net_profit_account_currency": None,
+        "observed_maximum_drawdown_account_currency": None,
+        "observed_win_rate": None,
+        "observed_profit_factor": None,
+        "observed_observation_span_seconds": None,
+        "observed_evidence_age_seconds": None,
+        "paper_evidence_only": True,
+        "broker_connection_used": False,
+        "order_sent": False,
+        "live_order_sent": False,
+        "live_trading": "PROHIBITED",
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = report_path.with_suffix(report_path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(report_path)
 
 
 def persist_strategy_promotion_decision(
@@ -563,6 +688,10 @@ def main() -> int:
             source_sha=source_sha,
         )
     except StrategyPromotionPolicyError as exc:
+        try:
+            persist_blocked_strategy_promotion_failure(str(exc))
+        except OSError:
+            pass
         print("===== STRATEGY PROMOTION POLICY =====")
         print("STATUS      : PROMOTION_POLICY_BLOCKED")
         print("REASON      :", exc)

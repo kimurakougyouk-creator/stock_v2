@@ -38,6 +38,9 @@ from ai_asset_platform.reports.performance import (
     calculate_performance,
     calculate_performance_health,
 )
+from ai_asset_platform.reports.strategy_source_attestation import (
+    attest_strategy_source,
+)
 
 
 STRATEGY_INTENT_PREFIX = "signal-runner:"
@@ -894,6 +897,7 @@ def persist_strategy_profitability_evidence(
     generated_at: datetime | None = None,
 ) -> None:
     exact_source_sha = source_sha or _git_head()
+    attest_strategy_source(exact_source_sha)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = report_path.with_suffix(report_path.suffix + ".tmp")
     temporary.write_text(

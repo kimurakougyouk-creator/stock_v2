@@ -10,6 +10,9 @@ from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.reports.strategy_source_attestation import (
+    attest_strategy_source,
+)
 from ai_asset_platform.execution.broker_position_guard import evaluate_broker_position_guard
 from ai_asset_platform.execution.confirmed_fill_evidence import confirmed_fill_from_broker_result
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
@@ -129,6 +132,7 @@ def execute_approved_signal_via_ibkr_paper(
 
     normalized_signal = str(signal).strip().upper()
     strategy_source_sha = _exact_runtime_source_sha()
+    attest_strategy_source(strategy_source_sha)
     position_guard = evaluate_broker_position_guard(
         ticker=ticker, side=normalized_signal, quantity=int(shares)
     )

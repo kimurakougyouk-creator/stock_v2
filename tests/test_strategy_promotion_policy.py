@@ -8,6 +8,7 @@ from ai_asset_platform.reports.strategy_promotion_policy import (
     StrategyPromotionPolicy,
     evaluate_strategy_promotion,
     load_strategy_promotion_policy,
+    persist_blocked_strategy_promotion_failure,
 )
 
 
@@ -250,6 +251,48 @@ def test_missing_strategy_source_evidence_blocks():
     assert any("strategy_source_sha" in blocker for blocker in decision.blockers)
 
 
+def test_inconsistent_summary_metrics_fail_closed():
+    report = _report()
+    report["net_realized_pnl"] = 999999.0
+    report["net_performance"]["net_profit"] = 999999.0
+
+    decision = evaluate_strategy_promotion(
+        report,
+        _policy(),
+        source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+
+    assert decision.promotion_policy_passed is False
+    assert any("inconsistent" in blocker for blocker in decision.blockers)
+
+
+def test_blocked_failure_overwrites_stale_pass_artifact(tmp_path: Path):
+    path = tmp_path / "decision.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "PROMOTION_POLICY_PASS",
+                "promotion_policy_passed": True,
+                "normal_live_strategy_deployment_allowed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    persist_blocked_strategy_promotion_failure(
+        "current input unreadable",
+        report_path=path,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "PROMOTION_POLICY_BLOCKED"
+    assert payload["promotion_policy_passed"] is False
+    assert payload["normal_live_strategy_deployment_allowed"] is False
+    assert payload["live_trading"] == "PROHIBITED"
+    assert "current input unreadable" in payload["blockers"]
+
+
 def test_unbounded_profit_factor_can_satisfy_minimum():
     report = _report()
     report["net_performance"]["profit_factor"] = None
@@ -274,6 +317,7 @@ def test_enabled_policy_requires_all_mandatory_numeric_thresholds(tmp_path: Path
                 "schema_version": 1,
                 "policy_version": "broken",
                 "enabled": True,
+                "strategy_source_sha": STRATEGY_SHA,
                 "minimum_closed_trades": None,
             }
         ),
