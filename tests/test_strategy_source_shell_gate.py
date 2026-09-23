@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "verify_strategy_source_clean.sh"
@@ -313,15 +314,15 @@ def test_start_sh_verifies_exact_checkout_before_repository_python():
 
     assert activate_index < first_unset_index < first_verify_index
 
-    env_source_index = source.index("source .env")
-    restore_path_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', env_source_index)
-    second_unset_index = source.index("unset PYTHONPATH PYTHONHOME", env_source_index)
+    safe_env_index = source.index("python scripts/load_start_env.py .env")
+    restore_path_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', safe_env_index)
+    second_unset_index = source.index("unset PYTHONPATH PYTHONHOME", safe_env_index)
     second_verify_index = source.index(
         "bash scripts/ensure_exact_checkout_runtime.sh",
         first_verify_index + 1,
     )
 
-    assert env_source_index < restore_path_index < second_unset_index < second_verify_index
+    assert safe_env_index < restore_path_index < second_unset_index < second_verify_index
 
     for marker in (
         "python main_simple_step8.py",
@@ -338,10 +339,11 @@ def test_start_sh_restores_trusted_path_after_env_source():
     source = (root / "start.sh").read_text(encoding="utf-8")
 
     capture_index = source.index('TRUSTED_PYTHON_PATH="$PATH"')
-    env_index = source.index("source .env")
-    restore_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', env_index)
+    safe_env_index = source.index("python scripts/load_start_env.py .env")
+    restore_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', safe_env_index)
 
-    assert capture_index < env_index < restore_index
+    assert capture_index < safe_env_index < restore_index
+    assert "source .env" not in source
 
 
 def test_shell_gate_blocks_untracked_root_native_module_shadow(tmp_path: Path):
@@ -392,6 +394,8 @@ def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
     ensure.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     verifier = root / "scripts" / "verify_exact_checkout_import.py"
     verifier.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    loader = root / "scripts" / "load_start_env.py"
+    shutil.copy2(Path(__file__).parents[1] / "scripts" / "load_start_env.py", loader)
     (root / ".gitignore").write_text(".venv/\n.env\n", encoding="utf-8")
     _git(
         root,
@@ -399,6 +403,7 @@ def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
         "start.sh",
         "scripts/ensure_exact_checkout_runtime.sh",
         "scripts/verify_exact_checkout_import.py",
+        "scripts/load_start_env.py",
         ".gitignore",
     )
     subprocess.run(
@@ -424,6 +429,9 @@ def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
     python = bindir / "python"
     python.write_text(
         "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"scripts/load_start_env.py\" ]]; then "
+        f'exec "{sys.executable}" "$@"\n'
+        "fi\n"
         "if [[ \"$*\" == *\"main_simple_step8.py\"* ]]; then "
         f"touch {marker!s}; fi\n"
         "exit 0\n",
@@ -556,7 +564,7 @@ def test_safe_start_env_loader_accepts_documented_literal_values(tmp_path: Path)
     assert parts[-1] == b""
     pairs = dict(zip(parts[0::2], parts[1::2]))
     assert pairs[b"EMAIL_ADDRESS"] == b"user@example.com"
-    assert pairs[b"APP_PASSWORD"] == b"abcd efgh"
+    assert pairs[b"APP_PASSWORD"] == b"fixture value"
     assert pairs[b"AI_ASSET_ENABLE_IBKR_PAPER"] == b"true"
 
 
