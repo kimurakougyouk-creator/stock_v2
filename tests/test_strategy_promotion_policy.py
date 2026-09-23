@@ -76,6 +76,7 @@ def _report() -> dict:
         "fees_accounted": True,
         "fee_aware": True,
         "broker_provenance_verified": True,
+        "unattributed_recovery_fill_count": 0,
         "closed_trade_count": 3,
         "net_realized_pnl": 300.0,
         "net_performance": {
@@ -161,6 +162,21 @@ def test_unauthenticated_raw_ledger_provenance_blocks_even_when_metrics_pass():
 
     assert decision.promotion_policy_passed is False
     assert any("provenance" in blocker for blocker in decision.blockers)
+
+
+def test_unattributed_broker_recovery_fill_blocks_promotion():
+    report = _report()
+    report["unattributed_recovery_fill_count"] = 1
+
+    decision = evaluate_strategy_promotion(
+        report,
+        _policy(),
+        source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+
+    assert decision.promotion_policy_passed is False
+    assert any("broker-recovery" in blocker for blocker in decision.blockers)
 
 
 def test_minimum_closed_trades_blocks():
