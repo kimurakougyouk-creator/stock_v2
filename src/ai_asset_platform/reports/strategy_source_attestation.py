@@ -90,6 +90,23 @@ def attest_strategy_source(
             f"strategy source attestation blocked: {detail}"
         )
 
+    # The repository root is on normal Python import paths. A symlink named
+    # after any third-party dependency (for example ibapi/) can shadow the
+    # installed package even when it has no tracked root-module counterpart.
+    # The canonical checkout requires no root symlinks, so reject all of them.
+    root_symlinks = tuple(
+        candidate.name
+        for candidate in repository_root.iterdir()
+        if candidate.is_symlink()
+    )
+    if root_symlinks:
+        detail = ", ".join(
+            f"ROOT_SYMLINK {entry}" for entry in root_symlinks
+        )
+        raise StrategySourceAttestationError(
+            f"strategy source attestation blocked: {detail}"
+        )
+
     # Strategy evidence/runtime attestation is stricter than the reusable Live
     # source-cutover audit: executable ignored bytecode caches are not trusted.
     # A timestamp-valid .pyc can otherwise execute bytes that are absent from
