@@ -140,6 +140,22 @@ def test_untracked_root_package_shadow_fails_closed(tmp_path: Path):
         )
 
 
+
+
+def test_third_party_root_symlink_shadow_fails_closed(tmp_path: Path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-ibapi"
+    outside.mkdir()
+    (outside / "__init__.py").write_text("VALUE = 'shadow'\n", encoding="utf-8")
+    (tmp_path / "ibapi").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(StrategySourceAttestationError, match="ROOT_SYMLINK"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(),
+        )
+
+
 def test_root_package_symlink_shadow_fails_closed(tmp_path: Path):
     (tmp_path / "dashboard.py").write_text("VALUE = 1\n", encoding="utf-8")
     outside = tmp_path.parent / f"{tmp_path.name}-outside-dashboard"
