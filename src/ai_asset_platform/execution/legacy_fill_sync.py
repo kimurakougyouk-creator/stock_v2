@@ -15,6 +15,7 @@ from typing import Any, Iterable
 from ai_asset_platform.core.account_clock import account_now
 
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _normalized_exec_ids(values: Iterable[object] | None) -> list[str]:
@@ -45,6 +46,7 @@ def record_confirmed_fill(
     broker_exec_fills: Iterable[object] | None = None,
     broker_order_id: int | None = None,
     strategy_source_sha: str | None = None,
+    strategy_parameters_sha: str | None = None,
 ) -> dict[str, Any]:
     normalized_side = str(side).upper()
     if normalized_side not in {"BUY", "SELL"}:
@@ -96,6 +98,16 @@ def record_confirmed_fill(
                 "strategy_source_sha must be an exact 40-character lowercase git SHA"
             )
 
+    normalized_strategy_parameters_sha: str | None = None
+    if strategy_parameters_sha is not None:
+        normalized_strategy_parameters_sha = str(
+            strategy_parameters_sha
+        ).strip().lower()
+        if not _PARAMETERS_SHA_RE.fullmatch(normalized_strategy_parameters_sha):
+            raise ValueError(
+                "strategy_parameters_sha must be an exact 64-character lowercase SHA-256"
+            )
+
     normalized_order_id: int | None = None
     if broker_order_id is not None:
         normalized_order_id = int(broker_order_id)
@@ -136,6 +148,8 @@ def record_confirmed_fill(
         record["broker_order_id"] = normalized_order_id
     if normalized_strategy_source_sha is not None:
         record["strategy_source_sha"] = normalized_strategy_source_sha
+    if normalized_strategy_parameters_sha is not None:
+        record["strategy_parameters_sha"] = normalized_strategy_parameters_sha
 
     order_log_path.parent.mkdir(parents=True, exist_ok=True)
     with order_log_path.open("a", encoding="utf-8") as file:
