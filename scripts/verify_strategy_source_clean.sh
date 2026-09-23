@@ -54,8 +54,6 @@ IGNORED_IMPORTABLE="$(
         continue
       fi
       case "$path" in
-        */__pycache__/*)
-          ;;
         *.py|*.pyc|*.pyo|*.pyz|*.so|*.pyd|*.dylib)
           printf '%s\n' "$path"
           ;;
