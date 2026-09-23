@@ -33,6 +33,7 @@ STRATEGY_AUDITED_PATHS: tuple[str, ...] = (
     "ai_asset_platform",
     "ai_asset_platform.py",
     "signal_runner.py",
+    "tickers.csv",
     "config.py",
     "requirements.txt",
     "pyproject.toml",
