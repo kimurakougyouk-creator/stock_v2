@@ -1,7 +1,52 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
+import re
+import subprocess
 from typing import Any
+
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _capture_process_start_strategy_source_sha() -> str | None:
+    """Capture git HEAD before importing strategy/application modules."""
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/git", "rev-parse", "HEAD"],
+            cwd=Path("."),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    sha = completed.stdout.strip().lower()
+    return sha if _SOURCE_SHA_RE.fullmatch(sha) else None
+
+
+_PROCESS_START_STRATEGY_SOURCE_SHA = _capture_process_start_strategy_source_sha()
+
+
+def _strategy_parameters_sha(settings: dict[str, Any]) -> str:
+    """Stable identity for the effective MA/RSI/ATR settings actually used."""
+    payload = {
+        "ma_short": int(settings["ma_short"]),
+        "ma_middle": int(settings["ma_middle"]),
+        "ma_long": int(settings["ma_long"]),
+        "rsi_low": int(settings["rsi_low"]),
+        "rsi_high": int(settings["rsi_high"]),
+        "atr_multiplier": float(settings["atr_multiplier"]),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
 
 import pandas as pd
 import yfinance as yf
@@ -265,6 +310,7 @@ def run_signal_scan(
 
         try:
             settings = get_ticker_settings(ticker, all_settings)
+            strategy_parameters_sha = _strategy_parameters_sha(settings)
             prepared = add_indicators(
                 df.copy(),
                 ma_short=settings["ma_short"],
@@ -810,6 +856,12 @@ def run_signal_scan(
                                                 shares=order_shares,
                                                 order_intent_id=(
                                                     order_intent_id
+                                                ),
+                                                process_start_source_sha=(
+                                                    _PROCESS_START_STRATEGY_SOURCE_SHA
+                                                ),
+                                                strategy_parameters_sha=(
+                                                    strategy_parameters_sha
                                                 ),
                                             )
                                         )
