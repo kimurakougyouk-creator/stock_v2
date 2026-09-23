@@ -2,8 +2,56 @@ from pathlib import Path
 
 import pandas as pd
 
-from signal_runner import _rank_signal_results, run_signal_scan
+from signal_runner import _rank_signal_results, _strategy_parameters_sha, run_signal_scan
 from dashboard import build_dashboard_html
+
+
+
+
+def test_strategy_parameters_sha_binds_ai_provider_and_model():
+    settings = {
+        "ma_short": 5,
+        "ma_middle": 25,
+        "ma_long": 75,
+        "rsi_low": 30,
+        "rsi_high": 70,
+        "atr_multiplier": 2.0,
+    }
+
+    class Provider:
+        name = "openai"
+        model = "model-a"
+
+    baseline = _strategy_parameters_sha(settings, ai_provider=Provider())
+    Provider.model = "model-b"
+    changed_model = _strategy_parameters_sha(settings, ai_provider=Provider())
+    Provider.name = "claude"
+    changed_provider = _strategy_parameters_sha(settings, ai_provider=Provider())
+
+    assert baseline != changed_model
+    assert changed_model != changed_provider
+
+
+def test_strategy_parameters_sha_requires_ai_model_for_order_identity():
+    settings = {
+        "ma_short": 5,
+        "ma_middle": 25,
+        "ma_long": 75,
+        "rsi_low": 30,
+        "rsi_high": 70,
+        "atr_multiplier": 2.0,
+    }
+
+    class ProviderWithoutModel:
+        name = "openai"
+
+    import pytest
+    with pytest.raises(ValueError, match="provider/model identity"):
+        _strategy_parameters_sha(
+            settings,
+            ai_provider=ProviderWithoutModel(),
+            require_order_identity=True,
+        )
 
 
 def test_run_signal_scan_creates_excel_report(tmp_path, monkeypatch):
