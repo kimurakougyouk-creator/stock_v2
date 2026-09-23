@@ -75,52 +75,14 @@ if [[ -n "$ROOT_MODULE_SYMLINK_SHADOWS" ]]; then
   exit 2
 fi
 
-# Any root-level symlink can become an import shadow for a repository or
-# third-party package because the repository root participates in Python's
-# normal import search. The canonical checkout contains no required root
-# symlinks, so reject all of them fail-closed.
+# The repository root participates in Python import resolution. Any root-level
+# symlink can therefore shadow repository or third-party packages. The canonical
+# checkout requires no root symlinks, so reject all of them fail-closed.
 ROOT_SYMLINKS=""
 shopt -s nullglob dotglob
 for candidate in ./*; do
   if [[ -L "$candidate" ]]; then
-    ROOT_SYMLINKS+="${candidate#./}"  git ls-files -v -- "${AUDITED_PATHS[@]}" |
-    awk '$1 == "S" || $1 ~ /^[a-z]$/ { print }'
-)"
-if [[ -n "$INDEX_HIDDEN" ]]; then
-  echo "BLOCKED: strategy source contains assume-unchanged or skip-worktree entries. No Paper or Live order was sent." >&2
-  exit 2
-fi
-
-IGNORED_IMPORTABLE="$(
-  git ls-files --others --ignored --exclude-standard -- "${AUDITED_PATHS[@]}" |
-    while IFS= read -r path; do
-      if [[ -L "$path" ]]; then
-        printf '%s\n' "$path"
-        continue
-      fi
-      case "$path" in
-        *.py|*.pyc|*.pyo|*.pyz|*.so|*.pyd|*.dylib)
-          printf '%s\n' "$path"
-          ;;
-        *)
-          if [[ -d "$path" ]] && {
-            [[ -f "$path/__init__.py" ]] ||
-            [[ -f "$path/__init__.pyc" ]] ||
-            compgen -G "$path/__init__*.so" > /dev/null
-          }; then
-            printf '%s\n' "$path"
-          fi
-          ;;
-      esac
-    done
-)"
-if [[ -n "$IGNORED_IMPORTABLE" ]]; then
-  echo "BLOCKED: ignored importable artifact/package/symlink is present in strategy source paths. No Paper or Live order was sent." >&2
-  exit 2
-fi
-
-printf 'STRATEGY_SOURCE_SHA=%s\n' "$ACTUAL_SHA"
-\n'
+    ROOT_SYMLINKS+="${candidate#./}"$'\n'
   fi
 done
 shopt -u nullglob dotglob
