@@ -3,6 +3,13 @@
 # This script performs no broker action.
 set -euo pipefail
 
+safe_git() {
+  /usr/bin/git \
+    -c core.fsmonitor=false \
+    -c core.hooksPath=/dev/null \
+    "$@"
+}
+
 AUDITED_PATHS=(
   src
   ':(top,glob)*.py'
@@ -48,14 +55,14 @@ AUDITED_PATHS=(
   usercustomize.pyc
 )
 
-ACTUAL_SHA="$(/usr/bin/git rev-parse HEAD)"
+ACTUAL_SHA="$(safe_git rev-parse HEAD)"
 if [[ ! "$ACTUAL_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
   echo "BLOCKED: exact strategy source SHA is unavailable. No Paper or Live order was sent." >&2
   exit 2
 fi
 
 SOURCE_DIRTY="$(
-  /usr/bin/git status --porcelain=v1 --untracked-files=all -- "${AUDITED_PATHS[@]}"
+  safe_git status --porcelain=v1 --untracked-files=all -- "${AUDITED_PATHS[@]}"
 )"
 if [[ -n "$SOURCE_DIRTY" ]]; then
   echo "BLOCKED: tracked or untracked strategy source changes are present before Python launch. No Paper or Live order was sent." >&2
@@ -68,7 +75,7 @@ fi
 # not traverse a symlink to an external package, so reject same-name root
 # symlinks explicitly.
 ROOT_MODULE_SYMLINK_SHADOWS="$(
-  /usr/bin/git ls-files -- ':(top,glob)*.py' |
+  safe_git ls-files -- ':(top,glob)*.py' |
     while IFS= read -r module_path; do
       module_stem="${module_path%.py}"
       if [[ -L "$module_stem" ]]; then
@@ -98,7 +105,7 @@ if [[ -n "$ROOT_SYMLINKS" ]]; then
 fi
 
 INDEX_HIDDEN="$(
-  /usr/bin/git ls-files -v -- "${AUDITED_PATHS[@]}" |
+  safe_git ls-files -v -- "${AUDITED_PATHS[@]}" |
     /usr/bin/awk '$1 == "S" || $1 ~ /^[a-z]$/ { print }'
 )"
 if [[ -n "$INDEX_HIDDEN" ]]; then
@@ -107,7 +114,7 @@ if [[ -n "$INDEX_HIDDEN" ]]; then
 fi
 
 IGNORED_IMPORTABLE="$(
-  /usr/bin/git ls-files --others --ignored --exclude-standard -- "${AUDITED_PATHS[@]}" |
+  safe_git ls-files --others --ignored --exclude-standard -- "${AUDITED_PATHS[@]}" |
     while IFS= read -r path; do
       if [[ -L "$path" ]]; then
         printf '%s\n' "$path"
