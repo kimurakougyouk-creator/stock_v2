@@ -59,4 +59,11 @@ bash scripts/ensure_exact_checkout_runtime.sh
 pytest -q \
   tests/test_strategy_promotion_policy.py \
   tests/test_strategy_source_attestation.py
+
+# Replace any stale PASS with a current fail-closed placeholder before the
+# evaluator starts. A completed evaluator run atomically replaces this with its
+# detailed PASS/BLOCKED record. Disable the ERR trap for the final evaluator so
+# a legitimate detailed BLOCKED result (exit 1) is not overwritten.
+persist_shell_blocked_decision
+trap - ERR
 python -m ai_asset_platform.reports.strategy_promotion_policy
