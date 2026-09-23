@@ -42,6 +42,7 @@ DEFAULT_DECISION_REPORT_PATH = Path(
 )
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class StrategyPromotionPolicyError(ValueError):
@@ -54,6 +55,7 @@ class StrategyPromotionPolicy:
     policy_version: str
     enabled: bool
     strategy_source_sha: str | None = None
+    strategy_parameters_sha: str | None = None
     minimum_closed_trades: int | None = None
     minimum_net_profit_account_currency: float | None = None
     maximum_drawdown_account_currency: float | None = None
@@ -185,6 +187,14 @@ def load_strategy_promotion_policy(path: Path) -> StrategyPromotionPolicy:
             "strategy_source_sha must be an exact 40-character lowercase git SHA"
         )
 
+    strategy_parameters_sha = str(
+        payload.get("strategy_parameters_sha") or ""
+    ).strip().lower()
+    if not _PARAMETERS_SHA_RE.fullmatch(strategy_parameters_sha):
+        raise StrategyPromotionPolicyError(
+            "strategy_parameters_sha must be an exact 64-character lowercase SHA-256"
+        )
+
     minimum_closed_trades = _exact_int(
         payload.get("minimum_closed_trades"),
         field="minimum_closed_trades",
@@ -226,6 +236,7 @@ def load_strategy_promotion_policy(path: Path) -> StrategyPromotionPolicy:
         policy_version=policy_version,
         enabled=True,
         strategy_source_sha=strategy_source_sha,
+        strategy_parameters_sha=strategy_parameters_sha,
         minimum_closed_trades=minimum_closed_trades,
         minimum_net_profit_account_currency=minimum_net_profit,
         maximum_drawdown_account_currency=maximum_drawdown,
@@ -347,6 +358,23 @@ def evaluate_strategy_promotion(
     elif policy.enabled and observed_strategy_source != policy.strategy_source_sha:
         blockers.append(
             "profitability report strategy_source_sha does not match the policy target"
+        )
+
+    observed_strategy_parameters = (
+        str(profitability_report.get("strategy_parameters_sha") or "").strip().lower()
+        if isinstance(profitability_report, dict)
+        else ""
+    )
+    if not _PARAMETERS_SHA_RE.fullmatch(observed_strategy_parameters):
+        blockers.append(
+            "profitability report does not prove one exact strategy_parameters_sha across natural fills"
+        )
+    elif (
+        policy.enabled
+        and observed_strategy_parameters != policy.strategy_parameters_sha
+    ):
+        blockers.append(
+            "profitability report strategy_parameters_sha does not match the policy target"
         )
 
     if not isinstance(profitability_report, dict):
