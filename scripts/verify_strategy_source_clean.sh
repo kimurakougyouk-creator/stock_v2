@@ -5,6 +5,7 @@ set -euo pipefail
 
 AUDITED_PATHS=(
   src
+  ':(top,glob)*.py'
   ai_asset_platform
   ai_asset_platform.py
   signal_runner.py
