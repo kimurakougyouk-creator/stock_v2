@@ -18,15 +18,20 @@ class FakeRunner:
         self.status = status
         self.index = index
         self.ignored = ignored
+        self.calls: list[list[str]] = []
 
     def __call__(self, command, **kwargs):
-        if command[1:3] == ["rev-parse", "HEAD"]:
+        self.calls.append(list(command))
+        args = list(command[1:])
+        while len(args) >= 2 and args[0] == "-c":
+            args = args[2:]
+        if args[:2] == ["rev-parse", "HEAD"]:
             stdout = SHA + "\n"
-        elif command[1:3] == ["status", "--porcelain=v1"]:
+        elif args[:2] == ["status", "--porcelain=v1"]:
             stdout = self.status
-        elif command[1:3] == ["ls-files", "-v"]:
+        elif args[:2] == ["ls-files", "-v"]:
             stdout = self.index
-        elif command[1:3] == ["ls-files", "--others"]:
+        elif args[:2] == ["ls-files", "--others"]:
             stdout = self.ignored
         else:
             raise AssertionError(f"unexpected command: {command}")
@@ -184,3 +189,21 @@ def test_root_package_symlink_shadow_fails_closed(tmp_path: Path):
             repository_root=tmp_path,
             runner=FakeRunner(),
         )
+
+
+def test_strategy_attestation_disables_repo_git_hooks_and_fsmonitor(tmp_path: Path):
+    runner = FakeRunner()
+    assert attest_strategy_source(
+        SHA,
+        repository_root=tmp_path,
+        runner=runner,
+    ) == SHA
+    assert runner.calls
+    for call in runner.calls:
+        assert call[:5] == [
+            "/usr/bin/git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ]

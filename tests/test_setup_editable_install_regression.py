@@ -740,6 +740,14 @@ def test_install_autopilot_migrates_and_verifies_before_restart():
 _SETUP_SH_PATH = ROOT_DIR / "scripts" / "setup.sh"
 
 
+def test_setup_sh_pins_venv_to_trusted_system_python():
+    source = _SETUP_SH_PATH.read_text(encoding="utf-8")
+    assert 'TRUSTED_PYTHON="/usr/bin/python3"' in source
+    assert '"$TRUSTED_PYTHON" -m venv .venv' in source
+    assert 'VENV_PYTHON_REAL="$(/usr/bin/readlink -f -- .venv/bin/python)"' in source
+    assert 'TRUSTED_PYTHON_REAL="$(/usr/bin/readlink -f -- "$TRUSTED_PYTHON")"' in source
+
+
 def test_setup_sh_unsets_pythonpath_before_editable_install_and_verify():
     """Codex PR #287 P2, `scripts/setup.sh`: activation left an inherited
     PYTHONPATH in place through both `pip install -e .` and the
