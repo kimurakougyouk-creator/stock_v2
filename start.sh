@@ -23,6 +23,11 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
+unset PYTHONPATH
+
+# Verify that plain operational Python resolves ai_asset_platform only from
+# this exact checkout before setup_wizard or any application module can run.
+bash scripts/ensure_exact_checkout_runtime.sh
 
 echo "必要なライブラリを確認しています..."
 python -m pip install --upgrade pip
