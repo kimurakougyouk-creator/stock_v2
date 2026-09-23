@@ -6,6 +6,13 @@ set -euo pipefail
 AUDITED_PATHS=(
   src
   ':(top,glob)*.py'
+  ':(top,glob)*.pyc'
+  ':(top,glob)*.pyo'
+  ':(top,glob)*.pyz'
+  ':(top,glob)*.so'
+  ':(top,glob)*.pyd'
+  ':(top,glob)*.dylib'
+  tests
   ai_asset_platform
   ai_asset_platform.py
   signal_runner.py
