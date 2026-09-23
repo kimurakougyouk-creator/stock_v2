@@ -69,6 +69,7 @@ from config import (
 )
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.ibkr_signal_runtime import (
+    bind_strategy_runtime_identity,
     execute_approved_signal_via_ibkr_paper,
 )
 from ai_asset_platform.execution.order_limit_reason import detect_buy_order_limit_reason
@@ -849,6 +850,14 @@ def run_signal_scan(
                                         order_reason = "AI最終判定"
 
                                     try:
+                                        bind_strategy_runtime_identity(
+                                            process_start_source_sha=(
+                                                _PROCESS_START_STRATEGY_SOURCE_SHA
+                                            ),
+                                            strategy_parameters_sha=(
+                                                strategy_parameters_sha
+                                            ),
+                                        )
                                         execution = (
                                             execute_approved_signal_via_ibkr_paper(
                                                 ticker=ticker,
@@ -856,12 +865,6 @@ def run_signal_scan(
                                                 shares=order_shares,
                                                 order_intent_id=(
                                                     order_intent_id
-                                                ),
-                                                process_start_source_sha=(
-                                                    _PROCESS_START_STRATEGY_SOURCE_SHA
-                                                ),
-                                                strategy_parameters_sha=(
-                                                    strategy_parameters_sha
                                                 ),
                                             )
                                         )
