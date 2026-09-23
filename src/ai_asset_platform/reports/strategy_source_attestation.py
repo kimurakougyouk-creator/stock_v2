@@ -23,6 +23,12 @@ STRATEGY_AUDITED_PATHS: tuple[str, ...] = (
     ":(top,glob)*.so",
     ":(top,glob)*.pyd",
     ":(top,glob)*.dylib",
+    ":(top,glob)*/__init__.py",
+    ":(top,glob)*/__init__.pyc",
+    ":(top,glob)*/__init__.pyo",
+    ":(top,glob)*/__init__*.so",
+    ":(top,glob)*/__init__*.pyd",
+    ":(top,glob)*/__init__*.dylib",
     "tests",
     "ai_asset_platform",
     "ai_asset_platform.py",
@@ -66,6 +72,20 @@ def attest_strategy_source(
     )
     if not result.ready or result.actual_commit_sha is None:
         detail = ", ".join(result.dirty_entries) or "source SHA mismatch"
+        raise StrategySourceAttestationError(
+            f"strategy source attestation blocked: {detail}"
+        )
+
+    root_symlink_shadows = tuple(
+        candidate.name
+        for module_path in repository_root.glob("*.py")
+        for candidate in (module_path.with_suffix(""),)
+        if candidate.is_symlink()
+    )
+    if root_symlink_shadows:
+        detail = ", ".join(
+            f"ROOT_MODULE_SYMLINK_SHADOW {entry}" for entry in root_symlink_shadows
+        )
         raise StrategySourceAttestationError(
             f"strategy source attestation blocked: {detail}"
         )
