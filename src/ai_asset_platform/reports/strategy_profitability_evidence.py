@@ -837,7 +837,6 @@ def build_strategy_profitability_evidence(
         strategy_fill_count=len(strategy_fills),
         closed_trade_count=len(realized),
         excluded_ibkr_fill_count=excluded,
-            unattributed_recovery_fill_count=unattributed_recovery_fill_count,
         gross_performance=performance_record,
         performance_health=health_record,
         realized_trades=tuple(fee_aware_trades),
