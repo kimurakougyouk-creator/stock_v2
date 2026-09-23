@@ -484,6 +484,14 @@ def evaluate_strategy_promotion(
             raise StrategyPromotionPolicyError(
                 "latest realized trade timestamp is unexpectedly in the future"
             )
+        latest_trade_age_seconds = max(
+            0,
+            int((checked - latest_sold).total_seconds()),
+        )
+        evidence_age_observed = max(
+            evidence_age_observed or 0,
+            latest_trade_age_seconds,
+        )
     except StrategyPromotionPolicyError as exc:
         blockers.append(str(exc))
 
