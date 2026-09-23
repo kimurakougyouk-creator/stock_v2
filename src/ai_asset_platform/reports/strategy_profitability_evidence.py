@@ -49,6 +49,7 @@ DEFAULT_COMMISSION_REPORT_PATH = Path("results/ibkr_paper_commission_evidence_le
 DEFAULT_REPORT_PATH = Path("results/strategy_profitability_evidence_latest.json")
 REPORT_SCHEMA_VERSION = 4
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class StrategyProfitabilityEvidenceError(ValueError):
@@ -74,6 +75,7 @@ class StrategyProfitabilityEvidence:
     net_profitability_proven: bool = False
     live_ready: bool = False
     strategy_source_sha: str | None = None
+    strategy_parameters_sha: str | None = None
     broker_provenance_verified: bool = False
 
 
@@ -226,6 +228,20 @@ def _common_strategy_source_sha(strategy_fills: Iterable[dict]) -> str | None:
     return next(iter(observed)) if observed else None
 
 
+def _common_strategy_parameters_sha(
+    strategy_fills: Iterable[dict],
+) -> str | None:
+    observed: set[str] = set()
+    for record in strategy_fills:
+        raw = str(record.get("strategy_parameters_sha") or "").strip().lower()
+        if not _PARAMETERS_SHA_RE.fullmatch(raw):
+            return None
+        observed.add(raw)
+        if len(observed) > 1:
+            return None
+    return next(iter(observed)) if observed else None
+
+
 def _strategy_fill_signature(record: dict) -> tuple:
     raw_exec_ids = record.get("broker_exec_ids")
     exec_ids = tuple(str(value or "").strip() for value in raw_exec_ids) if isinstance(raw_exec_ids, list) else ()
@@ -250,6 +266,7 @@ def _strategy_fill_signature(record: dict) -> tuple:
         exec_ids,
         exec_fills,
         str(record.get("strategy_source_sha") or "").strip().lower(),
+        str(record.get("strategy_parameters_sha") or "").strip().lower(),
     )
 
 
@@ -660,6 +677,7 @@ def build_strategy_profitability_evidence(
         )
 
     strategy_source_sha = _common_strategy_source_sha(strategy_fills)
+    strategy_parameters_sha = _common_strategy_parameters_sha(strategy_fills)
 
     if not strategy_fills:
         performance, health = _empty_metrics()
@@ -816,6 +834,7 @@ def build_strategy_profitability_evidence(
         net_profitability_proven=False,
         live_ready=False,
         strategy_source_sha=strategy_source_sha,
+        strategy_parameters_sha=strategy_parameters_sha,
         # Local ignored ledgers can be internally consistent after manual edits.
         # Until a separate authenticated broker-provenance mechanism exists,
         # the operational builder must never assert provenance verification.
