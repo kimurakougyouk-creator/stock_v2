@@ -4,6 +4,7 @@ import subprocess
 import pytest
 
 from ai_asset_platform.reports.strategy_source_attestation import (
+    STRATEGY_AUDITED_PATHS,
     StrategySourceAttestationError,
     attest_strategy_source,
 )
@@ -87,4 +88,28 @@ def test_dirty_root_startup_module_fails_closed(tmp_path: Path):
             SHA,
             repository_root=tmp_path,
             runner=FakeRunner(status=" M dashboard.py\n"),
+        )
+
+
+def test_attestation_scope_includes_operational_tests_and_root_native_modules():
+    assert "tests" in STRATEGY_AUDITED_PATHS
+    for suffix in ("pyc", "pyo", "pyz", "so", "pyd", "dylib"):
+        assert f":(top,glob)*.{suffix}" in STRATEGY_AUDITED_PATHS
+
+
+def test_dirty_operational_test_fails_closed(tmp_path: Path):
+    with pytest.raises(StrategySourceAttestationError, match="strategy source attestation blocked"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(status=" M tests/test_strategy_promotion_policy.py\n"),
+        )
+
+
+def test_untracked_root_native_shadow_fails_closed(tmp_path: Path):
+    with pytest.raises(StrategySourceAttestationError, match="strategy source attestation blocked"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(status="?? dashboard.cpython-313-x86_64-linux-gnu.so\n"),
         )
