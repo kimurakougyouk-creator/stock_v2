@@ -617,3 +617,66 @@ def test_safe_start_env_loader_rejects_shell_code_and_dangerous_unknown_keys(tmp
         )
         assert completed.returncode != 0, payload
         assert "BLOCKED: unsafe .env" in completed.stderr
+
+
+def test_shell_gate_blocks_untracked_root_package_shadow(tmp_path: Path):
+    root = _repo(tmp_path)
+    dashboard = root / "dashboard.py"
+    dashboard.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(root, "add", "dashboard.py")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "root module fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    shadow = root / "dashboard"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("VALUE = 'shadow'\n", encoding="utf-8")
+
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "tracked or untracked strategy source changes" in result.stderr
+
+
+def test_shell_gate_blocks_external_root_package_symlink_shadow(tmp_path: Path):
+    root = _repo(tmp_path)
+    dashboard = root / "dashboard.py"
+    dashboard.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(root, "add", "dashboard.py")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "root symlink fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    outside = tmp_path / "outside-dashboard"
+    outside.mkdir()
+    (outside / "__init__.py").write_text("VALUE = 'shadow'\n", encoding="utf-8")
+    (root / "dashboard").symlink_to(outside, target_is_directory=True)
+
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "root module symlink/package shadow" in result.stderr
