@@ -72,6 +72,7 @@ def _report() -> dict:
         "live_trading": "PROHIBITED",
         "fees_accounted": True,
         "fee_aware": True,
+        "broker_provenance_verified": True,
         "closed_trade_count": 3,
         "net_realized_pnl": 300.0,
         "net_performance": {
@@ -140,6 +141,23 @@ def test_missing_fee_accounting_blocks():
 
     assert decision.promotion_policy_passed is False
     assert any("fees_accounted" in blocker for blocker in decision.blockers)
+
+
+
+
+def test_unauthenticated_raw_ledger_provenance_blocks_even_when_metrics_pass():
+    report = _report()
+    report["broker_provenance_verified"] = False
+
+    decision = evaluate_strategy_promotion(
+        report,
+        _policy(),
+        source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+
+    assert decision.promotion_policy_passed is False
+    assert any("provenance" in blocker for blocker in decision.blockers)
 
 
 def test_minimum_closed_trades_blocks():
