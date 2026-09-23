@@ -78,12 +78,21 @@ def test_isolated_bootstrap_does_not_process_venv_startup_hooks(tmp_path: Path):
     root = tmp_path / "repo"
     src = root / "src"
     src.mkdir(parents=True)
+    system_version = subprocess.check_output(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ],
+        text=True,
+    ).strip()
+    venv_bin = root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to("/usr/bin/python3")
     site_packages = (
-        root
-        / ".venv"
-        / "lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages"
+        root / ".venv" / "lib" / f"python{system_version}" / "site-packages"
     )
     site_packages.mkdir(parents=True)
 
@@ -155,9 +164,11 @@ def test_operational_isolation_files_are_inside_source_attestation():
     ):
         assert path in shell_gate
         assert path in python_gate
-    assert "/usr/bin/git rev-parse" in shell_gate
-    assert "/usr/bin/git status" in shell_gate
-    assert "/usr/bin/git ls-files" in shell_gate
+    assert "safe_git rev-parse" in shell_gate
+    assert "safe_git status" in shell_gate
+    assert "safe_git ls-files" in shell_gate
+    assert "core.fsmonitor=false" in shell_gate
+    assert "core.hooksPath=/dev/null" in shell_gate
     assert "/usr/bin/awk" in shell_gate
 
 
@@ -167,3 +178,64 @@ def test_operational_entrypoints_are_minimal_posix_trampolines(wrapper_name: str
     assert source.startswith("#!/bin/sh\n")
     assert "/usr/bin/env -i" in source
     assert "/bin/bash --noprofile --norc" in source
+
+
+@pytest.mark.parametrize(("wrapper_name", "body_name"), WRAPPERS.items())
+def test_explicit_bash_invocation_is_rejected(
+    tmp_path: Path, wrapper_name: str, body_name: str
+):
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    wrapper = root / wrapper_name
+    shutil.copy2(ROOT / wrapper_name, wrapper)
+    wrapper.chmod(0o755)
+    body = root / body_name
+    body.write_text(
+        "#!/bin/bash\nprintf should-not-run > body-ran.marker\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["/bin/bash", str(wrapper)],
+        cwd=root,
+        env={**os.environ, "AI_ASSET_PLATFORM_ROOT": str(root)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "directly" in completed.stderr
+    assert not (root / "body-ran.marker").exists()
+
+
+def test_isolated_bootstrap_rejects_mismatched_venv_interpreter(tmp_path: Path):
+    root = tmp_path / "repo"
+    fake_python = root / ".venv" / "bin" / "python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    (root / ".venv" / "lib" / "python999" / "site-packages").mkdir(parents=True)
+
+    completed = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            str(ROOT / "scripts" / "run_isolated_venv_python.py"),
+            "-m",
+            "does_not_matter",
+        ],
+        cwd=root,
+        env={
+            "AI_ASSET_PLATFORM_ROOT": str(root),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "does not match the trusted bootstrap interpreter" in completed.stderr

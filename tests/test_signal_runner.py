@@ -1,11 +1,44 @@
 from pathlib import Path
+import subprocess
 
 import pandas as pd
 
-from signal_runner import _rank_signal_results, _strategy_parameters_sha, run_signal_scan
+from signal_runner import (
+    _capture_process_start_strategy_source_sha,
+    _rank_signal_results,
+    _strategy_parameters_sha,
+    run_signal_scan,
+)
 from dashboard import build_dashboard_html
 
 
+
+
+def test_process_start_source_capture_runs_clean_gate(monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["env"] = dict(kwargs["env"])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="STRATEGY_SOURCE_SHA=" + ("b" * 40) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("signal_runner.subprocess.run", fake_run)
+
+    assert _capture_process_start_strategy_source_sha() == "b" * 40
+    assert captured["command"] == [
+        "/bin/bash",
+        "--noprofile",
+        "--norc",
+        "scripts/verify_strategy_source_clean.sh",
+    ]
+    assert captured["env"]["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    for forbidden in ("BASH_ENV", "ENV", "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD"):
+        assert forbidden not in captured["env"]
 
 
 def test_strategy_parameters_sha_binds_ai_provider_and_model():

@@ -80,6 +80,25 @@ def test_shell_gate_blocks_tracked_edit_before_python(tmp_path: Path):
     assert "tracked or untracked strategy source changes" in result.stderr
 
 
+def test_shell_gate_disables_repo_configured_fsmonitor_hook(tmp_path: Path):
+    root = _repo(tmp_path)
+    marker = tmp_path / "fsmonitor-ran.marker"
+    hook = tmp_path / "fsmonitor-hook.sh"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"printf ran > {marker!s}\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    _git(root, "config", "core.fsmonitor", str(hook))
+
+    result = _run_gate(root)
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+
+
 
 
 
@@ -297,8 +316,9 @@ def test_promotion_wrapper_invalidates_stale_pass_when_shell_gate_blocks(tmp_pat
     )
     env = dict(os.environ)
     env["AI_ASSET_PLATFORM_ROOT"] = str(root)
+    (root / "strategy_promotion_policy_once.sh").chmod(0o755)
     completed = subprocess.run(
-        ["bash", "strategy_promotion_policy_once.sh"],
+        [str(root / "strategy_promotion_policy_once.sh")],
         cwd=root,
         env=env,
         check=False,
@@ -638,8 +658,9 @@ def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_pat
     (pytest_pkg / "__init__.py").write_text("", encoding="utf-8")
     (pytest_pkg / "__main__.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
 
+    (root / "strategy_promotion_policy_once.sh").chmod(0o755)
     completed = subprocess.run(
-        ["bash", "strategy_promotion_policy_once.sh"],
+        [str(root / "strategy_promotion_policy_once.sh")],
         cwd=root,
         env={**os.environ, "AI_ASSET_PLATFORM_ROOT": str(root)},
         check=False,
