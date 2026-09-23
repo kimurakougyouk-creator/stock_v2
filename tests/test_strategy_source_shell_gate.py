@@ -318,40 +318,32 @@ def test_start_sh_verifies_exact_checkout_before_repository_python():
     root = Path(__file__).parents[1]
     source = (root / "start.sh").read_text(encoding="utf-8")
 
-    activate_index = source.index("source .venv/bin/activate")
-    first_unset_index = source.index("unset PYTHONPATH PYTHONHOME")
-    first_verify_index = source.index("bash scripts/ensure_exact_checkout_runtime.sh")
+    assert "source .venv/bin/activate" not in source
+    assert "exec /usr/bin/env -i" in source
+    assert "/bin/bash --noprofile --norc" in source
+    assert 'VENV_PYTHON="$PWD/.venv/bin/python"' in source
 
-    assert activate_index < first_unset_index < first_verify_index
-
-    safe_env_index = source.index("python scripts/load_start_env.py .env")
-    restore_path_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', safe_env_index)
-    second_unset_index = source.index("unset PYTHONPATH PYTHONHOME", safe_env_index)
-    second_source_gate_index = source.index(
-        "bash scripts/verify_strategy_source_clean.sh",
-        source.index("bash scripts/verify_strategy_source_clean.sh") + 1,
+    first_source_gate = source.index("/bin/bash scripts/verify_strategy_source_clean.sh")
+    first_runtime_gate = source.index("verify_exact_checkout_runtime")
+    safe_env_index = source.index('"$VENV_PYTHON" scripts/load_start_env.py .env')
+    second_source_gate = source.index(
+        "/bin/bash scripts/verify_strategy_source_clean.sh",
+        first_source_gate + 1,
     )
-    second_verify_index = source.index(
-        "bash scripts/ensure_exact_checkout_runtime.sh",
-        first_verify_index + 1,
+    second_runtime_gate = source.index(
+        "verify_exact_checkout_runtime",
+        first_runtime_gate + 1,
     )
+    first_application = source.index('"$VENV_PYTHON" main_simple_step8.py')
 
     assert (
-        safe_env_index
-        < restore_path_index
-        < second_unset_index
-        < second_source_gate_index
-        < second_verify_index
+        first_source_gate
+        < first_runtime_gate
+        < safe_env_index
+        < second_source_gate
+        < second_runtime_gate
+        < first_application
     )
-
-    for marker in (
-        "python main_simple_step8.py",
-        "python -m signal_runner",
-        "python -m dashboard",
-        "python -m candidate_dashboard",
-        "python -m change_tracker",
-    ):
-        assert second_verify_index < source.index(marker), marker
 
 
 
@@ -360,30 +352,27 @@ def test_start_sh_rechecks_full_source_boundary_after_setup_and_env_data():
     root = Path(__file__).parents[1]
     source = (root / "start.sh").read_text(encoding="utf-8")
 
-    first_gate = source.index("bash scripts/verify_strategy_source_clean.sh")
-    safe_env = source.index("python scripts/load_start_env.py .env")
+    first_gate = source.index("/bin/bash scripts/verify_strategy_source_clean.sh")
+    safe_env = source.index('"$VENV_PYTHON" scripts/load_start_env.py .env')
     second_gate = source.index(
-        "bash scripts/verify_strategy_source_clean.sh",
+        "/bin/bash scripts/verify_strategy_source_clean.sh",
         first_gate + 1,
     )
-    second_import_verify = source.index(
-        "bash scripts/ensure_exact_checkout_runtime.sh",
-        source.index("bash scripts/ensure_exact_checkout_runtime.sh") + 1,
-    )
-    first_application = source.index("python main_simple_step8.py")
+    first_application = source.index('"$VENV_PYTHON" main_simple_step8.py')
 
-    assert first_gate < safe_env < second_gate < second_import_verify < first_application
+    assert first_gate < safe_env < second_gate < first_application
 
 
-def test_start_sh_restores_trusted_path_after_env_source():
+def test_start_sh_sanitizes_inherited_command_environment_before_gates():
     root = Path(__file__).parents[1]
     source = (root / "start.sh").read_text(encoding="utf-8")
 
-    capture_index = source.index('TRUSTED_PYTHON_PATH="$PATH"')
-    safe_env_index = source.index("python scripts/load_start_env.py .env")
-    restore_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', safe_env_index)
-
-    assert capture_index < safe_env_index < restore_index
+    reexec = source.index("exec /usr/bin/env -i")
+    first_gate = source.index("/bin/bash scripts/verify_strategy_source_clean.sh")
+    assert reexec < first_gate
+    assert "unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH" in source
+    assert 'export PATH="/usr/local/bin:/usr/bin:/bin"' in source
+    assert "source .venv/bin/activate" not in source
     assert "source .env" not in source
 
 
