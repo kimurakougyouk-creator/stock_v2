@@ -3,6 +3,9 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")"
 
+# Keep the attested source tree bytecode-free for every subsequent Python process.
+export PYTHONDONTWRITEBYTECODE=1
+
 # Prove clean exact strategy source before any repository Python can import.
 bash scripts/verify_strategy_source_clean.sh
 
