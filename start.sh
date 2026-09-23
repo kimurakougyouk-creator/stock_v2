@@ -3,6 +3,9 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")"
 
+# Prove clean exact strategy source before any repository Python can import.
+bash scripts/verify_strategy_source_clean.sh
+
 echo "stock_v2を起動します（実注文は行いません）。"
 
 if ! command -v python3 >/dev/null 2>&1; then

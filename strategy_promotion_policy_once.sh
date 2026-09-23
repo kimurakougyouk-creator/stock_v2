@@ -4,9 +4,6 @@ set -euo pipefail
 ROOT="${AI_ASSET_PLATFORM_ROOT:-$HOME/stock_v2_latest}"
 cd "$ROOT"
 
-git switch main
-git pull --ff-only origin main
-
 # Fail closed before activating the venv or importing repository Python.
 bash scripts/verify_strategy_source_clean.sh
 
@@ -21,13 +18,6 @@ unset PYTHONPATH
 bash scripts/ensure_exact_checkout_runtime.sh
 
 pytest -q \
-  tests/test_ibkr_verified_paper_runtime.py \
-  tests/test_paper_trading_runner.py \
-  tests/test_verified_paper_scan.py \
-  tests/test_ibkr_restart_idempotency.py \
-  tests/test_ibkr_broker_recovery.py \
-  tests/test_ibkr_broker_reconnect_order_safety.py
-
-AI_ASSET_ENABLE_IBKR_PAPER=1 \
-AI_ASSET_VERIFIED_PAPER_RUNTIME_CONFIRM=RUN_VERIFIED_PAPER_ONLY \
-  python -m ai_asset_platform.execution.ibkr_verified_paper_runtime
+  tests/test_strategy_promotion_policy.py \
+  tests/test_strategy_source_attestation.py
+python -m ai_asset_platform.reports.strategy_promotion_policy

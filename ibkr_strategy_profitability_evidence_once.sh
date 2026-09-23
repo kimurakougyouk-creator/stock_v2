@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="${AI_ASSET_PLATFORM_ROOT:-$HOME/stock_v2_latest}"
 cd "$ROOT"
 
+# Fail closed before activating the venv or importing repository Python.
+bash scripts/verify_strategy_source_clean.sh
+
 if [[ ! -f .venv/bin/activate ]]; then
   echo "BLOCKED: .venv is missing. No Paper or Live order was sent."
   exit 2
