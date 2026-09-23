@@ -22,6 +22,7 @@ AUDITED_PATHS=(
   ai_asset_platform
   ai_asset_platform.py
   signal_runner.py
+  tickers.csv
   config.py
   requirements.txt
   pyproject.toml
