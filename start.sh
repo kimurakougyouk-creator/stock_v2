@@ -62,6 +62,11 @@ fi
 PATH="$TRUSTED_PYTHON_PATH"
 export PATH
 unset PYTHONPATH PYTHONHOME
+
+# Re-attest the complete tracked/untracked strategy/startup source boundary
+# after setup/pip/.env-data handling and immediately before application Python.
+# This catches any checkout mutation that occurred after the initial gate.
+bash scripts/verify_strategy_source_clean.sh
 bash scripts/ensure_exact_checkout_runtime.sh
 
 echo "バックテストを開始します..."
