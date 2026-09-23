@@ -144,6 +144,7 @@ def test_metrics_use_only_natural_strategy_closed_trades():
     assert result.net_realized_pnl is None
     assert result.net_profitability_proven is False
     assert result.live_ready is False
+    assert result.broker_provenance_verified is False
 
 
 def test_no_natural_strategy_fill_never_reuses_validation_profit():
@@ -792,6 +793,42 @@ def test_fee_aware_report_carries_one_exact_strategy_source_sha():
         ),
     )
     assert result.strategy_source_sha == "c" * 40
+
+
+
+
+def test_fee_aware_local_ledgers_never_claim_authenticated_broker_provenance():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert result.fees_accounted is True
+    assert result.broker_provenance_verified is False
+    assert "not yet authenticated" in result.reason
 
 
 def test_mixed_strategy_source_sha_never_proves_one_version():
