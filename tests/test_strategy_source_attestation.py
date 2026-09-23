@@ -113,3 +113,12 @@ def test_untracked_root_native_shadow_fails_closed(tmp_path: Path):
             repository_root=tmp_path,
             runner=FakeRunner(status="?? dashboard.cpython-313-x86_64-linux-gnu.so\n"),
         )
+
+
+def test_dirty_safe_env_loader_fails_closed(tmp_path: Path):
+    with pytest.raises(StrategySourceAttestationError, match="strategy source attestation blocked"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(status=" M scripts/load_start_env.py\n"),
+        )
