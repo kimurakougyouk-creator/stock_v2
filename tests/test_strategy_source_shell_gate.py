@@ -531,3 +531,49 @@ def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_pat
     )
     assert payload["policy_version"] == "test-v1"
     assert payload["blockers"] == ["minimum closed trades not met"]
+
+
+def test_safe_start_env_loader_accepts_documented_literal_values(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "EMAIL_ADDRESS='user@example.com'\n"
+        "APP_PASSWORD='abcd efgh'\n"
+        "AI_ASSET_ENABLE_IBKR_PAPER=true\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            "python",
+            str(Path(__file__).parents[1] / "scripts" / "load_start_env.py"),
+            str(env_file),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    parts = completed.stdout.split(b"\0")
+    assert parts[-1] == b""
+    pairs = dict(zip(parts[0::2], parts[1::2]))
+    assert pairs[b"EMAIL_ADDRESS"] == b"user@example.com"
+    assert pairs[b"APP_PASSWORD"] == b"abcd efgh"
+    assert pairs[b"AI_ASSET_ENABLE_IBKR_PAPER"] == b"true"
+
+
+def test_safe_start_env_loader_rejects_shell_code_and_dangerous_unknown_keys(tmp_path: Path):
+    loader = str(Path(__file__).parents[1] / "scripts" / "load_start_env.py")
+    for payload in (
+        "python() { return 0; }\n",
+        "BASH_ENV=/tmp/pwn\n",
+        "LD_PRELOAD=/tmp/pwn.so\n",
+        "PATH=/tmp/pwn\n",
+    ):
+        env_file = tmp_path / ".env"
+        env_file.write_text(payload, encoding="utf-8")
+        completed = subprocess.run(
+            ["python", loader, str(env_file)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode != 0, payload
+        assert "BLOCKED: unsafe .env" in completed.stderr
