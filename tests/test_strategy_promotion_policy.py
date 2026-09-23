@@ -143,6 +143,15 @@ def test_minimum_closed_trades_blocks():
     report = _report()
     report["closed_trade_count"] = 2
     report["realized_trades"] = report["realized_trades"][:2]
+    report["net_realized_pnl"] = 100.0
+    report["net_performance"].update(
+        total_trades=2,
+        win_rate=50.0,
+        net_profit=100.0,
+        profit_factor=3.0,
+        profit_factor_unbounded=False,
+        maximum_drawdown=50.0,
+    )
 
     decision = evaluate_strategy_promotion(
         report,
@@ -157,11 +166,10 @@ def test_minimum_closed_trades_blocks():
 
 def test_maximum_drawdown_blocks():
     report = _report()
-    report["net_performance"]["maximum_drawdown"] = 501.0
 
     decision = evaluate_strategy_promotion(
         report,
-        _policy(),
+        _policy(maximum_drawdown_account_currency=49.0),
         source_sha=SOURCE_SHA,
         now=NOW,
     )
@@ -295,8 +303,18 @@ def test_blocked_failure_overwrites_stale_pass_artifact(tmp_path: Path):
 
 def test_unbounded_profit_factor_can_satisfy_minimum():
     report = _report()
-    report["net_performance"]["profit_factor"] = None
-    report["net_performance"]["profit_factor_unbounded"] = True
+    report["realized_trades"][0]["net_realized_pnl_account"] = 100.0
+    report["realized_trades"][1]["net_realized_pnl_account"] = 200.0
+    report["realized_trades"][2]["net_realized_pnl_account"] = 300.0
+    report["net_realized_pnl"] = 600.0
+    report["net_performance"].update(
+        total_trades=3,
+        win_rate=100.0,
+        net_profit=600.0,
+        profit_factor=None,
+        profit_factor_unbounded=True,
+        maximum_drawdown=0.0,
+    )
 
     decision = evaluate_strategy_promotion(
         report,
