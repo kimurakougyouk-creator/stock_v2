@@ -12,6 +12,7 @@ from ai_asset_platform.reports.strategy_promotion_policy import (
 
 
 SOURCE_SHA = "a" * 40
+STRATEGY_SHA = "c" * 40
 NOW = datetime(2026, 9, 23, 3, 0, tzinfo=timezone.utc)
 
 
@@ -20,6 +21,7 @@ def _policy(**overrides) -> StrategyPromotionPolicy:
         schema_version=1,
         policy_version="test-v1",
         enabled=True,
+        strategy_source_sha=STRATEGY_SHA,
         minimum_closed_trades=3,
         minimum_net_profit_account_currency=100.0,
         maximum_drawdown_account_currency=500.0,
@@ -58,6 +60,7 @@ def _report() -> dict:
         "schema_version": 4,
         "evidence_status": "NET_POSITIVE_AFTER_FEES",
         "source_sha": SOURCE_SHA,
+        "strategy_source_sha": STRATEGY_SHA,
         "generated_at": "2026-09-23T02:30:00+00:00",
         "paper_only": True,
         "broker_connection_used": False,
@@ -215,6 +218,36 @@ def test_profitability_evidence_must_be_bound_to_same_source_sha():
 
     assert decision.promotion_policy_passed is False
     assert any("does not match" in blocker for blocker in decision.blockers)
+
+
+def test_strategy_fill_source_must_match_policy_target():
+    report = _report()
+    report["strategy_source_sha"] = "d" * 40
+
+    decision = evaluate_strategy_promotion(
+        report,
+        _policy(),
+        source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+
+    assert decision.promotion_policy_passed is False
+    assert any("policy target" in blocker for blocker in decision.blockers)
+
+
+def test_missing_strategy_source_evidence_blocks():
+    report = _report()
+    report["strategy_source_sha"] = None
+
+    decision = evaluate_strategy_promotion(
+        report,
+        _policy(),
+        source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+
+    assert decision.promotion_policy_passed is False
+    assert any("strategy_source_sha" in blocker for blocker in decision.blockers)
 
 
 def test_unbounded_profit_factor_can_satisfy_minimum():

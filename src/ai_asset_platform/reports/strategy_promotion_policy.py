@@ -43,6 +43,7 @@ class StrategyPromotionPolicy:
     schema_version: int
     policy_version: str
     enabled: bool
+    strategy_source_sha: str | None = None
     minimum_closed_trades: int | None = None
     minimum_net_profit_account_currency: float | None = None
     maximum_drawdown_account_currency: float | None = None
@@ -57,6 +58,7 @@ class StrategyPromotionDecision:
     status: str
     policy_version: str
     source_sha: str
+    strategy_source_sha: str | None
     checked_at: str
     promotion_policy_passed: bool
     normal_live_strategy_deployment_allowed: bool
@@ -167,6 +169,12 @@ def load_strategy_promotion_policy(path: Path) -> StrategyPromotionPolicy:
             enabled=False,
         )
 
+    strategy_source_sha = str(payload.get("strategy_source_sha") or "").strip().lower()
+    if not _SHA_RE.fullmatch(strategy_source_sha):
+        raise StrategyPromotionPolicyError(
+            "strategy_source_sha must be an exact 40-character lowercase git SHA"
+        )
+
     minimum_closed_trades = _exact_int(
         payload.get("minimum_closed_trades"),
         field="minimum_closed_trades",
@@ -207,6 +215,7 @@ def load_strategy_promotion_policy(path: Path) -> StrategyPromotionPolicy:
         schema_version=schema_version,
         policy_version=policy_version,
         enabled=True,
+        strategy_source_sha=strategy_source_sha,
         minimum_closed_trades=minimum_closed_trades,
         minimum_net_profit_account_currency=minimum_net_profit,
         maximum_drawdown_account_currency=maximum_drawdown,
@@ -308,6 +317,20 @@ def evaluate_strategy_promotion(
     if not policy.enabled:
         blockers.append(
             "strategy-promotion policy is disabled pending explicit threshold approval"
+        )
+
+    observed_strategy_source = (
+        str(profitability_report.get("strategy_source_sha") or "").strip().lower()
+        if isinstance(profitability_report, dict)
+        else ""
+    )
+    if not _SHA_RE.fullmatch(observed_strategy_source):
+        blockers.append(
+            "profitability report does not prove one exact strategy_source_sha across natural fills"
+        )
+    elif policy.enabled and observed_strategy_source != policy.strategy_source_sha:
+        blockers.append(
+            "profitability report strategy_source_sha does not match the policy target"
         )
 
     if not isinstance(profitability_report, dict):
@@ -439,6 +462,11 @@ def evaluate_strategy_promotion(
         status="PROMOTION_POLICY_PASS" if passed else "PROMOTION_POLICY_BLOCKED",
         policy_version=policy.policy_version,
         source_sha=source,
+        strategy_source_sha=(
+            observed_strategy_source
+            if _SHA_RE.fullmatch(observed_strategy_source)
+            else None
+        ),
         checked_at=checked.isoformat(timespec="seconds"),
         promotion_policy_passed=passed,
         # A policy pass is evidence for Phase 5 only. It is never itself Live

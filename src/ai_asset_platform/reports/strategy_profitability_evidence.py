@@ -70,6 +70,7 @@ class StrategyProfitabilityEvidence:
     net_realized_pnl: float | None = None
     net_profitability_proven: bool = False
     live_ready: bool = False
+    strategy_source_sha: str | None = None
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -209,6 +210,18 @@ def _commission_index(commission_report: dict) -> dict[str, tuple[Decimal, str]]
     return index
 
 
+def _common_strategy_source_sha(strategy_fills: Iterable[dict]) -> str | None:
+    observed: set[str] = set()
+    for record in strategy_fills:
+        raw = str(record.get("strategy_source_sha") or "").strip().lower()
+        if not _SOURCE_SHA_RE.fullmatch(raw):
+            return None
+        observed.add(raw)
+        if len(observed) > 1:
+            return None
+    return next(iter(observed)) if observed else None
+
+
 def _strategy_fill_signature(record: dict) -> tuple:
     raw_exec_ids = record.get("broker_exec_ids")
     exec_ids = tuple(str(value or "").strip() for value in raw_exec_ids) if isinstance(raw_exec_ids, list) else ()
@@ -232,6 +245,7 @@ def _strategy_fill_signature(record: dict) -> tuple:
         str(record.get("fx_to_account_rate", "")),
         exec_ids,
         exec_fills,
+        str(record.get("strategy_source_sha") or "").strip().lower(),
     )
 
 
@@ -641,6 +655,8 @@ def build_strategy_profitability_evidence(
             realized_trades=(),
         )
 
+    strategy_source_sha = _common_strategy_source_sha(strategy_fills)
+
     if not strategy_fills:
         performance, health = _empty_metrics()
         return StrategyProfitabilityEvidence(
@@ -795,6 +811,7 @@ def build_strategy_profitability_evidence(
         net_realized_pnl=float(net_performance.net_profit),
         net_profitability_proven=False,
         live_ready=False,
+        strategy_source_sha=strategy_source_sha,
     )
 
 

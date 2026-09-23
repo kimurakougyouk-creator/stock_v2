@@ -21,6 +21,7 @@ def _fill(
     currency: str = "JPY",
     fx: float | None = 1.0,
     exec_ids: list[str] | None = None,
+    strategy_source_sha: str | None = "c" * 40,
 ) -> dict:
     row = {
         "created_at": "2026-09-01T10:00:00+09:00",
@@ -33,6 +34,8 @@ def _fill(
         "status": "FILLED",
         "order_intent_id": intent,
     }
+    if strategy_source_sha is not None:
+        row["strategy_source_sha"] = strategy_source_sha
     if fx is not None:
         row["fx_to_account_rate"] = fx
     if exec_ids is not None:
@@ -758,6 +761,72 @@ def test_execution_quantity_ids_must_match_commission_bound_exec_ids():
 
     assert result.evidence_status == "BLOCKED_FEE_EVIDENCE"
     assert "do not match broker_exec_ids" in result.reason
+
+
+def test_fee_aware_report_carries_one_exact_strategy_source_sha():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+    assert result.strategy_source_sha == "c" * 40
+
+
+def test_mixed_strategy_source_sha_never_proves_one_version():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+            strategy_source_sha="c" * 40,
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+            strategy_source_sha="d" * 40,
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+    assert result.strategy_source_sha is None
+    assert result.net_profitability_proven is False
+    assert result.live_ready is False
 
 
 def test_module_contains_no_broker_mutation_api_calls():

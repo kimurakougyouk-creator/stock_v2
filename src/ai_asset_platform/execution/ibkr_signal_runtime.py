@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import subprocess
 
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
@@ -21,6 +23,30 @@ from ai_asset_platform.execution.signal_order_bridge import (
 
 _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
 preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
+
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _exact_runtime_source_sha(repository_root: Path = Path(".")) -> str:
+    """Resolve the exact source revision before any Paper broker transport."""
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "exact strategy source SHA is unavailable; Paper order blocked"
+        ) from exc
+    sha = completed.stdout.strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(sha):
+        raise RuntimeError(
+            "exact strategy source SHA is malformed; Paper order blocked"
+        )
+    return sha
 
 
 def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
@@ -102,6 +128,7 @@ def execute_approved_signal_via_ibkr_paper(
         return SignalExecutionResult(False, "IBKR Paper disabled")
 
     normalized_signal = str(signal).strip().upper()
+    strategy_source_sha = _exact_runtime_source_sha()
     position_guard = evaluate_broker_position_guard(
         ticker=ticker, side=normalized_signal, quantity=int(shares)
     )
@@ -130,6 +157,7 @@ def execute_approved_signal_via_ibkr_paper(
                 broker_exec_ids=_broker_exec_ids(result),
                 broker_exec_fills=_broker_exec_fills(result),
                 broker_order_id=int(raw_order_id) if raw_order_id is not None else None,
+                strategy_source_sha=strategy_source_sha,
             )
         return execution
     finally:
