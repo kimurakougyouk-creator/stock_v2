@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="${AI_ASSET_PLATFORM_ROOT:-$HOME/stock_v2_latest}"
 cd "$ROOT"
 
+# Keep the attested source tree bytecode-free for every subsequent Python process.
+export PYTHONDONTWRITEBYTECODE=1
+
 git switch main
 git pull --ff-only origin main
 
