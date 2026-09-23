@@ -36,6 +36,7 @@ STRATEGY_AUDITED_PATHS: tuple[str, ...] = (
     "scripts/verify_strategy_source_clean.sh",
     "scripts/ensure_exact_checkout_runtime.sh",
     "scripts/verify_exact_checkout_import.py",
+    "scripts/load_start_env.py",
     "ibkr_verified_paper_runtime_once.sh",
     "ibkr_strategy_profitability_evidence_once.sh",
     "strategy_promotion_policy_once.sh",
