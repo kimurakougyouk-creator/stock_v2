@@ -3,6 +3,7 @@
   "policy_version": "v1-draft-unapproved",
   "enabled": false,
   "strategy_source_sha": null,
+  "strategy_parameters_sha": null,
   "minimum_closed_trades": null,
   "minimum_net_profit_account_currency": null,
   "maximum_drawdown_account_currency": null,
