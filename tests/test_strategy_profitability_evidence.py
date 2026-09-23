@@ -294,6 +294,44 @@ def test_fee_aware_jpy_roundtrip_reports_true_net_pnl():
     assert result.live_ready is False
 
 
+def test_fee_aware_evidence_counts_unattributed_broker_recovery_fills():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+        _fill(
+            intent="broker-recovery:lost-natural-exec",
+            side="SELL",
+            price=120.0,
+            exec_ids=["recovered-1"],
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert result.unattributed_recovery_fill_count == 1
+
+
 def test_fee_aware_cross_currency_uses_fill_fx_for_commissions():
     records = [
         _fill(
