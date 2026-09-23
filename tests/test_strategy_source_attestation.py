@@ -122,3 +122,34 @@ def test_dirty_safe_env_loader_fails_closed(tmp_path: Path):
             repository_root=tmp_path,
             runner=FakeRunner(status=" M scripts/load_start_env.py\n"),
         )
+
+
+def test_attestation_scope_includes_root_package_init_variants():
+    for suffix in ("py", "pyc", "pyo"):
+        assert f":(top,glob)*/__init__.{suffix}" in STRATEGY_AUDITED_PATHS
+    for suffix in ("so", "pyd", "dylib"):
+        assert f":(top,glob)*/__init__*.{suffix}" in STRATEGY_AUDITED_PATHS
+
+
+def test_untracked_root_package_shadow_fails_closed(tmp_path: Path):
+    with pytest.raises(StrategySourceAttestationError, match="strategy source attestation blocked"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(status="?? dashboard/__init__.py\n"),
+        )
+
+
+def test_root_package_symlink_shadow_fails_closed(tmp_path: Path):
+    (tmp_path / "dashboard.py").write_text("VALUE = 1\n", encoding="utf-8")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-dashboard"
+    outside.mkdir()
+    (outside / "__init__.py").write_text("VALUE = 'shadow'\n", encoding="utf-8")
+    (tmp_path / "dashboard").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(StrategySourceAttestationError, match="ROOT_MODULE_SYMLINK_SHADOW"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(),
+        )
