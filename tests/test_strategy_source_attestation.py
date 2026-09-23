@@ -82,6 +82,21 @@ def test_dirty_runtime_binding_verifier_fails_closed(tmp_path: Path):
         )
 
 
+
+
+def test_attestation_scope_includes_ticker_universe():
+    assert "tickers.csv" in STRATEGY_AUDITED_PATHS
+
+
+def test_dirty_ticker_universe_fails_closed(tmp_path: Path):
+    with pytest.raises(StrategySourceAttestationError, match="strategy source attestation blocked"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(status=" M tickers.csv\n"),
+        )
+
+
 def test_dirty_root_startup_module_fails_closed(tmp_path: Path):
     with pytest.raises(StrategySourceAttestationError, match="strategy source attestation blocked"):
         attest_strategy_source(
