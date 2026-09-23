@@ -5,6 +5,7 @@ set -Eeuo pipefail
 # caller-supplied "already sanitized" marker that can bypass this step.
 unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH
 unset -f git awk bash python pytest env 2>/dev/null || true
+export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_PATH="$(/usr/bin/readlink -f -- "$0")"
 SCRIPT_DIR="${SCRIPT_PATH%/*}"
 exec /usr/bin/env -i \

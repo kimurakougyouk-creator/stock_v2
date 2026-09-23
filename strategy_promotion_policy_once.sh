@@ -54,8 +54,12 @@ EOF
 # Any wrapper failure must invalidate a previously persisted PASS before exit.
 trap 'persist_shell_blocked_decision' ERR
 
-# Fail closed before importing repository Python.
-run_clean /bin/bash --noprofile --norc scripts/verify_strategy_source_clean.sh
+# Fail closed before importing repository Python. A gate failure must also
+# invalidate any stale persisted PASS before this wrapper exits.
+if ! run_clean /bin/bash --noprofile --norc scripts/verify_strategy_source_clean.sh; then
+  persist_shell_blocked_decision
+  exit 2
+fi
 
 VENV_PYTHON="$ROOT/.venv/bin/python"
 if [[ ! -x "$VENV_PYTHON" ]]; then

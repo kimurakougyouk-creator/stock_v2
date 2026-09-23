@@ -1763,9 +1763,14 @@ def test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_f
         lines = path.read_text(encoding="utf-8").splitlines()
         failures.extend(_check_exact_checkout_binding(path.name, lines))
 
-    assert checked >= 7, (
-        f"expected at least 7 non-self-updating wrappers to require the gate "
-        f"(all but the installer-gated exemption), found {checked}"
+    # Three strategy-promotion/Paper wrappers now invoke their venv Python
+    # through an explicit env -i boundary instead of the legacy
+    # activate -> unset -> helper pattern counted by this checker. Keep this
+    # sanity floor aligned with the remaining legacy-pattern wrappers; the
+    # sanitized wrappers have dedicated source-gate regression coverage.
+    assert checked >= 6, (
+        f"expected at least 6 legacy-pattern non-self-updating wrappers to "
+        f"require the gate (all but the installer-gated exemption), found {checked}"
     )
     assert not failures, (
         "non-self-updating wrappers not exact-checkout-bound before first use:\n"
