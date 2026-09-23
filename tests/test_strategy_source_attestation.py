@@ -79,3 +79,12 @@ def test_dirty_runtime_binding_verifier_fails_closed(tmp_path: Path):
             repository_root=tmp_path,
             runner=FakeRunner(status=" M scripts/verify_exact_checkout_import.py\n"),
         )
+
+
+def test_dirty_root_startup_module_fails_closed(tmp_path: Path):
+    with pytest.raises(StrategySourceAttestationError, match="strategy source attestation blocked"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(status=" M dashboard.py\n"),
+        )
