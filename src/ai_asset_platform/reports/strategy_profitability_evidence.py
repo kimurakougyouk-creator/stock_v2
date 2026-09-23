@@ -77,6 +77,7 @@ class StrategyProfitabilityEvidence:
     strategy_source_sha: str | None = None
     strategy_parameters_sha: str | None = None
     broker_provenance_verified: bool = False
+    unattributed_recovery_fill_count: int = 0
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -658,6 +659,11 @@ def build_strategy_profitability_evidence(
     raw_strategy_fills = select_natural_strategy_fills(rows)
     all_ibkr_fills = [record for record in rows if _is_confirmed_ibkr_fill(record)]
     excluded = len(all_ibkr_fills) - len(raw_strategy_fills)
+    unattributed_recovery_fill_count = sum(
+        1
+        for record in all_ibkr_fills
+        if str(record.get("order_intent_id", "")).strip().startswith("broker-recovery:")
+    )
     account = str(account_currency).strip().upper()
     try:
         strategy_fills = _dedupe_strategy_fills_by_intent(raw_strategy_fills)
@@ -839,6 +845,7 @@ def build_strategy_profitability_evidence(
         # Until a separate authenticated broker-provenance mechanism exists,
         # the operational builder must never assert provenance verification.
         broker_provenance_verified=False,
+        unattributed_recovery_fill_count=unattributed_recovery_fill_count,
     )
 
 
