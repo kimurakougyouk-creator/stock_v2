@@ -1,50 +1,76 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-cd "$(dirname "$0")"
+# Re-exec once in a minimal environment before any source/git/runtime gate.
+# This drops inherited exported shell functions, BASH_ENV/ENV hooks, Python
+# import overrides, loader overrides, and caller-controlled command resolution.
+if [[ "${AI_ASSET_START_SANITIZED:-}" != "1" ]]; then
+  unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH
+  exec /usr/bin/env -i \
+    AI_ASSET_START_SANITIZED=1 \
+    HOME="${HOME:-}" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-}" \
+    LANG="${LANG:-C.UTF-8}" \
+    PATH="/usr/local/bin:/usr/bin:/bin" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    /bin/bash --noprofile --norc "$0" "$@"
+fi
 
-# Keep the attested source tree bytecode-free for every subsequent Python process.
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH
+export PATH="/usr/local/bin:/usr/bin:/bin"
 export PYTHONDONTWRITEBYTECODE=1
 
+cd "$(dirname "$0")"
+
 # Prove clean exact strategy source before any repository Python can import.
-bash scripts/verify_strategy_source_clean.sh
+/bin/bash scripts/verify_strategy_source_clean.sh
 
 echo "stock_v2を起動します（実注文は行いません）。"
 
-if ! command -v python3 >/dev/null 2>&1; then
+if [ ! -x "/usr/bin/python3" ]; then
   echo "Python3が見つかりません。ChromebookのLinux環境でPython3をインストールしてください。"
   exit 1
 fi
 
 if [ ! -d ".venv" ]; then
   echo "初回の仮想環境を作成しています..."
-  python3 -m venv .venv
+  /usr/bin/python3 -m venv .venv
 fi
 
-# shellcheck disable=SC1091
-source .venv/bin/activate
-unset PYTHONPATH PYTHONHOME
-TRUSTED_PYTHON_PATH="$PATH"
+VENV_PYTHON="$PWD/.venv/bin/python"
+if [ ! -x "$VENV_PYTHON" ]; then
+  echo "BLOCKED: .venv/bin/python is unavailable. No Paper or Live order was sent." >&2
+  exit 2
+fi
 
-# Verify that plain operational Python resolves ai_asset_platform only from
-# this exact checkout before setup_wizard or any application module can run.
-bash scripts/ensure_exact_checkout_runtime.sh
+verify_exact_checkout_runtime() {
+  /usr/bin/env -i \
+    HOME="${HOME:-}" \
+    LANG="${LANG:-C.UTF-8}" \
+    PATH="/usr/local/bin:/usr/bin:/bin" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    AI_ASSET_PYTHON_BIN="$VENV_PYTHON" \
+    /bin/bash --noprofile --norc scripts/ensure_exact_checkout_runtime.sh
+}
+
+# Verify plain operational Python resolves ai_asset_platform only from this
+# exact checkout before setup_wizard or any application module can run.
+verify_exact_checkout_runtime
 
 echo "必要なライブラリを確認しています..."
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+"$VENV_PYTHON" -m pip install --upgrade pip
+"$VENV_PYTHON" -m pip install -r requirements.txt
 
-if [ ! -f ".env" ] || ! python setup_wizard.py --check >/dev/null 2>&1; then
-  python setup_wizard.py
+if [ ! -f ".env" ] || ! "$VENV_PYTHON" setup_wizard.py --check >/dev/null 2>&1; then
+  "$VENV_PYTHON" setup_wizard.py
 fi
 
-# .env is untrusted local data, never executable shell input. Parse only the
-# documented key/value contract with tracked code and import the resulting
-# literal NUL-delimited pairs without eval/source.
+# .env is untrusted local data, never executable shell input.
 if [ -f .env ]; then
-  SAFE_ENV_TMP="$(mktemp)"
-  trap 'rm -f "$SAFE_ENV_TMP"' EXIT
-  if ! python scripts/load_start_env.py .env > "$SAFE_ENV_TMP"; then
+  SAFE_ENV_TMP="$(/usr/bin/mktemp)"
+  trap '/bin/rm -f "$SAFE_ENV_TMP"' EXIT
+  if ! "$VENV_PYTHON" scripts/load_start_env.py .env > "$SAFE_ENV_TMP"; then
     echo "BLOCKED: .env could not be loaded as safe data. No Paper or Live order was sent." >&2
     exit 2
   fi
@@ -52,34 +78,26 @@ if [ -f .env ]; then
     printf -v "$SAFE_ENV_KEY" '%s' "$SAFE_ENV_VALUE"
     export "$SAFE_ENV_KEY"
   done < "$SAFE_ENV_TMP"
-  rm -f "$SAFE_ENV_TMP"
+  /bin/rm -f "$SAFE_ENV_TMP"
   trap - EXIT
   unset SAFE_ENV_TMP SAFE_ENV_KEY SAFE_ENV_VALUE
 fi
 
-# .env is local/ignored evidence, not part of the attested checkout. It must
-# never be able to change which Python executable/package tree the runtime uses.
-PATH="$TRUSTED_PYTHON_PATH"
-export PATH
-unset PYTHONPATH PYTHONHOME
-
-# Re-attest the complete tracked/untracked strategy/startup source boundary
-# after setup/pip/.env-data handling and immediately before application Python.
-# This catches any checkout mutation that occurred after the initial gate.
-bash scripts/verify_strategy_source_clean.sh
-bash scripts/ensure_exact_checkout_runtime.sh
+# Re-attest after setup/pip/.env-data handling and immediately before app code.
+/bin/bash scripts/verify_strategy_source_clean.sh
+verify_exact_checkout_runtime
 
 echo "バックテストを開始します..."
-python main_simple_step8.py
+"$VENV_PYTHON" main_simple_step8.py
 
 echo "最新シグナル判定を開始します..."
-python -m signal_runner
+"$VENV_PYTHON" -m signal_runner
 
 echo "ダッシュボードを生成します..."
-python -m dashboard
+"$VENV_PYTHON" -m dashboard
 
 echo "BUY・SELL候補ダッシュボードを生成します..."
-python -m candidate_dashboard
+"$VENV_PYTHON" -m candidate_dashboard
 
 echo "変更追跡を実行します..."
-python -m change_tracker
+"$VENV_PYTHON" -m change_tracker
