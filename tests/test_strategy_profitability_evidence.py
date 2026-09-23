@@ -22,6 +22,7 @@ def _fill(
     fx: float | None = 1.0,
     exec_ids: list[str] | None = None,
     strategy_source_sha: str | None = "c" * 40,
+    strategy_parameters_sha: str | None = "e" * 64,
 ) -> dict:
     row = {
         "created_at": "2026-09-01T10:00:00+09:00",
@@ -36,6 +37,8 @@ def _fill(
     }
     if strategy_source_sha is not None:
         row["strategy_source_sha"] = strategy_source_sha
+    if strategy_parameters_sha is not None:
+        row["strategy_parameters_sha"] = strategy_parameters_sha
     if fx is not None:
         row["fx_to_account_rate"] = fx
     if exec_ids is not None:
@@ -829,6 +832,43 @@ def test_fee_aware_local_ledgers_never_claim_authenticated_broker_provenance():
     assert result.fees_accounted is True
     assert result.broker_provenance_verified is False
     assert "not yet authenticated" in result.reason
+
+
+
+
+def test_mixed_strategy_parameter_sha_never_proves_one_strategy():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+            strategy_parameters_sha="e" * 64,
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+            strategy_parameters_sha="f" * 64,
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+    assert result.strategy_parameters_sha is None
+    assert result.net_profitability_proven is False
+    assert result.live_ready is False
 
 
 def test_mixed_strategy_source_sha_never_proves_one_version():
