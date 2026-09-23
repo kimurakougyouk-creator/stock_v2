@@ -190,6 +190,24 @@ def test_stale_latest_trade_blocks():
     assert any("evidence age" in blocker for blocker in decision.blockers)
 
 
+
+
+def test_fresh_regenerated_report_cannot_refresh_old_trade_evidence():
+    report = _report()
+    report["generated_at"] = "2026-09-23T02:59:30+00:00"
+
+    decision = evaluate_strategy_promotion(
+        report,
+        _policy(maximum_evidence_age_seconds=60),
+        source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+
+    assert decision.promotion_policy_passed is False
+    assert decision.observed_evidence_age_seconds == 24 * 60 * 60
+    assert any("evidence age" in blocker for blocker in decision.blockers)
+
+
 def test_minimum_observation_span_blocks():
     decision = evaluate_strategy_promotion(
         _report(),
