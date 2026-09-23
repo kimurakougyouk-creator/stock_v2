@@ -30,6 +30,24 @@ preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
+_BOUND_PROCESS_START_SOURCE_SHA: str | None = None
+_BOUND_STRATEGY_PARAMETERS_SHA: str | None = None
+
+
+def bind_strategy_runtime_identity(
+    *, process_start_source_sha: str | None, strategy_parameters_sha: str | None
+) -> None:
+    """Bind the pre-import source and effective strategy identity for one process."""
+    global _BOUND_PROCESS_START_SOURCE_SHA, _BOUND_STRATEGY_PARAMETERS_SHA
+    source = str(process_start_source_sha or "").strip().lower()
+    params = str(strategy_parameters_sha or "").strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(source):
+        raise RuntimeError("process-start strategy source SHA is unavailable")
+    if not _PARAMETERS_SHA_RE.fullmatch(params):
+        raise RuntimeError("effective strategy parameter identity is unavailable")
+    _BOUND_PROCESS_START_SOURCE_SHA = source
+    _BOUND_STRATEGY_PARAMETERS_SHA = params
+
 
 def _exact_runtime_source_sha(repository_root: Path = Path(".")) -> str:
     """Resolve the exact source revision before any Paper broker transport."""
@@ -134,12 +152,16 @@ def execute_approved_signal_via_ibkr_paper(
         return SignalExecutionResult(False, "IBKR Paper disabled")
 
     normalized_signal = str(signal).strip().upper()
-    captured_source_sha = str(process_start_source_sha or "").strip().lower()
+    captured_source_sha = str(
+        process_start_source_sha or _BOUND_PROCESS_START_SOURCE_SHA or ""
+    ).strip().lower()
     if not _SOURCE_SHA_RE.fullmatch(captured_source_sha):
         raise RuntimeError(
             "process-start strategy source SHA is unavailable; Paper order blocked"
         )
-    normalized_parameters_sha = str(strategy_parameters_sha or "").strip().lower()
+    normalized_parameters_sha = str(
+        strategy_parameters_sha or _BOUND_STRATEGY_PARAMETERS_SHA or ""
+    ).strip().lower()
     if not _PARAMETERS_SHA_RE.fullmatch(normalized_parameters_sha):
         raise RuntimeError(
             "effective strategy parameter identity is unavailable; Paper order blocked"
