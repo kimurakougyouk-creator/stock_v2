@@ -74,6 +74,7 @@ class StrategyProfitabilityEvidence:
     net_profitability_proven: bool = False
     live_ready: bool = False
     strategy_source_sha: str | None = None
+    broker_provenance_verified: bool = False
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -798,8 +799,8 @@ def build_strategy_profitability_evidence(
         reason=(
             "Every natural strategy fill is bound to explicit broker exec_id commission "
             "evidence; net realized PnL includes buy and sell commissions in account currency. "
-            "The versioned strategy-promotion policy is not yet implemented/passed, so "
-            "net_profitability_proven remains false."
+            "The local raw fill/commission ledgers are not yet authenticated against an "
+            "independent broker provenance source, so promotion remains fail-closed."
         ),
         account_currency=account,
         strategy_fill_count=len(strategy_fills),
@@ -815,6 +816,10 @@ def build_strategy_profitability_evidence(
         net_profitability_proven=False,
         live_ready=False,
         strategy_source_sha=strategy_source_sha,
+        # Local ignored ledgers can be internally consistent after manual edits.
+        # Until a separate authenticated broker-provenance mechanism exists,
+        # the operational builder must never assert provenance verification.
+        broker_provenance_verified=False,
     )
 
 
