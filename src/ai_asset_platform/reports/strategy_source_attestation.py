@@ -53,4 +53,42 @@ def attest_strategy_source(
         raise StrategySourceAttestationError(
             f"strategy source attestation blocked: {detail}"
         )
+
+    # Strategy evidence/runtime attestation is stricter than the reusable Live
+    # source-cutover audit: executable ignored bytecode caches are not trusted.
+    # A timestamp-valid .pyc can otherwise execute bytes that are absent from
+    # the attested commit even when tracked source is clean.
+    try:
+        ignored = runner(
+            [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--",
+                *STRATEGY_AUDITED_PATHS,
+            ],
+            cwd=str(repository_root),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StrategySourceAttestationError(
+            "strategy source attestation blocked: ignored-cache audit failed"
+        ) from exc
+    ignored_cache_entries = tuple(
+        line.strip()
+        for line in str(ignored.stdout or "").splitlines()
+        if "/__pycache__/" in f"/{line.strip().replace(chr(92), '/')}"
+        and line.strip().lower().endswith((".pyc", ".pyo"))
+    )
+    if ignored_cache_entries:
+        detail = ", ".join(
+            f"IGNORED_EXECUTABLE_CACHE {entry}" for entry in ignored_cache_entries
+        )
+        raise StrategySourceAttestationError(
+            f"strategy source attestation blocked: {detail}"
+        )
     return result.actual_commit_sha
