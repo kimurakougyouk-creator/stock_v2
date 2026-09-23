@@ -650,6 +650,21 @@ def test_shell_gate_blocks_untracked_root_package_shadow(tmp_path: Path):
     assert "tracked or untracked strategy source changes" in result.stderr
 
 
+
+
+def test_shell_gate_blocks_third_party_root_symlink_shadow(tmp_path: Path):
+    root = _repo(tmp_path)
+    outside = tmp_path / "outside-ibapi"
+    outside.mkdir()
+    (outside / "__init__.py").write_text("VALUE = 'shadow'\n", encoding="utf-8")
+    (root / "ibapi").symlink_to(outside, target_is_directory=True)
+
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "root-level symlink" in result.stderr
+
+
 def test_shell_gate_blocks_external_root_package_symlink_shadow(tmp_path: Path):
     root = _repo(tmp_path)
     dashboard = root / "dashboard.py"
