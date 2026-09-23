@@ -8,7 +8,7 @@
   "minimum_win_rate": null,
   "minimum_profit_factor": null,
   "minimum_observation_span_seconds": null,
-  "maximum_latest_trade_age_seconds": null,
+  "maximum_evidence_age_seconds": null,
   "status": "BLOCKED_PENDING_EXPLICIT_THRESHOLDS",
   "notes": [
     "This checked-in policy is intentionally disabled.",

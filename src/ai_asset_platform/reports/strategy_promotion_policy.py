@@ -21,7 +21,7 @@ from typing import Any
 
 POLICY_SCHEMA_VERSION = 1
 DECISION_SCHEMA_VERSION = 1
-EXPECTED_PROFITABILITY_SCHEMA_VERSION = 3
+EXPECTED_PROFITABILITY_SCHEMA_VERSION = 4
 
 DEFAULT_POLICY_PATH = Path("config/strategy_promotion_policy.json")
 DEFAULT_PROFITABILITY_REPORT_PATH = Path(
@@ -49,7 +49,7 @@ class StrategyPromotionPolicy:
     minimum_win_rate: float | None = None
     minimum_profit_factor: float | None = None
     minimum_observation_span_seconds: int | None = None
-    maximum_latest_trade_age_seconds: int | None = None
+    maximum_evidence_age_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -67,7 +67,7 @@ class StrategyPromotionDecision:
     observed_win_rate: float | None
     observed_profit_factor: float | None
     observed_observation_span_seconds: int | None
-    observed_latest_trade_age_seconds: int | None
+    observed_evidence_age_seconds: int | None
 
 
 def _exact_int(value: object, *, field: str, minimum: int | None = None) -> int:
@@ -198,9 +198,9 @@ def load_strategy_promotion_policy(path: Path) -> StrategyPromotionPolicy:
         field="minimum_observation_span_seconds",
         minimum=0,
     )
-    maximum_latest_trade_age_seconds = _exact_int(
-        payload.get("maximum_latest_trade_age_seconds"),
-        field="maximum_latest_trade_age_seconds",
+    maximum_evidence_age_seconds = _exact_int(
+        payload.get("maximum_evidence_age_seconds"),
+        field="maximum_evidence_age_seconds",
         minimum=1,
     )
     return StrategyPromotionPolicy(
@@ -213,7 +213,7 @@ def load_strategy_promotion_policy(path: Path) -> StrategyPromotionPolicy:
         minimum_win_rate=minimum_win_rate,
         minimum_profit_factor=minimum_profit_factor,
         minimum_observation_span_seconds=minimum_observation_span_seconds,
-        maximum_latest_trade_age_seconds=maximum_latest_trade_age_seconds,
+        maximum_evidence_age_seconds=maximum_evidence_age_seconds,
     )
 
 
@@ -281,6 +281,30 @@ def evaluate_strategy_promotion(
     if not _SHA_RE.fullmatch(source):
         blockers.append("source_sha is not an exact 40-character lowercase git SHA")
 
+    evidence_source = str(profitability_report.get("source_sha") or "").strip().lower() if isinstance(profitability_report, dict) else ""
+    if not _SHA_RE.fullmatch(evidence_source):
+        blockers.append("profitability report source_sha is missing or malformed")
+    elif evidence_source != source:
+        blockers.append("profitability report source_sha does not match evaluated source_sha")
+
+    evidence_age_seconds: int | None = None
+    if isinstance(profitability_report, dict):
+        try:
+            generated = _parse_timestamp(
+                profitability_report.get("generated_at"),
+                field="profitability report generated_at",
+            )
+            future_tolerance = timedelta(minutes=5)
+            if generated > checked + future_tolerance:
+                blockers.append("profitability report generated_at is unexpectedly in the future")
+            else:
+                evidence_age_seconds = max(
+                    0,
+                    int((checked - generated).total_seconds()),
+                )
+        except StrategyPromotionPolicyError as exc:
+            blockers.append(str(exc))
+
     if not policy.enabled:
         blockers.append(
             "strategy-promotion policy is disabled pending explicit threshold approval"
@@ -311,7 +335,7 @@ def evaluate_strategy_promotion(
     win_rate: float | None = None
     profit_factor: float | None = None
     observation_span_seconds: int | None = None
-    latest_trade_age_seconds: int | None = None
+    evidence_age_observed: int | None = evidence_age_seconds
 
     try:
         closed_trades = _exact_int(
@@ -353,10 +377,6 @@ def evaluate_strategy_promotion(
             raise StrategyPromotionPolicyError(
                 "latest realized trade timestamp is unexpectedly in the future"
             )
-        latest_trade_age_seconds = max(
-            0,
-            int((checked - latest_sold).total_seconds()),
-        )
     except StrategyPromotionPolicyError as exc:
         blockers.append(str(exc))
 
@@ -367,12 +387,12 @@ def evaluate_strategy_promotion(
         assert win_rate is not None
         assert profit_factor is not None
         assert observation_span_seconds is not None
-        assert latest_trade_age_seconds is not None
+        assert evidence_age_observed is not None
         assert policy.minimum_closed_trades is not None
         assert policy.minimum_net_profit_account_currency is not None
         assert policy.maximum_drawdown_account_currency is not None
         assert policy.minimum_observation_span_seconds is not None
-        assert policy.maximum_latest_trade_age_seconds is not None
+        assert policy.maximum_evidence_age_seconds is not None
 
         if closed_trades < policy.minimum_closed_trades:
             blockers.append(
@@ -408,10 +428,10 @@ def evaluate_strategy_promotion(
                 f"observation span {observation_span_seconds}s < required "
                 f"{policy.minimum_observation_span_seconds}s"
             )
-        if latest_trade_age_seconds > policy.maximum_latest_trade_age_seconds:
+        if evidence_age_observed > policy.maximum_evidence_age_seconds:
             blockers.append(
-                f"latest trade age {latest_trade_age_seconds}s > allowed "
-                f"{policy.maximum_latest_trade_age_seconds}s"
+                f"evidence age {evidence_age_observed}s > allowed "
+                f"{policy.maximum_evidence_age_seconds}s"
             )
 
     passed = policy.enabled and not blockers
@@ -434,7 +454,7 @@ def evaluate_strategy_promotion(
             else profit_factor
         ),
         observed_observation_span_seconds=observation_span_seconds,
-        observed_latest_trade_age_seconds=latest_trade_age_seconds,
+        observed_evidence_age_seconds=evidence_age_observed,
     )
 
 

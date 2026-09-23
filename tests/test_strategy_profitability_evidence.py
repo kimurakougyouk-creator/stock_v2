@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ai_asset_platform.reports.strategy_profitability_evidence import (
@@ -222,8 +223,15 @@ def test_cross_currency_fx_is_required_instead_of_guessed():
 
 def test_serialized_evidence_matches_live_cash_readiness_schema_and_blocks_live():
     result = build_strategy_profitability_evidence([], account_currency="JPY")
-    record = evidence_record(result)
+    record = evidence_record(
+        result,
+        source_sha="a" * 40,
+        generated_at=datetime(2026, 9, 23, 3, 0, tzinfo=timezone.utc),
+    )
 
+    assert record["schema_version"] == 4
+    assert record["source_sha"] == "a" * 40
+    assert record["generated_at"] == "2026-09-23T03:00:00+00:00"
     assert record["paper_only"] is True
     assert record["broker_connection_used"] is False
     assert record["order_sent"] is False

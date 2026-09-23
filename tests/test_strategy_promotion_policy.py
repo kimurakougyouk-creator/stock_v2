@@ -26,7 +26,7 @@ def _policy(**overrides) -> StrategyPromotionPolicy:
         minimum_win_rate=50.0,
         minimum_profit_factor=1.2,
         minimum_observation_span_seconds=2 * 24 * 60 * 60,
-        maximum_latest_trade_age_seconds=7 * 24 * 60 * 60,
+        maximum_evidence_age_seconds=7 * 24 * 60 * 60,
     )
     values.update(overrides)
     return StrategyPromotionPolicy(**values)
@@ -55,8 +55,10 @@ def _trade(day: int, *, pnl: float) -> dict:
 def _report() -> dict:
     trades = [_trade(0, pnl=150.0), _trade(1, pnl=-50.0), _trade(2, pnl=200.0)]
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "evidence_status": "NET_POSITIVE_AFTER_FEES",
+        "source_sha": SOURCE_SHA,
+        "generated_at": "2026-09-23T02:30:00+00:00",
         "paper_only": True,
         "broker_connection_used": False,
         "order_sent": False,
@@ -167,13 +169,13 @@ def test_maximum_drawdown_blocks():
 def test_stale_latest_trade_blocks():
     decision = evaluate_strategy_promotion(
         _report(),
-        _policy(maximum_latest_trade_age_seconds=60),
+        _policy(maximum_evidence_age_seconds=60),
         source_sha=SOURCE_SHA,
         now=NOW,
     )
 
     assert decision.promotion_policy_passed is False
-    assert any("latest trade age" in blocker for blocker in decision.blockers)
+    assert any("evidence age" in blocker for blocker in decision.blockers)
 
 
 def test_minimum_observation_span_blocks():
@@ -198,6 +200,21 @@ def test_invalid_source_sha_blocks_even_when_metrics_pass():
 
     assert decision.promotion_policy_passed is False
     assert any("source_sha" in blocker for blocker in decision.blockers)
+
+
+def test_profitability_evidence_must_be_bound_to_same_source_sha():
+    report = _report()
+    report["source_sha"] = "b" * 40
+
+    decision = evaluate_strategy_promotion(
+        report,
+        _policy(),
+        source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+
+    assert decision.promotion_policy_passed is False
+    assert any("does not match" in blocker for blocker in decision.blockers)
 
 
 def test_unbounded_profit_factor_can_satisfy_minimum():

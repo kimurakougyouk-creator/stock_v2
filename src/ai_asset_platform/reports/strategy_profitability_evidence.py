@@ -20,10 +20,13 @@ Live Trading.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import json
 import math
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import re
+import subprocess
 from typing import Iterable
 
 from ai_asset_platform.core.settings import SETTINGS
@@ -41,7 +44,8 @@ STRATEGY_INTENT_PREFIX = "signal-runner:"
 DEFAULT_ORDER_LOG_PATH = Path("results/paper_orders.jsonl")
 DEFAULT_COMMISSION_REPORT_PATH = Path("results/ibkr_paper_commission_evidence_ledger.json")
 DEFAULT_REPORT_PATH = Path("results/strategy_profitability_evidence_latest.json")
-REPORT_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class StrategyProfitabilityEvidenceError(ValueError):
@@ -794,10 +798,46 @@ def build_strategy_profitability_evidence(
     )
 
 
-def evidence_record(result: StrategyProfitabilityEvidence) -> dict:
+def _git_head(repository_root: Path = Path(".")) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise StrategyProfitabilityEvidenceError(
+            "cannot determine exact strategy source SHA"
+        ) from exc
+    sha = completed.stdout.strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(sha):
+        raise StrategyProfitabilityEvidenceError(
+            "git HEAD is not an exact 40-character lowercase SHA"
+        )
+    return sha
+
+
+def evidence_record(
+    result: StrategyProfitabilityEvidence,
+    *,
+    source_sha: str | None = None,
+    generated_at: datetime | None = None,
+) -> dict:
+    normalized_sha = None
+    if source_sha is not None:
+        normalized_sha = str(source_sha).strip().lower()
+        if not _SOURCE_SHA_RE.fullmatch(normalized_sha):
+            raise StrategyProfitabilityEvidenceError(
+                "source_sha is not an exact 40-character lowercase SHA"
+            )
+    generated = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         **asdict(result),
+        "source_sha": normalized_sha,
+        "generated_at": generated.isoformat(timespec="seconds"),
         "strategy_intent_prefix": STRATEGY_INTENT_PREFIX,
         "strategy_intent_shape": "signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>",
         "paper_only": True,
@@ -833,11 +873,23 @@ def persist_strategy_profitability_evidence(
     result: StrategyProfitabilityEvidence,
     *,
     report_path: Path = DEFAULT_REPORT_PATH,
+    source_sha: str | None = None,
+    generated_at: datetime | None = None,
 ) -> None:
+    exact_source_sha = source_sha or _git_head()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = report_path.with_suffix(report_path.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(evidence_record(result), ensure_ascii=False, indent=2, sort_keys=True)
+        json.dumps(
+            evidence_record(
+                result,
+                source_sha=exact_source_sha,
+                generated_at=generated_at,
+            ),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
         + "\n",
         encoding="utf-8",
     )
