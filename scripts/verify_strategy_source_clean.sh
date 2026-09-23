@@ -34,6 +34,10 @@ AUDITED_PATHS=(
   scripts/ensure_exact_checkout_runtime.sh
   scripts/verify_exact_checkout_import.py
   scripts/load_start_env.py
+  scripts/run_isolated_venv_python.py
+  scripts/ibkr_verified_paper_runtime_once_sanitized.sh
+  scripts/ibkr_strategy_profitability_evidence_once_sanitized.sh
+  scripts/strategy_promotion_policy_once_sanitized.sh
   ibkr_verified_paper_runtime_once.sh
   ibkr_strategy_profitability_evidence_once.sh
   strategy_promotion_policy_once.sh
@@ -44,14 +48,14 @@ AUDITED_PATHS=(
   usercustomize.pyc
 )
 
-ACTUAL_SHA="$(git rev-parse HEAD)"
+ACTUAL_SHA="$(/usr/bin/git rev-parse HEAD)"
 if [[ ! "$ACTUAL_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
   echo "BLOCKED: exact strategy source SHA is unavailable. No Paper or Live order was sent." >&2
   exit 2
 fi
 
 SOURCE_DIRTY="$(
-  git status --porcelain=v1 --untracked-files=all -- "${AUDITED_PATHS[@]}"
+  /usr/bin/git status --porcelain=v1 --untracked-files=all -- "${AUDITED_PATHS[@]}"
 )"
 if [[ -n "$SOURCE_DIRTY" ]]; then
   echo "BLOCKED: tracked or untracked strategy source changes are present before Python launch. No Paper or Live order was sent." >&2
@@ -64,7 +68,7 @@ fi
 # not traverse a symlink to an external package, so reject same-name root
 # symlinks explicitly.
 ROOT_MODULE_SYMLINK_SHADOWS="$(
-  git ls-files -- ':(top,glob)*.py' |
+  /usr/bin/git ls-files -- ':(top,glob)*.py' |
     while IFS= read -r module_path; do
       module_stem="${module_path%.py}"
       if [[ -L "$module_stem" ]]; then
@@ -94,8 +98,8 @@ if [[ -n "$ROOT_SYMLINKS" ]]; then
 fi
 
 INDEX_HIDDEN="$(
-  git ls-files -v -- "${AUDITED_PATHS[@]}" |
-    awk '$1 == "S" || $1 ~ /^[a-z]$/ { print }'
+  /usr/bin/git ls-files -v -- "${AUDITED_PATHS[@]}" |
+    /usr/bin/awk '$1 == "S" || $1 ~ /^[a-z]$/ { print }'
 )"
 if [[ -n "$INDEX_HIDDEN" ]]; then
   echo "BLOCKED: strategy source contains assume-unchanged or skip-worktree entries. No Paper or Live order was sent." >&2
@@ -103,7 +107,7 @@ if [[ -n "$INDEX_HIDDEN" ]]; then
 fi
 
 IGNORED_IMPORTABLE="$(
-  git ls-files --others --ignored --exclude-standard -- "${AUDITED_PATHS[@]}" |
+  /usr/bin/git ls-files --others --ignored --exclude-standard -- "${AUDITED_PATHS[@]}" |
     while IFS= read -r path; do
       if [[ -L "$path" ]]; then
         printf '%s\n' "$path"
