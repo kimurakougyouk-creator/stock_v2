@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import ai_asset_platform.reports.strategy_promotion_policy as promotion_module
 
 from ai_asset_platform.reports.strategy_promotion_policy import (
     StrategyPromotionPolicy,
@@ -387,3 +390,76 @@ def test_module_contains_no_broker_mutation_api_calls():
         "live_trading_unlocked=True",
     ):
         assert forbidden not in source
+
+def test_main_regenerates_profitability_from_raw_ledgers_instead_of_loading_mutable_report(
+    monkeypatch,
+):
+    raw_result = object()
+    canonical_report = {"canonical_from_raw_ledgers": True}
+    observed = {}
+
+    monkeypatch.setattr(
+        promotion_module,
+        "load_strategy_promotion_policy",
+        lambda path: _policy(),
+    )
+    monkeypatch.setattr(promotion_module, "_git_head", lambda: SOURCE_SHA)
+    monkeypatch.setattr(
+        promotion_module,
+        "_load_json_object",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable profitability JSON must not be promotion authority")
+        ),
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "audit_strategy_profitability_evidence",
+        lambda: raw_result,
+    )
+
+    def _persist_raw(result, *, source_sha):
+        observed["persisted_result"] = result
+        observed["persisted_source_sha"] = source_sha
+
+    monkeypatch.setattr(
+        promotion_module,
+        "persist_strategy_profitability_evidence",
+        _persist_raw,
+    )
+
+    def _canonical_record(result, *, source_sha):
+        assert result is raw_result
+        assert source_sha == SOURCE_SHA
+        return canonical_report
+
+    monkeypatch.setattr(
+        promotion_module,
+        "profitability_evidence_record",
+        _canonical_record,
+    )
+
+    def _evaluate(report, policy, *, source_sha):
+        observed["evaluated_report"] = report
+        observed["evaluated_source_sha"] = source_sha
+        return SimpleNamespace(
+            status="PROMOTION_POLICY_PASS",
+            policy_version=policy.policy_version,
+            source_sha=source_sha,
+            promotion_policy_passed=True,
+            normal_live_strategy_deployment_allowed=False,
+            blockers=(),
+        )
+
+    monkeypatch.setattr(promotion_module, "evaluate_strategy_promotion", _evaluate)
+    monkeypatch.setattr(
+        promotion_module,
+        "persist_strategy_promotion_decision",
+        lambda decision: observed.setdefault("decision", decision),
+    )
+
+    assert promotion_module.main() == 0
+    assert observed["persisted_result"] is raw_result
+    assert observed["persisted_source_sha"] == SOURCE_SHA
+    assert observed["evaluated_report"] is canonical_report
+    assert observed["evaluated_source_sha"] == SOURCE_SHA
+    assert observed["decision"].normal_live_strategy_deployment_allowed is False
