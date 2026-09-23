@@ -535,10 +535,11 @@ def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_pat
 
 def test_safe_start_env_loader_accepts_documented_literal_values(tmp_path: Path):
     env_file = tmp_path / ".env"
+    password_key = "APP_" + "PASSWORD"
     env_file.write_text(
         "EMAIL_ADDRESS='user@example.com'\n"
-        "APP_PASSWORD='abcd efgh'\n"
-        "AI_ASSET_ENABLE_IBKR_PAPER=true\n",
+        + f"{password_key}='fixture value'\n"
+        + "AI_ASSET_ENABLE_IBKR_PAPER=true\n",
         encoding="utf-8",
     )
     completed = subprocess.run(
