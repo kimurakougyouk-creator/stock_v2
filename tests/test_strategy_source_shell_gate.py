@@ -249,8 +249,20 @@ def test_promotion_wrapper_invalidates_stale_pass_when_shell_gate_blocks(tmp_pat
         Path(__file__).parents[1] / "strategy_promotion_policy_once.sh",
         root / "strategy_promotion_policy_once.sh",
     )
+    shutil.copy2(
+        Path(__file__).parents[1]
+        / "scripts"
+        / "strategy_promotion_policy_once_sanitized.sh",
+        root / "scripts" / "strategy_promotion_policy_once_sanitized.sh",
+    )
     (root / ".gitignore").write_text("__pycache__/\nresults/\n", encoding="utf-8")
-    _git(root, "add", ".gitignore", "strategy_promotion_policy_once.sh")
+    _git(
+        root,
+        "add",
+        ".gitignore",
+        "strategy_promotion_policy_once.sh",
+        "scripts/strategy_promotion_policy_once_sanitized.sh",
+    )
     subprocess.run(
         [
             "git",
@@ -303,15 +315,27 @@ def test_promotion_wrapper_invalidates_stale_pass_when_shell_gate_blocks(tmp_pat
 
 def test_strategy_operational_wrappers_disable_python_bytecode_before_python_tools():
     root = Path(__file__).parents[1]
-    for name in (
-        "start.sh",
-        "strategy_promotion_policy_once.sh",
-        "ibkr_strategy_profitability_evidence_once.sh",
-        "ibkr_verified_paper_runtime_once.sh",
-    ):
+    pairs = (
+        ("start.sh", None),
+        (
+            "strategy_promotion_policy_once.sh",
+            "scripts/strategy_promotion_policy_once_sanitized.sh",
+        ),
+        (
+            "ibkr_strategy_profitability_evidence_once.sh",
+            "scripts/ibkr_strategy_profitability_evidence_once_sanitized.sh",
+        ),
+        (
+            "ibkr_verified_paper_runtime_once.sh",
+            "scripts/ibkr_verified_paper_runtime_once_sanitized.sh",
+        ),
+    )
+    for name, body_name in pairs:
         source = (root / name).read_text(encoding="utf-8")
-        export_index = source.find("export PYTHONDONTWRITEBYTECODE=1")
-        assert export_index >= 0, name
+        if body_name is not None:
+            source += "\n" + (root / body_name).read_text(encoding="utf-8")
+        bytecode_index = source.find("PYTHONDONTWRITEBYTECODE=1")
+        assert bytecode_index >= 0, name
         for marker in (
             "source .venv/bin/activate",
             "bash scripts/ensure_exact_checkout_runtime.sh",
@@ -320,7 +344,7 @@ def test_strategy_operational_wrappers_disable_python_bytecode_before_python_too
         ):
             marker_index = source.find(marker)
             if marker_index >= 0:
-                assert export_index < marker_index, (name, marker)
+                assert bytecode_index < marker_index, (name, marker)
 
 
 def test_python_dont_write_bytecode_environment_prevents_import_cache(tmp_path: Path):
@@ -533,21 +557,56 @@ def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
 
 def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_path: Path):
     root = _repo(tmp_path)
+    repo_root = Path(__file__).parents[1]
     shutil.copy2(
-        Path(__file__).parents[1] / "strategy_promotion_policy_once.sh",
+        repo_root / "strategy_promotion_policy_once.sh",
         root / "strategy_promotion_policy_once.sh",
     )
-    ensure = root / "scripts" / "ensure_exact_checkout_runtime.sh"
-    ensure.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    shutil.copy2(
+        repo_root / "scripts" / "strategy_promotion_policy_once_sanitized.sh",
+        root / "scripts" / "strategy_promotion_policy_once_sanitized.sh",
+    )
+    shutil.copy2(
+        repo_root / "scripts" / "run_isolated_venv_python.py",
+        root / "scripts" / "run_isolated_venv_python.py",
+    )
     verifier = root / "scripts" / "verify_exact_checkout_import.py"
     verifier.write_text("raise SystemExit(0)\n", encoding="utf-8")
+
+    package = root / "src" / "ai_asset_platform" / "reports"
+    package.mkdir(parents=True)
+    (root / "src" / "ai_asset_platform" / "__init__.py").write_text(
+        "", encoding="utf-8"
+    )
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "strategy_promotion_policy.py").write_text(
+        "from pathlib import Path\n"
+        "import json\n"
+        "Path('results').mkdir(exist_ok=True)\n"
+        "Path('results/strategy_promotion_decision_latest.json').write_text("
+        "json.dumps({"
+        "'status':'PROMOTION_POLICY_BLOCKED',"
+        "'policy_version':'test-v1',"
+        "'promotion_policy_passed':False,"
+        "'normal_live_strategy_deployment_allowed':False,"
+        "'blockers':['minimum closed trades not met'],"
+        "'live_trading':'PROHIBITED'"
+        "}), encoding='utf-8')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+
     (root / ".gitignore").write_text(".venv/\nresults/\n", encoding="utf-8")
     _git(
         root,
         "add",
         "strategy_promotion_policy_once.sh",
-        "scripts/ensure_exact_checkout_runtime.sh",
+        "scripts/strategy_promotion_policy_once_sanitized.sh",
+        "scripts/run_isolated_venv_python.py",
         "scripts/verify_exact_checkout_import.py",
+        "src/ai_asset_platform/__init__.py",
+        "src/ai_asset_platform/reports/__init__.py",
+        "src/ai_asset_platform/reports/strategy_promotion_policy.py",
         ".gitignore",
     )
     subprocess.run(
@@ -567,26 +626,17 @@ def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_pat
         text=True,
     )
 
-    bindir = root / ".venv" / "bin"
-    bindir.mkdir(parents=True)
-    activate = bindir / "activate"
-    activate.write_text(f'export PATH="{bindir!s}:$PATH"\n', encoding="utf-8")
-    pytest = bindir / "pytest"
-    pytest.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    pytest.chmod(0o755)
-    python = bindir / "python"
-    python.write_text(
-        "#!/usr/bin/env bash\n"
-        "mkdir -p results\n"
-        "cat > results/strategy_promotion_decision_latest.json <<'EOF'\n"
-        '{"status":"PROMOTION_POLICY_BLOCKED","policy_version":"test-v1",'
-        '"promotion_policy_passed":false,"normal_live_strategy_deployment_allowed":false,'
-        '"blockers":["minimum closed trades not met"],"live_trading":"PROHIBITED"}\n'
-        "EOF\n"
-        "exit 1\n",
-        encoding="utf-8",
+    site_packages = (
+        root
+        / ".venv"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
     )
-    python.chmod(0o755)
+    pytest_pkg = site_packages / "pytest"
+    pytest_pkg.mkdir(parents=True)
+    (pytest_pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pytest_pkg / "__main__.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
 
     completed = subprocess.run(
         ["bash", "strategy_promotion_policy_once.sh"],
@@ -597,7 +647,7 @@ def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_pat
         text=True,
     )
 
-    assert completed.returncode == 1
+    assert completed.returncode == 1, completed.stderr
     payload = json.loads(
         (root / "results" / "strategy_promotion_decision_latest.json").read_text(
             encoding="utf-8"

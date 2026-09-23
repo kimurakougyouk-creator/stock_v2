@@ -34,8 +34,8 @@ def test_wrapper_enters_clean_shell_before_bash_body(
     body.write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
-        "test -z \"\${BASH_ENV:-}\"\n"
-        "test -z \"\${ENV:-}\"\n"
+        "test -z \"${BASH_ENV:-}\"\n"
+        "test -z \"${ENV:-}\"\n"
         "test \"$PATH\" = /usr/local/bin:/usr/bin:/bin\n"
         "printf clean > body-ran.marker\n",
         encoding="utf-8",
