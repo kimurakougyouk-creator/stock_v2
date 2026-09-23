@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "policy_version": "v1-draft-unapproved",
+  "enabled": false,
+  "minimum_closed_trades": null,
+  "minimum_net_profit_account_currency": null,
+  "maximum_drawdown_account_currency": null,
+  "minimum_win_rate": null,
+  "minimum_profit_factor": null,
+  "minimum_observation_span_seconds": null,
+  "maximum_latest_trade_age_seconds": null,
+  "status": "BLOCKED_PENDING_EXPLICIT_THRESHOLDS",
+  "notes": [
+    "This checked-in policy is intentionally disabled.",
+    "No numeric promotion threshold has been silently invented.",
+    "A disabled or incomplete policy must never promote normal Live strategy deployment.",
+    "Passing this policy in the future will still not itself authorize any Live broker action."
+  ]
+}
