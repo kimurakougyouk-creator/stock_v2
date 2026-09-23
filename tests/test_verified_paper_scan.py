@@ -3,8 +3,20 @@ from types import SimpleNamespace
 import ai_asset_platform.execution.verified_paper_scan as module
 
 
-def _record(ticker="SPY", signal="BUY", price=700.0):
-    return {"Ticker": ticker, "FinalSignal": signal, "Close": price}
+def _record(
+    ticker="SPY",
+    signal="BUY",
+    price=700.0,
+    source_sha="a" * 40,
+    parameters_sha="b" * 64,
+):
+    return {
+        "Ticker": ticker,
+        "FinalSignal": signal,
+        "Close": price,
+        "StrategySourceSHA": source_sha,
+        "StrategyParametersSHA": parameters_sha,
+    }
 
 
 def _settings(**overrides):
@@ -22,7 +34,7 @@ def test_buy_uses_broker_verified_quantity_not_legacy_reference_shares(monkeypat
         execute_order=lambda *args: calls.append(args) or {"status": "FILLED"},
         settings=_settings(),
     )
-    assert calls == [("SPY", "BUY", 1, 700.0)]
+    assert calls == [("SPY", "BUY", 1, 700.0, "a" * 40, "b" * 64)]
     assert result["paper_orders"][0]["status"] == "FILLED"
 
 
@@ -66,7 +78,7 @@ def test_trailing_stop_forces_verified_sell(monkeypatch):
         execute_order=lambda *args: calls.append(args) or {"status": "FILLED"},
         settings=_settings(),
     )
-    assert calls == [("SPY", "SELL", 1, 700.0)]
+    assert calls == [("SPY", "SELL", 1, 700.0, "a" * 40, "b" * 64)]
     assert result["paper_orders"][0]["forced_exit"] is True
 
 
@@ -82,7 +94,7 @@ def test_time_stop_forces_verified_sell(monkeypatch):
         execute_order=lambda *args: calls.append(args) or {"status": "FILLED"},
         settings=_settings(),
     )
-    assert calls == [("9432.T", "SELL", 100, 150.0)]
+    assert calls == [("9432.T", "SELL", 100, 150.0, "a" * 40, "b" * 64)]
     assert result["paper_orders"][0]["forced_exit"] is True
 
 

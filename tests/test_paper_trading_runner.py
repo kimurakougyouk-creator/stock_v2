@@ -180,3 +180,25 @@ def test_integrated_paper_pilot_blocks_unverified_symbol(monkeypatch):
 def test_integrated_paper_pilot_rejects_non_positive_requested_quantity():
     with pytest.raises(RuntimeError, match="1以上"):
         paper_trading_runner._execute_confirmed_ibkr_paper_order("9432.T", "BUY", 0, 150.0)
+
+
+def test_integrated_paper_pilot_forwards_strategy_identity(monkeypatch):
+    calls = []
+    _allow_preflight(monkeypatch, fx=150.0)
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "execute_approved_signal_via_ibkr_paper",
+        lambda **kwargs: calls.append(kwargs) or _filled_execution(1.0, 700.0),
+    )
+    monkeypatch.setattr(
+        paper_trading_runner, "_sync_confirmed_fill_to_reporting", lambda: True
+    )
+    source_sha = "a" * 40
+    parameters_sha = "b" * 64
+
+    paper_trading_runner._execute_confirmed_ibkr_paper_order(
+        "SPY", "BUY", 1, 700.0, source_sha, parameters_sha
+    )
+
+    assert calls[0]["process_start_source_sha"] == source_sha
+    assert calls[0]["strategy_parameters_sha"] == parameters_sha

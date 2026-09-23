@@ -1022,6 +1022,8 @@ def run_signal_scan(
                 "AIAvailable": ai_result.available,
                 "FinalSignal": final_decision.signal,
                 "FinalReason": final_decision.reason,
+                "StrategySourceSHA": _PROCESS_START_STRATEGY_SOURCE_SHA,
+                "StrategyParametersSHA": strategy_parameters_sha,
             }
             records.append(record)
 
@@ -1081,6 +1083,8 @@ def run_signal_scan(
                 "AIAvailable": False,
                 "FinalSignal": "HOLD",
                 "FinalReason": "判定エラーのため、安全側でHOLDとします。",
+                "StrategySourceSHA": _PROCESS_START_STRATEGY_SOURCE_SHA,
+                "StrategyParametersSHA": None,
             }
             records.append(record)
             print(f"{ticker}: 判定中にエラーが発生しました。{exc}")

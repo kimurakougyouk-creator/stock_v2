@@ -347,11 +347,14 @@ def test_python_dont_write_bytecode_environment_prevents_import_cache(tmp_path: 
 
 def test_start_sh_verifies_exact_checkout_before_repository_python():
     root = Path(__file__).parents[1]
-    source = (root / "start.sh").read_text(encoding="utf-8")
+    launcher = (root / "start.sh").read_text(encoding="utf-8")
+    source = (root / "scripts" / "start_sanitized.sh").read_text(encoding="utf-8")
 
+    assert "AI_ASSET_START_SANITIZED" not in launcher
+    assert "exec /usr/bin/env -i" in launcher
+    assert "/bin/bash --noprofile --norc" in launcher
+    assert "scripts/start_sanitized.sh" in launcher
     assert "source .venv/bin/activate" not in source
-    assert "exec /usr/bin/env -i" in source
-    assert "/bin/bash --noprofile --norc" in source
     assert 'VENV_PYTHON="$PWD/.venv/bin/python"' in source
 
     first_source_gate = source.index("/bin/bash scripts/verify_strategy_source_clean.sh")
@@ -377,11 +380,9 @@ def test_start_sh_verifies_exact_checkout_before_repository_python():
     )
 
 
-
-
 def test_start_sh_rechecks_full_source_boundary_after_setup_and_env_data():
     root = Path(__file__).parents[1]
-    source = (root / "start.sh").read_text(encoding="utf-8")
+    source = (root / "scripts" / "start_sanitized.sh").read_text(encoding="utf-8")
 
     first_gate = source.index("/bin/bash scripts/verify_strategy_source_clean.sh")
     safe_env = source.index('"$VENV_PYTHON" scripts/load_start_env.py .env')
@@ -396,12 +397,13 @@ def test_start_sh_rechecks_full_source_boundary_after_setup_and_env_data():
 
 def test_start_sh_sanitizes_inherited_command_environment_before_gates():
     root = Path(__file__).parents[1]
-    source = (root / "start.sh").read_text(encoding="utf-8")
+    launcher = (root / "start.sh").read_text(encoding="utf-8")
+    source = (root / "scripts" / "start_sanitized.sh").read_text(encoding="utf-8")
 
-    reexec = source.index("exec /usr/bin/env -i")
-    first_gate = source.index("/bin/bash scripts/verify_strategy_source_clean.sh")
-    assert reexec < first_gate
-    assert "unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH" in source
+    assert "AI_ASSET_START_SANITIZED" not in launcher
+    assert "exec /usr/bin/env -i" in launcher
+    assert "scripts/start_sanitized.sh" in launcher
+    assert "unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH" in launcher
     assert 'export PATH="/usr/local/bin:/usr/bin:/bin"' in source
     assert "source .venv/bin/activate" not in source
     assert "source .env" not in source
@@ -451,6 +453,8 @@ def test_shell_gate_blocks_dirty_operational_test_code(tmp_path: Path):
 def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
     root = _repo(tmp_path)
     shutil.copy2(Path(__file__).parents[1] / "start.sh", root / "start.sh")
+    inner = root / "scripts" / "start_sanitized.sh"
+    shutil.copy2(Path(__file__).parents[1] / "scripts" / "start_sanitized.sh", inner)
     ensure = root / "scripts" / "ensure_exact_checkout_runtime.sh"
     ensure.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     verifier = root / "scripts" / "verify_exact_checkout_import.py"
@@ -462,6 +466,7 @@ def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
         root,
         "add",
         "start.sh",
+        "scripts/start_sanitized.sh",
         "scripts/ensure_exact_checkout_runtime.sh",
         "scripts/verify_exact_checkout_import.py",
         "scripts/load_start_env.py",
@@ -608,6 +613,10 @@ def test_safe_start_env_loader_accepts_documented_literal_values(tmp_path: Path)
     env_file.write_text(
         "EMAIL_ADDRESS='user@example.com'\n"
         + f"{password_key}='fixture value'\n"
+        + "AI_PROVIDER=gemini\n"
+        + "GEMINI_API_KEY='fixture-gemini-key'\n"
+        + "GEMINI_MODEL=gemini-test-model\n"
+        + "OPENAI_MODEL=gpt-test-model\n"
         + "AI_ASSET_ENABLE_IBKR_PAPER=true\n",
         encoding="utf-8",
     )
@@ -626,6 +635,10 @@ def test_safe_start_env_loader_accepts_documented_literal_values(tmp_path: Path)
     pairs = dict(zip(parts[0::2], parts[1::2]))
     assert pairs[b"EMAIL_ADDRESS"] == b"user@example.com"
     assert pairs[b"APP_PASSWORD"] == b"fixture value"
+    assert pairs[b"AI_PROVIDER"] == b"gemini"
+    assert pairs[b"GEMINI_API_KEY"] == b"fixture-gemini-key"
+    assert pairs[b"GEMINI_MODEL"] == b"gemini-test-model"
+    assert pairs[b"OPENAI_MODEL"] == b"gpt-test-model"
     assert pairs[b"AI_ASSET_ENABLE_IBKR_PAPER"] == b"true"
 
 

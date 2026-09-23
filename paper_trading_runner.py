@@ -197,6 +197,8 @@ def _execute_confirmed_ibkr_paper_order(
     signal: str,
     shares: int,
     reference_price: float,
+    process_start_source_sha: str | None = None,
+    strategy_parameters_sha: str | None = None,
 ) -> dict:
     normalized_signal = str(signal).upper()
     requested_shares = int(shares)
@@ -252,6 +254,8 @@ def _execute_confirmed_ibkr_paper_order(
         shares=normalized_shares,
         order_intent_id=order_intent_id,
         order_log_path=order_manager.ORDER_LOG_PATH,
+        process_start_source_sha=process_start_source_sha,
+        strategy_parameters_sha=strategy_parameters_sha,
     )
     result = execution.broker_result
     confirmed = (

@@ -39,6 +39,7 @@ STRATEGY_AUDITED_PATHS: tuple[str, ...] = (
     "pyproject.toml",
     "pytest.ini",
     "start.sh",
+    "scripts/start_sanitized.sh",
     "scripts/run.sh",
     "scripts/verify_strategy_source_clean.sh",
     "scripts/ensure_exact_checkout_runtime.sh",
