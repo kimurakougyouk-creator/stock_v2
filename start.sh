@@ -38,12 +38,23 @@ if [ ! -f ".env" ] || ! python setup_wizard.py --check >/dev/null 2>&1; then
   python setup_wizard.py
 fi
 
+# Record the complete trusted shell-function set (the venv activation
+# normally defines `deactivate`). .env may provide data variables, but it must
+# not add, remove, or redefine executable shell functions.
+TRUSTED_SHELL_FUNCTIONS="$(declare -f)"
+
 set -a
 # shellcheck disable=SC1091
 if [ -f .env ]; then
   source .env
 fi
 set +a
+
+if [[ "$(declare -f)" != "$TRUSTED_SHELL_FUNCTIONS" ]]; then
+  echo "BLOCKED: .env changed shell functions; command interception is prohibited. No Paper or Live order was sent." >&2
+  exit 2
+fi
+unset TRUSTED_SHELL_FUNCTIONS
 
 # .env is local/ignored evidence, not part of the attested checkout. It must
 # never be able to change which Python executable/package tree the runtime uses.
