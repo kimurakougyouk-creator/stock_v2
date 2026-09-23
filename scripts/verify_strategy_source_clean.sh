@@ -12,6 +12,12 @@ AUDITED_PATHS=(
   ':(top,glob)*.so'
   ':(top,glob)*.pyd'
   ':(top,glob)*.dylib'
+  ':(top,glob)*/__init__.py'
+  ':(top,glob)*/__init__.pyc'
+  ':(top,glob)*/__init__.pyo'
+  ':(top,glob)*/__init__*.so'
+  ':(top,glob)*/__init__*.pyd'
+  ':(top,glob)*/__init__*.dylib'
   tests
   ai_asset_platform
   ai_asset_platform.py
@@ -47,6 +53,25 @@ SOURCE_DIRTY="$(
 )"
 if [[ -n "$SOURCE_DIRTY" ]]; then
   echo "BLOCKED: tracked or untracked strategy source changes are present before Python launch. No Paper or Live order was sent." >&2
+  exit 2
+fi
+
+# A root directory/symlink with the same basename as a tracked root module
+# can be preferred by Python as a package (e.g. dashboard/__init__.py before
+# dashboard.py). Git pathspecs catch regular package contents, but Git does
+# not traverse a symlink to an external package, so reject same-name root
+# symlinks explicitly.
+ROOT_MODULE_SYMLINK_SHADOWS="$(
+  git ls-files -- ':(top,glob)*.py' |
+    while IFS= read -r module_path; do
+      module_stem="${module_path%.py}"
+      if [[ -L "$module_stem" ]]; then
+        printf '%s\n' "$module_stem"
+      fi
+    done
+)"
+if [[ -n "$ROOT_MODULE_SYMLINK_SHADOWS" ]]; then
+  echo "BLOCKED: root module symlink/package shadow is present. No Paper or Live order was sent." >&2
   exit 2
 fi
 
