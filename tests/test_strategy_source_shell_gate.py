@@ -461,7 +461,7 @@ def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
     )
 
     assert completed.returncode != 0
-    assert "changed shell functions" in completed.stderr
+    assert "BLOCKED: unsafe .env" in completed.stderr
     assert not marker.exists()
 
 
