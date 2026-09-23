@@ -399,6 +399,18 @@ def evaluate_strategy_promotion(
         blockers.append(
             "raw Paper fill/commission ledger provenance is not independently authenticated"
         )
+    try:
+        unattributed_recovery_fill_count = _exact_int(
+            profitability_report.get("unattributed_recovery_fill_count"),
+            field="unattributed_recovery_fill_count",
+            minimum=0,
+        )
+        if unattributed_recovery_fill_count != 0:
+            blockers.append(
+                "unattributed broker-recovery fills exist; natural strategy performance may be incomplete"
+            )
+    except StrategyPromotionPolicyError as exc:
+        blockers.append(str(exc))
 
     closed_trades: int | None = None
     net_profit: float | None = None
