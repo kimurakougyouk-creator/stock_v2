@@ -38,4 +38,53 @@ def test_exact_runtime_source_sha_blocks_before_broker_when_unavailable(monkeypa
             signal="BUY",
             shares=1,
             order_intent_id="signal-runner:AAPL:BUY:1:bar",
+            process_start_source_sha="a" * 40,
+            strategy_parameters_sha="b" * 64,
+        )
+
+
+def test_source_drift_blocks_before_broker(monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "SETTINGS",
+        SimpleNamespace(enable_paper_trading=True, enable_ibkr_paper=True),
+    )
+    monkeypatch.setattr(module, "_exact_runtime_source_sha", lambda *args, **kwargs: "b" * 40)
+    monkeypatch.setattr(
+        module,
+        "_connect_first_available_paper_broker",
+        lambda: pytest.fail("broker connection must not happen after source drift"),
+    )
+
+    with pytest.raises(RuntimeError, match="changed after process start"):
+        module.execute_approved_signal_via_ibkr_paper(
+            ticker="AAPL",
+            signal="BUY",
+            shares=1,
+            order_intent_id="signal-runner:AAPL:BUY:1:bar",
+            process_start_source_sha="a" * 40,
+            strategy_parameters_sha="c" * 64,
+        )
+
+
+def test_missing_parameter_identity_blocks_before_broker(monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "SETTINGS",
+        SimpleNamespace(enable_paper_trading=True, enable_ibkr_paper=True),
+    )
+    monkeypatch.setattr(
+        module,
+        "_connect_first_available_paper_broker",
+        lambda: pytest.fail("broker connection must not happen without parameter identity"),
+    )
+
+    with pytest.raises(RuntimeError, match="parameter identity"):
+        module.execute_approved_signal_via_ibkr_paper(
+            ticker="AAPL",
+            signal="BUY",
+            shares=1,
+            order_intent_id="signal-runner:AAPL:BUY:1:bar",
+            process_start_source_sha="a" * 40,
+            strategy_parameters_sha=None,
         )
