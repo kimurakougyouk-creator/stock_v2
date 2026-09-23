@@ -342,3 +342,192 @@ def test_start_sh_restores_trusted_path_after_env_source():
     restore_index = source.index('PATH="$TRUSTED_PYTHON_PATH"', env_index)
 
     assert capture_index < env_index < restore_index
+
+
+def test_shell_gate_blocks_untracked_root_native_module_shadow(tmp_path: Path):
+    root = _repo(tmp_path)
+    (root / "dashboard.cpython-313-x86_64-linux-gnu.so").write_bytes(b"shadow")
+
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "tracked or untracked strategy source changes" in result.stderr
+
+
+def test_shell_gate_blocks_dirty_operational_test_code(tmp_path: Path):
+    root = _repo(tmp_path)
+    tests = root / "tests"
+    tests.mkdir()
+    target = tests / "test_strategy_promotion_policy.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(root, "add", "tests/test_strategy_promotion_policy.py")
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "test trust-boundary fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    target.write_text("VALUE = 2\n", encoding="utf-8")
+
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "tracked or untracked strategy source changes" in result.stderr
+
+
+def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
+    root = _repo(tmp_path)
+    shutil.copy2(Path(__file__).parents[1] / "start.sh", root / "start.sh")
+    ensure = root / "scripts" / "ensure_exact_checkout_runtime.sh"
+    ensure.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    verifier = root / "scripts" / "verify_exact_checkout_import.py"
+    verifier.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".venv/\n.env\n", encoding="utf-8")
+    _git(
+        root,
+        "add",
+        "start.sh",
+        "scripts/ensure_exact_checkout_runtime.sh",
+        "scripts/verify_exact_checkout_import.py",
+        ".gitignore",
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "start fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    bindir = root / ".venv" / "bin"
+    bindir.mkdir(parents=True)
+    marker = root / "application-ran"
+    python = bindir / "python"
+    python.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$*\" == *\"main_simple_step8.py\"* ]]; then "
+        f"touch {marker!s}; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    activate = bindir / "activate"
+    activate.write_text(
+        f'deactivate() {{ :; }}\nexport PATH="{bindir!s}:$PATH"\n',
+        encoding="utf-8",
+    )
+    pytest = bindir / "pytest"
+    pytest.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    pytest.chmod(0o755)
+
+    (root / ".env").write_text(
+        "python() { return 0; }\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", "start.sh"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "changed shell functions" in completed.stderr
+    assert not marker.exists()
+
+
+def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_path: Path):
+    root = _repo(tmp_path)
+    shutil.copy2(
+        Path(__file__).parents[1] / "strategy_promotion_policy_once.sh",
+        root / "strategy_promotion_policy_once.sh",
+    )
+    ensure = root / "scripts" / "ensure_exact_checkout_runtime.sh"
+    ensure.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    verifier = root / "scripts" / "verify_exact_checkout_import.py"
+    verifier.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".venv/\nresults/\n", encoding="utf-8")
+    _git(
+        root,
+        "add",
+        "strategy_promotion_policy_once.sh",
+        "scripts/ensure_exact_checkout_runtime.sh",
+        "scripts/verify_exact_checkout_import.py",
+        ".gitignore",
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "promotion wrapper fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    bindir = root / ".venv" / "bin"
+    bindir.mkdir(parents=True)
+    activate = bindir / "activate"
+    activate.write_text(f'export PATH="{bindir!s}:$PATH"\n', encoding="utf-8")
+    pytest = bindir / "pytest"
+    pytest.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    pytest.chmod(0o755)
+    python = bindir / "python"
+    python.write_text(
+        "#!/usr/bin/env bash\n"
+        "mkdir -p results\n"
+        "cat > results/strategy_promotion_decision_latest.json <<'EOF'\n"
+        '{"status":"PROMOTION_POLICY_BLOCKED","policy_version":"test-v1",'
+        '"promotion_policy_passed":false,"normal_live_strategy_deployment_allowed":false,'
+        '"blockers":["minimum closed trades not met"],"live_trading":"PROHIBITED"}\n'
+        "EOF\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+
+    completed = subprocess.run(
+        ["bash", "strategy_promotion_policy_once.sh"],
+        cwd=root,
+        env={**os.environ, "AI_ASSET_PLATFORM_ROOT": str(root)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    payload = json.loads(
+        (root / "results" / "strategy_promotion_decision_latest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["policy_version"] == "test-v1"
+    assert payload["blockers"] == ["minimum closed trades not met"]
