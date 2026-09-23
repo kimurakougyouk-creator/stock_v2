@@ -59,3 +59,14 @@ def test_index_hidden_strategy_source_fails_closed(tmp_path: Path):
             repository_root=tmp_path,
             runner=FakeRunner(index="h signal_runner.py\n"),
         )
+
+
+def test_ignored_strategy_bytecode_cache_fails_closed(tmp_path: Path):
+    with pytest.raises(StrategySourceAttestationError, match="IGNORED_EXECUTABLE_CACHE"):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(
+                ignored="src/ai_asset_platform/reports/__pycache__/performance.cpython-313.pyc\n"
+            ),
+        )
