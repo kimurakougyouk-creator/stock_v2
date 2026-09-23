@@ -176,6 +176,29 @@ def test_no_natural_strategy_fill_never_reuses_validation_profit():
     assert result.gross_performance["net_profit"] == 0.0
 
 
+
+
+def test_blocked_evidence_preserves_unattributed_recovery_fill_count():
+    natural = _fill(
+        intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+        side="BUY",
+        price=150.0,
+    )
+    recovery = _fill(
+        intent="broker-recovery:exec-1",
+        side="BUY",
+        price=150.0,
+    )
+
+    result = build_strategy_profitability_evidence(
+        [natural, recovery],
+        account_currency="JPY",
+    )
+
+    assert result.evidence_status == "NO_NATURAL_CLOSED_TRADES"
+    assert result.unattributed_recovery_fill_count == 1
+
+
 def test_open_natural_position_is_not_counted_as_profit():
     records = [
         _fill(
