@@ -25,17 +25,19 @@
 # Reuses scripts/verify_exact_checkout_import.py; does not duplicate its logic.
 set -euo pipefail
 
-if python scripts/verify_exact_checkout_import.py; then
+PYTHON_BIN="${AI_ASSET_PYTHON_BIN:-python}"
+
+if "$PYTHON_BIN" scripts/verify_exact_checkout_import.py; then
   exit 0
 fi
 
 echo "ai_asset_platform did not resolve to the current checkout; migrating this .venv (pip install -e .)." >&2
-if ! python -m pip install -e .; then
+if ! "$PYTHON_BIN" -m pip install -e .; then
   echo "FATAL: editable install migration failed (network unavailable or another pip error). No order was sent." >&2
   exit 1
 fi
 
-if ! python scripts/verify_exact_checkout_import.py; then
+if ! "$PYTHON_BIN" scripts/verify_exact_checkout_import.py; then
   echo "FATAL: ai_asset_platform still does not resolve to this checkout after migration. No order was sent." >&2
   exit 1
 fi

@@ -38,13 +38,16 @@ class FakeRunner:
         self.calls.append(list(command))
         if self.fail:
             raise subprocess.CalledProcessError(1, command)
-        if command[1:3] == ["rev-parse", "HEAD"]:
+        args = list(command[1:])
+        while len(args) >= 2 and args[0] == "-c":
+            args = args[2:]
+        if args[:2] == ["rev-parse", "HEAD"]:
             stdout = self.actual_sha + "\n"
-        elif command[1:3] == ["status", "--porcelain=v1"]:
+        elif args[:2] == ["status", "--porcelain=v1"]:
             stdout = self.status
-        elif command[1:3] == ["ls-files", "-v"]:
+        elif args[:2] == ["ls-files", "-v"]:
             stdout = self.index_flags
-        elif command[1:3] == ["ls-files", "--others"]:
+        elif args[:2] == ["ls-files", "--others"]:
             stdout = self.ignored
         else:
             raise AssertionError(f"unexpected git command: {command}")
@@ -69,9 +72,23 @@ def test_exact_approved_commit_and_clean_audited_paths_are_ready(tmp_path: Path)
     status_call = runner.calls[1]
     index_call = runner.calls[2]
     ignored_call = runner.calls[3]
+    for call in runner.calls:
+        assert call[:5] == [
+            "/usr/bin/git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ]
     assert "--untracked-files=all" in status_call
-    assert index_call[1:3] == ["ls-files", "-v"]
-    assert ignored_call[1:5] == [
+    def git_args(call):
+        args = list(call[1:])
+        while len(args) >= 2 and args[0] == "-c":
+            args = args[2:]
+        return args
+
+    assert git_args(index_call)[:2] == ["ls-files", "-v"]
+    assert git_args(ignored_call)[:4] == [
         "ls-files",
         "--others",
         "--ignored",

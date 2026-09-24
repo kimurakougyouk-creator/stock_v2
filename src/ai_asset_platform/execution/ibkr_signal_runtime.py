@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import subprocess
 
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.reports.strategy_source_attestation import (
+    attest_strategy_source,
+)
 from ai_asset_platform.execution.broker_position_guard import evaluate_broker_position_guard
 from ai_asset_platform.execution.confirmed_fill_evidence import confirmed_fill_from_broker_result
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
@@ -21,6 +26,49 @@ from ai_asset_platform.execution.signal_order_bridge import (
 
 _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
 preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
+
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+_BOUND_PROCESS_START_SOURCE_SHA: str | None = None
+_BOUND_STRATEGY_PARAMETERS_SHA: str | None = None
+
+
+def bind_strategy_runtime_identity(
+    *, process_start_source_sha: str | None, strategy_parameters_sha: str | None
+) -> None:
+    """Bind the pre-import source and effective strategy identity for one process."""
+    global _BOUND_PROCESS_START_SOURCE_SHA, _BOUND_STRATEGY_PARAMETERS_SHA
+    source = str(process_start_source_sha or "").strip().lower()
+    params = str(strategy_parameters_sha or "").strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(source):
+        raise RuntimeError("process-start strategy source SHA is unavailable")
+    if not _PARAMETERS_SHA_RE.fullmatch(params):
+        raise RuntimeError("effective strategy parameter identity is unavailable")
+    _BOUND_PROCESS_START_SOURCE_SHA = source
+    _BOUND_STRATEGY_PARAMETERS_SHA = params
+
+
+def _exact_runtime_source_sha(repository_root: Path = Path(".")) -> str:
+    """Resolve the exact source revision before any Paper broker transport."""
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "exact strategy source SHA is unavailable; Paper order blocked"
+        ) from exc
+    sha = completed.stdout.strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(sha):
+        raise RuntimeError(
+            "exact strategy source SHA is malformed; Paper order blocked"
+        )
+    return sha
 
 
 def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
@@ -94,6 +142,8 @@ def _broker_exec_fills(result: object | None) -> list[dict]:
 
 def execute_approved_signal_via_ibkr_paper(
     *, ticker: str, signal: str, shares: int, order_intent_id: str,
+    process_start_source_sha: str | None = None,
+    strategy_parameters_sha: str | None = None,
     order_log_path: Path = Path("results/paper_orders.jsonl"),
 ) -> SignalExecutionResult:
     if not SETTINGS.enable_paper_trading:
@@ -102,6 +152,27 @@ def execute_approved_signal_via_ibkr_paper(
         return SignalExecutionResult(False, "IBKR Paper disabled")
 
     normalized_signal = str(signal).strip().upper()
+    captured_source_sha = str(
+        process_start_source_sha or _BOUND_PROCESS_START_SOURCE_SHA or ""
+    ).strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(captured_source_sha):
+        raise RuntimeError(
+            "process-start strategy source SHA is unavailable; Paper order blocked"
+        )
+    normalized_parameters_sha = str(
+        strategy_parameters_sha or _BOUND_STRATEGY_PARAMETERS_SHA or ""
+    ).strip().lower()
+    if not _PARAMETERS_SHA_RE.fullmatch(normalized_parameters_sha):
+        raise RuntimeError(
+            "effective strategy parameter identity is unavailable; Paper order blocked"
+        )
+
+    strategy_source_sha = _exact_runtime_source_sha()
+    if strategy_source_sha != captured_source_sha:
+        raise RuntimeError(
+            "strategy checkout changed after process start; Paper order blocked"
+        )
+    attest_strategy_source(strategy_source_sha)
     position_guard = evaluate_broker_position_guard(
         ticker=ticker, side=normalized_signal, quantity=int(shares)
     )
@@ -130,6 +201,8 @@ def execute_approved_signal_via_ibkr_paper(
                 broker_exec_ids=_broker_exec_ids(result),
                 broker_exec_fills=_broker_exec_fills(result),
                 broker_order_id=int(raw_order_id) if raw_order_id is not None else None,
+                strategy_source_sha=strategy_source_sha,
+                strategy_parameters_sha=normalized_parameters_sha,
             )
         return execution
     finally:

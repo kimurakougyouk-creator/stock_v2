@@ -20,10 +20,13 @@ Live Trading.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import json
 import math
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import re
+import subprocess
 from typing import Iterable
 
 from ai_asset_platform.core.settings import SETTINGS
@@ -35,13 +38,18 @@ from ai_asset_platform.reports.performance import (
     calculate_performance,
     calculate_performance_health,
 )
+from ai_asset_platform.reports.strategy_source_attestation import (
+    attest_strategy_source,
+)
 
 
 STRATEGY_INTENT_PREFIX = "signal-runner:"
 DEFAULT_ORDER_LOG_PATH = Path("results/paper_orders.jsonl")
 DEFAULT_COMMISSION_REPORT_PATH = Path("results/ibkr_paper_commission_evidence_ledger.json")
 DEFAULT_REPORT_PATH = Path("results/strategy_profitability_evidence_latest.json")
-REPORT_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class StrategyProfitabilityEvidenceError(ValueError):
@@ -66,6 +74,10 @@ class StrategyProfitabilityEvidence:
     net_realized_pnl: float | None = None
     net_profitability_proven: bool = False
     live_ready: bool = False
+    strategy_source_sha: str | None = None
+    strategy_parameters_sha: str | None = None
+    broker_provenance_verified: bool = False
+    unattributed_recovery_fill_count: int = 0
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -205,6 +217,32 @@ def _commission_index(commission_report: dict) -> dict[str, tuple[Decimal, str]]
     return index
 
 
+def _common_strategy_source_sha(strategy_fills: Iterable[dict]) -> str | None:
+    observed: set[str] = set()
+    for record in strategy_fills:
+        raw = str(record.get("strategy_source_sha") or "").strip().lower()
+        if not _SOURCE_SHA_RE.fullmatch(raw):
+            return None
+        observed.add(raw)
+        if len(observed) > 1:
+            return None
+    return next(iter(observed)) if observed else None
+
+
+def _common_strategy_parameters_sha(
+    strategy_fills: Iterable[dict],
+) -> str | None:
+    observed: set[str] = set()
+    for record in strategy_fills:
+        raw = str(record.get("strategy_parameters_sha") or "").strip().lower()
+        if not _PARAMETERS_SHA_RE.fullmatch(raw):
+            return None
+        observed.add(raw)
+        if len(observed) > 1:
+            return None
+    return next(iter(observed)) if observed else None
+
+
 def _strategy_fill_signature(record: dict) -> tuple:
     raw_exec_ids = record.get("broker_exec_ids")
     exec_ids = tuple(str(value or "").strip() for value in raw_exec_ids) if isinstance(raw_exec_ids, list) else ()
@@ -228,6 +266,8 @@ def _strategy_fill_signature(record: dict) -> tuple:
         str(record.get("fx_to_account_rate", "")),
         exec_ids,
         exec_fills,
+        str(record.get("strategy_source_sha") or "").strip().lower(),
+        str(record.get("strategy_parameters_sha") or "").strip().lower(),
     )
 
 
@@ -619,6 +659,11 @@ def build_strategy_profitability_evidence(
     raw_strategy_fills = select_natural_strategy_fills(rows)
     all_ibkr_fills = [record for record in rows if _is_confirmed_ibkr_fill(record)]
     excluded = len(all_ibkr_fills) - len(raw_strategy_fills)
+    unattributed_recovery_fill_count = sum(
+        1
+        for record in all_ibkr_fills
+        if str(record.get("order_intent_id", "")).strip().startswith("broker-recovery:")
+    )
     account = str(account_currency).strip().upper()
     try:
         strategy_fills = _dedupe_strategy_fills_by_intent(raw_strategy_fills)
@@ -632,10 +677,14 @@ def build_strategy_profitability_evidence(
             strategy_fill_count=len(raw_strategy_fills),
             closed_trade_count=0,
             excluded_ibkr_fill_count=excluded,
+            unattributed_recovery_fill_count=unattributed_recovery_fill_count,
             gross_performance=performance,
             performance_health=health,
             realized_trades=(),
         )
+
+    strategy_source_sha = _common_strategy_source_sha(strategy_fills)
+    strategy_parameters_sha = _common_strategy_parameters_sha(strategy_fills)
 
     if not strategy_fills:
         performance, health = _empty_metrics()
@@ -650,6 +699,7 @@ def build_strategy_profitability_evidence(
             strategy_fill_count=0,
             closed_trade_count=0,
             excluded_ibkr_fill_count=excluded,
+            unattributed_recovery_fill_count=unattributed_recovery_fill_count,
             gross_performance=performance,
             performance_health=health,
             realized_trades=(),
@@ -670,6 +720,7 @@ def build_strategy_profitability_evidence(
             strategy_fill_count=len(strategy_fills),
             closed_trade_count=0,
             excluded_ibkr_fill_count=excluded,
+            unattributed_recovery_fill_count=unattributed_recovery_fill_count,
             gross_performance=performance,
             performance_health=health,
             realized_trades=(),
@@ -693,6 +744,7 @@ def build_strategy_profitability_evidence(
             strategy_fill_count=len(strategy_fills),
             closed_trade_count=0,
             excluded_ibkr_fill_count=excluded,
+            unattributed_recovery_fill_count=unattributed_recovery_fill_count,
             gross_performance=performance_record,
             performance_health=health_record,
             realized_trades=(),
@@ -716,6 +768,7 @@ def build_strategy_profitability_evidence(
             strategy_fill_count=len(strategy_fills),
             closed_trade_count=len(realized),
             excluded_ibkr_fill_count=excluded,
+            unattributed_recovery_fill_count=unattributed_recovery_fill_count,
             gross_performance=performance_record,
             performance_health=health_record,
             realized_trades=tuple(trade.as_record() for trade in realized),
@@ -740,6 +793,7 @@ def build_strategy_profitability_evidence(
             strategy_fill_count=len(strategy_fills),
             closed_trade_count=len(realized),
             excluded_ibkr_fill_count=excluded,
+            unattributed_recovery_fill_count=unattributed_recovery_fill_count,
             gross_performance=performance_record,
             performance_health=health_record,
             realized_trades=tuple(trade.as_record() for trade in realized),
@@ -757,6 +811,7 @@ def build_strategy_profitability_evidence(
             strategy_fill_count=len(strategy_fills),
             closed_trade_count=len(realized),
             excluded_ibkr_fill_count=excluded,
+            unattributed_recovery_fill_count=unattributed_recovery_fill_count,
             gross_performance=performance_record,
             performance_health=health_record,
             realized_trades=tuple(trade.as_record() for trade in realized),
@@ -775,8 +830,8 @@ def build_strategy_profitability_evidence(
         reason=(
             "Every natural strategy fill is bound to explicit broker exec_id commission "
             "evidence; net realized PnL includes buy and sell commissions in account currency. "
-            "The versioned strategy-promotion policy is not yet implemented/passed, so "
-            "net_profitability_proven remains false."
+            "The local raw fill/commission ledgers are not yet authenticated against an "
+            "independent broker provenance source, so promotion remains fail-closed."
         ),
         account_currency=account,
         strategy_fill_count=len(strategy_fills),
@@ -791,13 +846,56 @@ def build_strategy_profitability_evidence(
         net_realized_pnl=float(net_performance.net_profit),
         net_profitability_proven=False,
         live_ready=False,
+        strategy_source_sha=strategy_source_sha,
+        strategy_parameters_sha=strategy_parameters_sha,
+        # Local ignored ledgers can be internally consistent after manual edits.
+        # Until a separate authenticated broker-provenance mechanism exists,
+        # the operational builder must never assert provenance verification.
+        broker_provenance_verified=False,
+        unattributed_recovery_fill_count=unattributed_recovery_fill_count,
     )
 
 
-def evidence_record(result: StrategyProfitabilityEvidence) -> dict:
+def _git_head(repository_root: Path = Path(".")) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise StrategyProfitabilityEvidenceError(
+            "cannot determine exact strategy source SHA"
+        ) from exc
+    sha = completed.stdout.strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(sha):
+        raise StrategyProfitabilityEvidenceError(
+            "git HEAD is not an exact 40-character lowercase SHA"
+        )
+    return sha
+
+
+def evidence_record(
+    result: StrategyProfitabilityEvidence,
+    *,
+    source_sha: str | None = None,
+    generated_at: datetime | None = None,
+) -> dict:
+    normalized_sha = None
+    if source_sha is not None:
+        normalized_sha = str(source_sha).strip().lower()
+        if not _SOURCE_SHA_RE.fullmatch(normalized_sha):
+            raise StrategyProfitabilityEvidenceError(
+                "source_sha is not an exact 40-character lowercase SHA"
+            )
+    generated = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         **asdict(result),
+        "source_sha": normalized_sha,
+        "generated_at": generated.isoformat(timespec="seconds"),
         "strategy_intent_prefix": STRATEGY_INTENT_PREFIX,
         "strategy_intent_shape": "signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>",
         "paper_only": True,
@@ -833,11 +931,24 @@ def persist_strategy_profitability_evidence(
     result: StrategyProfitabilityEvidence,
     *,
     report_path: Path = DEFAULT_REPORT_PATH,
+    source_sha: str | None = None,
+    generated_at: datetime | None = None,
 ) -> None:
+    exact_source_sha = source_sha or _git_head()
+    attest_strategy_source(exact_source_sha)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = report_path.with_suffix(report_path.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(evidence_record(result), ensure_ascii=False, indent=2, sort_keys=True)
+        json.dumps(
+            evidence_record(
+                result,
+                source_sha=exact_source_sha,
+                generated_at=generated_at,
+            ),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
         + "\n",
         encoding="utf-8",
     )

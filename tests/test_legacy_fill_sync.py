@@ -16,6 +16,8 @@ def test_records_confirmed_fill_in_legacy_shape(tmp_path):
         currency="USD",
         order_intent_id="intent-1",
         order_log_path=path,
+        strategy_source_sha="c" * 40,
+        strategy_parameters_sha="d" * 64,
     )
 
     assert result["mode"] == "IBKR_PAPER"
@@ -25,6 +27,8 @@ def test_records_confirmed_fill_in_legacy_shape(tmp_path):
     assert result["reference_price"] == 308.98
     assert result["currency"] == "USD"
     assert result["status"] == "FILLED"
+    assert result["strategy_source_sha"] == "c" * 40
+    assert result["strategy_parameters_sha"] == "d" * 64
     assert json.loads(path.read_text(encoding="utf-8").strip()) == result
 
 
@@ -83,4 +87,36 @@ def test_rejects_unconfirmed_or_invalid_fill_data(tmp_path):
             order_log_path=path,
         )
 
+    assert not path.exists()
+
+def test_rejects_malformed_strategy_source_sha_before_recording(tmp_path):
+    path = tmp_path / "paper_orders.jsonl"
+    with pytest.raises(ValueError):
+        record_confirmed_fill(
+            ticker="AAPL",
+            side="BUY",
+            filled_quantity=1,
+            avg_fill_price=308.98,
+            currency="USD",
+            order_intent_id="intent-bad-source",
+            order_log_path=path,
+            strategy_source_sha="not-a-sha",
+        )
+    assert not path.exists()
+
+
+def test_rejects_malformed_strategy_parameters_sha_before_recording(tmp_path):
+    path = tmp_path / "paper_orders.jsonl"
+    with pytest.raises(ValueError, match="strategy_parameters_sha"):
+        record_confirmed_fill(
+            ticker="AAPL",
+            side="BUY",
+            filled_quantity=1,
+            avg_fill_price=308.98,
+            currency="USD",
+            order_intent_id="intent-bad-parameters",
+            order_log_path=path,
+            strategy_source_sha="c" * 40,
+            strategy_parameters_sha="not-a-digest",
+        )
     assert not path.exists()

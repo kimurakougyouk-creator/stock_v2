@@ -1,9 +1,124 @@
 from pathlib import Path
+import subprocess
 
 import pandas as pd
 
-from signal_runner import _rank_signal_results, run_signal_scan
+from signal_runner import (
+    _capture_process_start_strategy_source_sha,
+    _rank_signal_results,
+    _strategy_parameters_sha,
+    run_signal_scan,
+)
 from dashboard import build_dashboard_html
+
+
+
+
+def test_process_start_source_capture_runs_clean_gate(monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["env"] = dict(kwargs["env"])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="STRATEGY_SOURCE_SHA=" + ("b" * 40) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("signal_runner.subprocess.run", fake_run)
+    monkeypatch.setenv("AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA", "b" * 40)
+
+    assert _capture_process_start_strategy_source_sha() == "b" * 40
+    assert captured["command"] == [
+        "/bin/bash",
+        "--noprofile",
+        "--norc",
+        "scripts/verify_strategy_source_clean.sh",
+    ]
+    assert captured["env"]["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    for forbidden in ("BASH_ENV", "ENV", "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD"):
+        assert forbidden not in captured["env"]
+
+
+def test_process_start_source_capture_rejects_bootstrap_sha_mismatch(monkeypatch):
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="STRATEGY_SOURCE_SHA=" + ("b" * 40) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("signal_runner.subprocess.run", fake_run)
+    monkeypatch.setenv("AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA", "c" * 40)
+
+    assert _capture_process_start_strategy_source_sha() is None
+
+
+def test_strategy_parameters_sha_binds_runtime_dependency_identity(monkeypatch):
+    settings = {
+        "ma_short": 5,
+        "ma_middle": 25,
+        "ma_long": 75,
+        "rsi_low": 30,
+        "rsi_high": 70,
+        "atr_multiplier": 2.0,
+    }
+
+    monkeypatch.setenv("AI_ASSET_RUNTIME_DEPENDENCY_SHA", "a" * 64)
+    first = _strategy_parameters_sha(settings, ai_provider=None)
+    monkeypatch.setenv("AI_ASSET_RUNTIME_DEPENDENCY_SHA", "b" * 64)
+    second = _strategy_parameters_sha(settings, ai_provider=None)
+
+    assert first != second
+
+
+def test_strategy_parameters_sha_binds_ai_provider_and_model():
+    settings = {
+        "ma_short": 5,
+        "ma_middle": 25,
+        "ma_long": 75,
+        "rsi_low": 30,
+        "rsi_high": 70,
+        "atr_multiplier": 2.0,
+    }
+
+    class Provider:
+        name = "openai"
+        model = "model-a"
+
+    baseline = _strategy_parameters_sha(settings, ai_provider=Provider())
+    Provider.model = "model-b"
+    changed_model = _strategy_parameters_sha(settings, ai_provider=Provider())
+    Provider.name = "claude"
+    changed_provider = _strategy_parameters_sha(settings, ai_provider=Provider())
+
+    assert baseline != changed_model
+    assert changed_model != changed_provider
+
+
+def test_strategy_parameters_sha_requires_ai_model_for_order_identity():
+    settings = {
+        "ma_short": 5,
+        "ma_middle": 25,
+        "ma_long": 75,
+        "rsi_low": 30,
+        "rsi_high": 70,
+        "atr_multiplier": 2.0,
+    }
+
+    class ProviderWithoutModel:
+        name = "openai"
+
+    import pytest
+    with pytest.raises(ValueError, match="provider/model identity"):
+        _strategy_parameters_sha(
+            settings,
+            ai_provider=ProviderWithoutModel(),
+            require_order_identity=True,
+        )
 
 
 def test_run_signal_scan_creates_excel_report(tmp_path, monkeypatch):

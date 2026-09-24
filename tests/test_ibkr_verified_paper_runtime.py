@@ -152,7 +152,13 @@ def test_fail_closed_execution_error_is_reported(monkeypatch):
 
 
 def test_wrapper_is_explicit_bounded_paper_only_entrypoint():
-    text = Path("ibkr_verified_paper_runtime_once.sh").read_text(encoding="utf-8")
+    trampoline = Path("ibkr_verified_paper_runtime_once.sh").read_text(
+        encoding="utf-8"
+    )
+    body = Path(
+        "scripts/ibkr_verified_paper_runtime_once_sanitized.sh"
+    ).read_text(encoding="utf-8")
+    text = trampoline + "\n" + body
     assert "AI_ASSET_ENABLE_IBKR_PAPER=1" in text
     assert "AI_ASSET_VERIFIED_PAPER_RUNTIME_CONFIRM=RUN_VERIFIED_PAPER_ONLY" in text
     assert "ibkr_verified_paper_runtime" in text

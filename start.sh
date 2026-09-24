@@ -1,49 +1,21 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/bin/sh
+set -eu
 
-cd "$(dirname "$0")"
-
-echo "stock_v2を起動します（実注文は行いません）。"
-
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Python3が見つかりません。ChromebookのLinux環境でPython3をインストールしてください。"
-  exit 1
+# Security contract: execute directly (./start.sh). A caller-selected Bash may
+# process BASH_ENV before this file gets control, so that mode is unsupported.
+if [ -n "${BASH_VERSION:-}" ]; then
+  echo "BLOCKED: invoke ./start.sh directly; explicit Bash invocation is unsupported." >&2
+  exit 2
 fi
 
-if [ ! -d ".venv" ]; then
-  echo "初回の仮想環境を作成しています..."
-  python3 -m venv .venv
-fi
-
-# shellcheck disable=SC1091
-source .venv/bin/activate
-
-echo "必要なライブラリを確認しています..."
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-
-if [ ! -f ".env" ] || ! python setup_wizard.py --check >/dev/null 2>&1; then
-  python setup_wizard.py
-fi
-
-set -a
-# shellcheck disable=SC1091
-if [ -f .env ]; then
-  source .env
-fi
-set +a
-
-echo "バックテストを開始します..."
-python main_simple_step8.py
-
-echo "最新シグナル判定を開始します..."
-python -m signal_runner
-
-echo "ダッシュボードを生成します..."
-python -m dashboard
-
-echo "BUY・SELL候補ダッシュボードを生成します..."
-python -m candidate_dashboard
-
-echo "変更追跡を実行します..."
-python -m change_tracker
+SCRIPT_PATH="$(/usr/bin/readlink -f -- "$0")"
+SCRIPT_DIR="${SCRIPT_PATH%/*}"
+exec /usr/bin/env -i \
+  AI_ASSET_PLATFORM_ROOT="$SCRIPT_DIR" \
+  HOME="${HOME:-}" \
+  USER="${USER:-}" \
+  LOGNAME="${LOGNAME:-}" \
+  LANG="${LANG:-C.UTF-8}" \
+  PATH="/usr/local/bin:/usr/bin:/bin" \
+  PYTHONDONTWRITEBYTECODE=1 \
+  /bin/bash --noprofile --norc "$SCRIPT_DIR/scripts/start_sanitized.sh" "$@"

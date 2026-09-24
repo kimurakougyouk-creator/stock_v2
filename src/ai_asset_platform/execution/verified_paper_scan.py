@@ -20,7 +20,7 @@ from ai_asset_platform.execution.signal_order_bridge import (
 )
 
 
-OrderExecutor = Callable[[str, str, int, float], dict]
+OrderExecutor = Callable[[str, str, int, float, str | None, str | None], dict]
 
 
 def _safe_position_holding_days(ticker: str, settings: PlatformSettings) -> int | None:
@@ -135,8 +135,17 @@ def execute_verified_actions_from_scan(
             })
             continue
 
+        strategy_source_sha = record.get("StrategySourceSHA")
+        strategy_parameters_sha = record.get("StrategyParametersSHA")
         try:
-            paper_order = execute_order(ticker, order_signal, quantity, price)
+            paper_order = execute_order(
+                ticker,
+                order_signal,
+                quantity,
+                price,
+                strategy_source_sha,
+                strategy_parameters_sha,
+            )
         except Exception as exc:
             execution_errors.append({"ticker": ticker, "error": str(exc)})
             continue

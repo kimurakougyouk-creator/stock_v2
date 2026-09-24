@@ -17,6 +17,9 @@ PATTERNS = {
 CREDENTIAL_ASSIGNMENT = re.compile(
     r'(?i)\b(?:password|passwd|api[_-]?key|token|app_password)\b\s*=\s*[\"\']([^\"\'\n]{8,})[\"\']'
 )
+SHELL_PARAMETER_REFERENCE = re.compile(
+    r'^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*(?::?[-+?=])?\})$'
+)
 
 
 def tracked_files() -> list[Path]:
@@ -27,6 +30,11 @@ def tracked_files() -> list[Path]:
 def is_placeholder(value: str) -> bool:
     normalized = value.strip().lower()
     return normalized.startswith(PLACEHOLDER_PREFIXES)
+
+
+def is_runtime_reference(value: str) -> bool:
+    """Return True only for a complete shell parameter reference, not literals."""
+    return SHELL_PARAMETER_REFERENCE.fullmatch(value.strip()) is not None
 
 
 def main() -> int:
@@ -46,7 +54,8 @@ def main() -> int:
                 findings.append(f'{rel}:{line}: {label}')
 
         for match in CREDENTIAL_ASSIGNMENT.finditer(text):
-            if is_placeholder(match.group(1)):
+            value = match.group(1)
+            if is_placeholder(value) or is_runtime_reference(value):
                 continue
             line = text.count('\n', 0, match.start()) + 1
             findings.append(f'{rel}:{line}: hardcoded_credential')
