@@ -663,7 +663,7 @@ def test_ibapi_verifier_uses_retained_repository_bytes(tmp_path: Path):
     )
 
 
-def test_ibapi_verifier_rejects_retained_payload_swap(tmp_path: Path, monkeypatch):
+def test_ibapi_verifier_rejects_retained_payload_swap(tmp_path: Path, monkeypatch, capsys):
     from scripts import run_isolated_venv_python as isolated_bootstrap
 
     root = tmp_path / "snapshot"
@@ -703,7 +703,7 @@ def test_ibapi_verifier_rejects_retained_payload_swap(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(isolated_bootstrap.subprocess, "run", _unexpected_run)
 
-    with pytest.raises(SystemExit, match="retained ibapi payload SHA-256 mismatch"):
+    with pytest.raises(SystemExit) as exc_info:
         isolated_bootstrap._verify_pinned_ibapi(
             root,
             site_packages,
@@ -711,4 +711,6 @@ def test_ibapi_verifier_rejects_retained_payload_swap(tmp_path: Path, monkeypatc
             verified_python_sources,
         )
 
+    assert exc_info.value.code == 2
+    assert "retained ibapi payload SHA-256 mismatch" in capsys.readouterr().err
     assert called is False
