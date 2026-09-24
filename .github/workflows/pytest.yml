@@ -10,6 +10,8 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     # 実IBKR接続やPaper/Live注文送信は行わない。
     # このジョブは静的な秘密情報スキャンとpytestのみを実行する。
     timeout-minutes: 15

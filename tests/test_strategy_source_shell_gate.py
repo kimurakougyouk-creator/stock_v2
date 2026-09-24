@@ -646,11 +646,26 @@ def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_pat
         text=True,
     )
 
+    system_version = subprocess.check_output(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ],
+        text=True,
+    ).strip()
+    venv_bin = root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True, exist_ok=True)
+    venv_python = venv_bin / "python"
+    if not venv_python.exists():
+        venv_python.symlink_to("/usr/bin/python3")
     site_packages = (
         root
         / ".venv"
         / "lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / f"python{system_version}"
         / "site-packages"
     )
     pytest_pkg = site_packages / "pytest"

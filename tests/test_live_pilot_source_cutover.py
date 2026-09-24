@@ -81,8 +81,14 @@ def test_exact_approved_commit_and_clean_audited_paths_are_ready(tmp_path: Path)
             "core.hooksPath=/dev/null",
         ]
     assert "--untracked-files=all" in status_call
-    assert index_call[1:3] == ["ls-files", "-v"]
-    assert ignored_call[1:5] == [
+    def git_args(call):
+        args = list(call[1:])
+        while len(args) >= 2 and args[0] == "-c":
+            args = args[2:]
+        return args
+
+    assert git_args(index_call)[:2] == ["ls-files", "-v"]
+    assert git_args(ignored_call)[:4] == [
         "ls-files",
         "--others",
         "--ignored",
