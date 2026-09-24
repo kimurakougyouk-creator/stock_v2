@@ -17,14 +17,14 @@ def _assignment(name: str, value: str) -> str:
 
 def test_shell_parameter_passthrough_is_not_hardcoded_credential() -> None:
     assert _is_ignored_assignment(_assignment("APP_PASSWORD", "${APP_PASSWORD:-}"))
-    assert _is_ignored_assignment(_assignment("OPENAI_API_KEY", "$OPENAI_API_KEY"))
+    assert _is_ignored_assignment(_assignment("API_KEY", "$OPENAI_API_KEY"))
 
 
 def test_literal_credential_remains_detectable() -> None:
     literal_password = "literal" + "-secret-value"
     literal_api_key = "literal" + "-api-key-value"
     assert not _is_ignored_assignment(_assignment("APP_PASSWORD", literal_password))
-    assert not _is_ignored_assignment(_assignment("OPENAI_API_KEY", literal_api_key))
+    assert not _is_ignored_assignment(_assignment("API_KEY", literal_api_key))
 
 
 def test_mixed_shell_text_is_not_treated_as_pure_runtime_reference() -> None:
