@@ -158,8 +158,8 @@ def bridge_legacy_signal_runner_order_spies_to_ibkr_runtime(monkeypatch, request
 
 
 @pytest.fixture(autouse=True)
-def provide_runtime_dependency_identity_for_signal_runner_order_tests(monkeypatch, request):
-    """Give order-path tests an explicit attested dependency identity."""
+def provide_runtime_identity_for_signal_runner_order_tests(monkeypatch, request):
+    """Keep mocked order-path tests independent of the caller's worktree state."""
 
     if request.node.fspath.basename not in {
         "test_signal_runner_final_decision.py",
@@ -168,6 +168,15 @@ def provide_runtime_dependency_identity_for_signal_runner_order_tests(monkeypatc
     }:
         return
 
+    # These tests exercise sizing/dispatch behavior with broker execution mocked
+    # out. Source-attestation behavior has dedicated tests elsewhere, so do not
+    # let an unrelated dirty operational worktree make these unit tests depend
+    # on the module-import-time source probe.
+    monkeypatch.setattr(
+        signal_runner,
+        "_PROCESS_START_STRATEGY_SOURCE_SHA",
+        "1" * 40,
+    )
     monkeypatch.setenv(
         "AI_ASSET_RUNTIME_DEPENDENCY_SHA",
         "0" * 64,
