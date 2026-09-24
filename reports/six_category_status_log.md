@@ -144,3 +144,16 @@
 
 ### 前回からの変化点
 分析・シグナル・バックテスト・資産推移・リスク管理の5項目はコード変更なしのため判定・根拠とも前回(2026-09-21)から変化なし。実運用カテゴリで大きな進展:前回オープン中だったPR #313(Live pilot運用エントリポイント統合)が本日マージされ、`main` HEADが `9095190` → `5ac3a38` に前進、CI(pytest run #2544)はgreen。マージまでにCodexへの独立レビュー依頼が19回以上繰り返され、報告された複数のP1/P2 fail-closed指摘(cross-client permId衝突、reverse permId衝突、malformed completed-order callback処理等)はいずれもコミットで是正されCIはgreenを維持し続けた。ただしPR本文の受け入れチェックリスト(独立Codexレビュー/独立Claude監査/ChatGPT再監査/ユーザー明示的マージ許可)はテキスト上未チェックのままマージされており、Issue #255本文のチェックリストも3/10のまま更新されていない(コード上は複数項目が今回の統合で対象になっているはずだが、本文記述はUNVERIFIEDとして据え置く)。`LIVE_EXECUTION_VALUE="NO-GO"` の固定リテラルはコードで再確認済みで変更なし。新規PR #316(バージョン管理された戦略昇格ポリシー、Issue #255の残課題)が本日オープンされたが中身は次回巡回で確認予定。外部運用前提(資金決済・取引許可・JASDEC・Live読み取り専用API疎通)もUNVERIFIEDのまま。CLAUDE.md/AGENTS.mdの安全不変条件・Critical-path freezeに従い、現時点でも **NO-GO(実弾`placeOrder`不可)** を維持。
+
+---
+
+## 2026-09-24 (JST)
+- 分析: 完成 — 変化なし。PR #316の差分は戦略昇格ポリシー、source/dependency attestation、運用ラッパー、回帰テストが中心で、指標計算ロジックには変更なし。
+- シグナル: 完成 — 変化なし。PR #316で `signal_engine.py` / `src/ai_asset_platform/strategies/signal_engine.py` の判定ロジック変更なし。
+- バックテスト: 完成 — 変化なし。PR #316でバックテスト計算パスの変更なし。
+- 資産推移: 完成 — 変化なし。PR #316でequity/performance表示・履歴ロジックの変更なし。
+- リスク管理: 完成(Paper運用範囲) — 変化なし。PR #316で既存のポジション/配分/損失リスク計算を拡張・緩和する変更なし。
+- 実運用: 一部実装 — **PR #316「Add fail-closed versioned strategy promotion policy」がマージ済み**。merge commitは `16f6bd79088e5bdaa476b9ab846efb61faed9a8f` で現在の `main` と一致し、merge後GitHub Actions `pytest` #2788 はsuccess。exact-head `33d30323088de5851db409ba70321264286318a7` はCodex A+Bレビューでmajor issueなし、Claude Code独立再監査とChatGPT最終監査もblocking findingなしで完了。fee-aware natural-strategy会計は `fees_accounted=True` まで実装済みだが、独立broker provenance未証明のため `broker_provenance_verified=False`, `net_profitability_proven=False`, `live_ready=False` を維持。checked-in promotion policyは `enabled=false` / thresholds未設定 / `BLOCKED_PENDING_EXPLICIT_THRESHOLDS` のまま。さらに `scripts/live_pilot_release_gate.py` の `LIVE_EXECUTION_VALUE="NO-GO"` 固定も維持され、Live/Paper/broker権限は付与されていない。
+
+### 前回からの変化点
+PR #316が安全監査・明示的merge許可を経てmainへ統合され、バージョン管理された戦略昇格ポリシーの実装基盤は入った。ただし既定policyは意図的にdisabled/unapprovedで、独立broker provenanceと明示的threshold承認・passing evidenceは未達。したがって通常Live戦略昇格は引き続きfail-closed。Live/Paper/broker操作の許可も一切増えていない。

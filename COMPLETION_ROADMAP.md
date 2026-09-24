@@ -85,32 +85,24 @@ This is **not** the one-time pilot. It begins only after the strategy-promotion 
 
 ## PHASE 5 — Net strategy evidence and promotion policy
 
-### Current verified gap
-Current `strategy_profitability_evidence.py` explicitly reports gross-before-fees results and states that durable commission/fee evidence is not yet joined to every strategy execution. `net_profitability_proven` and `live_ready` therefore remain false by design.
+### Current verified state (2026-09-24)
+The fee-aware natural-strategy accounting path is now implemented. `strategy_profitability_evidence.py` joins natural strategy fills to explicit `exec_id` commission evidence, computes account-currency net realized PnL, and fails closed on missing/conflicting fee evidence. Successful fee-aware reports set `fees_accounted=True` and `fee_aware=True`.
 
-### Required engineering
-1. Build a durable historical commission ledger keyed by broker `exec_id`.
-2. Join every natural strategy execution to exactly one fee record; missing/conflicting fee evidence fails closed.
-3. Preserve fee currency and convert to account currency only with traceable FX evidence where required.
-4. Make the realized-trade accounting path net-of-fees.
-5. Persist net PnL, win rate, profit factor, maximum drawdown and trade-level audit records.
-6. Add restart/replay/idempotency tests so repeated broker callbacks never double-count fees or fills.
-7. Add tests for multiple executions/partial fills, delayed commission callbacks, missing FX, malformed evidence and duplicate `exec_id`.
+This still does **not** prove strategy profitability or authorize Live deployment. The same report intentionally keeps `net_profitability_proven=False`, `live_ready=False`, and `broker_provenance_verified=False` because the local raw fill/commission ledgers are not yet authenticated against an independent broker provenance source.
 
-### Strategy-promotion policy — currently missing as a formal gate
-A positive result from one or a few natural closed trades is not sufficient evidence for normal Live deployment. Before Phase 6, implement a **versioned promotion policy** that explicitly defines:
-- minimum natural closed-trade evidence required;
-- net PnL requirement after commissions/fees;
-- maximum permitted drawdown;
-- acceptable accounting/evidence health;
-- whether win rate/profit factor thresholds are required;
-- maximum evidence age and minimum observation span;
-- exact strategy/source version to which the evidence applies.
+PR #316 added the versioned strategy-promotion policy implementation and tests. The checked-in policy remains deliberately disabled/unapproved: `enabled=false`, numeric thresholds are unset, and status is `BLOCKED_PENDING_EXPLICIT_THRESHOLDS`. No threshold has been silently invented.
 
-The numeric thresholds must be deliberate and encoded/tested; this roadmap does not invent statistical certainty from an arbitrary number. Until that policy exists and passes, ordinary Live strategy deployment remains BLOCKED.
+### Remaining engineering / evidence
+1. Authenticate the raw natural-strategy fill/commission evidence against independent broker provenance instead of trusting only local ignored ledgers.
+2. Deliberately approve and version the promotion thresholds (minimum natural closed trades, net PnL, drawdown, evidence health, optional win-rate/profit-factor, evidence age/observation span, exact strategy/source identity).
+3. Produce a reproducible report proving that the exact strategy/source/parameter version passes the enabled policy using authenticated evidence.
+4. Re-audit the exact passing source and evidence before Phase 6. Passing the policy still does not itself authorize any broker or Live action.
+
+### Strategy-promotion policy contract
+A positive result from one or a few natural closed trades is not sufficient evidence for normal Live deployment. The default checked-in policy is fail-closed and cannot promote while disabled, incomplete, stale, source-mismatched, or evidence-invalid.
 
 ### Exit criterion
-A reproducible report proves the exact strategy/source version passes the encoded net-performance promotion policy. This does **not** retroactively change the one-time pilot into strategy approval.
+A reproducible, broker-authenticated report proves the exact strategy/source version passes the deliberately approved encoded net-performance promotion policy. This does **not** retroactively change the one-time pilot into strategy approval.
 
 ---
 
