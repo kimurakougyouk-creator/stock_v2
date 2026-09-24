@@ -174,11 +174,11 @@ Validate execution mechanics only. It is not a recommendation to buy an instrume
 - 2026-09-08 (Tue, today): both the US core session and the TSE cash session evaluate as regular open sessions per the pinned calendar. Calendar openness alone never overrides any other gate below.
 
 ### Current blockers before any send
-- Same-final-session raw account ID → pinned fingerprint binding, the last-point emergency-stop check, the single-send Live transport/orchestrator, and the Phase 4 completion judge are all **implemented** on `main` (PR #271/#272/#273/#274) and covered by passing tests.
-- **Not yet closed:** independent Codex review of that implementation is not recorded on GitHub (PR #271/#273/#274 show no reviews/comments as of 2026-09-08); the multi-agent gate in `AGENTS.md` treats this line item as open until that review happens and any finding is resolved.
-- Actual Chromebook/runtime and fresh Live account evidence must still be verified on the execution day.
-- External/operator prerequisites remain outstanding: JPY funding settlement, Japanese-stock trading permission, JASDEC registration completion, and a proven Live read-only API socket (see `HANDOFF_MASTER.md`'s 2026-09-07 operator-state handoff).
-- The user must explicitly authorize the exact real-cash action; a date or general instruction to continue is not authorization.
+- The integrated same-session preflight, exactly-once sender, post-attempt reconciliation/completion judge, source/PIN gate, and UNKNOWN/no-resend recovery path are implemented on current `main` through PR #313 and later hardening.
+- The exact PR #316 head was independently reviewed by Codex/Claude Code/ChatGPT before merge; PR #317 then synchronized the roadmap/status documentation and passed post-merge CI.
+- **Still open:** actual execution-day exact-source/runtime proof and fresh Live **read-only** account/session evidence must be collected and reconciled fail-closed.
+- External/operator prerequisites (funds/settlement, intended-market permission, mandatory registration where applicable, correct Live endpoint/account/session state) remain unverified until fresh read-only evidence proves them.
+- The user must explicitly authorize any consequential real-cash action after the read-only gate is GREEN; a date, CI pass, policy status, or general instruction to continue is not authorization.
 
 ### Exit criterion
 Exactly one bounded send attempt has occurred under the approved source and authorization, then Phase 4 determines the reconciled outcome.
@@ -254,11 +254,9 @@ All pre-day prerequisites that can be known in advance are VERIFIED; execution-d
 
 ## A. Git/release integrity
 
-Current known process risk: `main` has not been protected by required status checks. Before normal Live strategy deployment, establish one of:
-- GitHub branch/ruleset protection requiring PR + passing CI for `main`; preferably this; or
-- an equivalently strong release process where Live can execute only an explicitly pinned, reviewed, passing release SHA/tag and unapproved `main` movement cannot change the running build.
+Current release-control status (verified 2026-09-24): repository ruleset `protect-main` is active on the default branch. It requires pull requests plus strict required status checks for `pytest` and `release-integrity-gate`, blocks deletion and non-fast-forward updates, has no bypass actors, and reports that the current user cannot bypass it.
 
-The one-time pilot's source/PIN gate reduces but does not erase this production-process risk.
+This closes the earlier "main is unprotected" process gap. The one-time pilot still requires an exact approved/pinned source SHA and fresh source/PIN verification; branch protection is not broker authorization and does not replace runtime safety gates.
 
 ## B. Durable evidence retention
 
@@ -296,53 +294,47 @@ Every expansion — new ticker quantity, market, broker, derivative, crypto, wid
 
 ---
 
-# Current state at 2026-09-08
+# Current state at 2026-09-24
 
 ## DONE / VERIFIED
-- Exact bounded Paper milestone.
-- Strict read-only unattended Paper monitoring foundation.
-- Live read-only account/open-order/FX evidence.
-- Freshness/TOCTOU and exact-notional binding.
-- One-shot authorization and emergency-stop primitives.
-- Same-run evidence bundle, now including settled-cash-plus-reserve gating (PR #272) and Live-endpoint ledger-prefixed SettledCash support (PR #276).
-- Audited-source/PIN gate.
-- Crash-safe UNKNOWN/no-resend attempt journal.
-- Read-only Live post-fill execution/commission collector.
-- Durable PM/runbook/operator-prerequisite documents.
-- Same-final-session raw account-ID binding inside the final sender (PR #271, `live_pilot_single_send.py`).
-- Last-moment emergency-stop check inside the final sender, after the one-shot authorization is irreversibly consumed (PR #271).
-- Single-send Live transport/orchestrator implementation (PR #271).
-- Integrated post-pilot completion/reconciliation judge, including split/partial-fill aggregation (PR #273, PR #274).
-- Full local pytest run on current `main` (`59a3bf7`): `1581 passed` on 2026-09-08, matching the last CI figure — no drift.
+- Exact bounded Paper milestone and strict read-only unattended Paper monitoring foundation.
+- Live read-only account/open-order/FX evidence primitives, freshness/TOCTOU checks, exact-notional binding, one-shot authorization, emergency stop, and source/PIN gate.
+- Integrated first-pilot operational entrypoint (PR #313): same-run read-only preflight → exactly-once sender → post-attempt read-only reconciliation → completion judge, with crash-safe UNKNOWN/no-resend behavior.
+- Human UNKNOWN/rollback runbook.
+- Fee-aware natural-strategy accounting and commission join by `exec_id`.
+- Versioned strategy-promotion policy implementation and tests (PR #316), while the checked-in policy remains deliberately disabled/unapproved and cannot promote anything.
+- Exact-head multi-agent review/CI gate completed for PR #316 before merge.
+- Active `protect-main` repository ruleset requiring PR + strict `pytest` and `release-integrity-gate` checks on the default branch.
+- Documentation/status synchronization through PR #317.
+- Current main before this documentation-only synchronization PR: `80583b2b303e2ec3dbbd200d96a18c8c55591c89`; post-merge pytest #2793 succeeded.
 
 ## TODO before first Live send
-1. **Codex independent review of PR #271/#273/#274** — implementation is done and tested, but no GitHub review is recorded on any of the three safety-critical PRs (`gh pr view <n> --json reviews,comments` is empty for all three as of 2026-09-08). Per `AGENTS.md`'s mandatory multi-agent gate, this line item is not closed by implementation/CI alone.
-2. Execution-day exact-source and fresh Live runtime evidence.
-3. One-at-a-time unavoidable operator prerequisites/approval — currently pending externally: JPY funding settlement (transfer scheduled 2026-09-08), Japanese-stock trading permission (pending approval), JASDEC registration (form saved, backend status unverified), and a proven Live TWS/IB Gateway read-only API socket. See `HANDOFF_MASTER.md`'s 2026-09-07 operator-state handoff for the exact canonical wording; do not resend funds or resubmit the permission/JASDEC requests.
+1. Collect fresh execution-day exact-source/runtime evidence and fresh Live **read-only** broker evidence only.
+2. Prove the correct Live account fingerprint/session/endpoint, settled/available funds and currency, intended-market permission/registration where applicable, target position, zero unexpected open orders, quote/FX, market/session, emergency-stop state, evidence freshness/skew, and exact notional cap.
+3. Any stale/missing/contradictory evidence or timeout/UNKNOWN remains NO-GO; do not send/retry/cancel/modify/flatten/close.
+4. Only after every read-only gate is GREEN may the user be asked for a separate explicit one-shot Live-pilot authorization.
 
 ## TODO after first pilot but before normal Live strategy deployment
-1. Durable fee/commission join for all natural strategy executions.
-2. Net-of-fees account-currency performance evidence.
-3. Explicit versioned strategy-promotion policy and tests.
+1. Reconcile the one-time pilot to a durable terminal broker-truth outcome.
+2. Authenticate natural-strategy fill/commission evidence against independent broker provenance; local ledgers alone remain insufficient.
+3. Deliberately approve/version the strategy-promotion numeric thresholds and produce passing evidence for the exact strategy/source/parameter identity.
 4. Controlled Live strategy integration with shared risk gates.
-5. Branch/release protection suitable for production.
-6. Live monitoring/recovery soak.
-7. Final production acceptance audit.
+5. Live monitoring/recovery soak.
+6. Final production acceptance audit.
 
 ---
 
-# Critical path — shortest safe route to V1
+# Critical path
 
-`remaining sender/completion blockers`
-→ `pre-day operator prerequisites`
+`current audited main`
 → `fresh execution-day read-only GO/NO-GO`
 → `explicit one-shot operator approval`
 → `one bounded Live send attempt`
 → `post-pilot reconciliation`
-→ `durable commission/net-profitability path`
-→ `versioned strategy-promotion gate`
+→ `broker-authenticated strategy evidence`
+→ `approved + passing versioned strategy-promotion gate`
 → `bounded Live strategy integration`
-→ `production release protection + soak`
+→ `production soak`
 → `final V1 acceptance`
 
 No feature expansion is allowed to jump ahead of this critical path unless it closes a concrete blocker.
