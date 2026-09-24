@@ -28,6 +28,7 @@ def test_process_start_source_capture_runs_clean_gate(monkeypatch):
         )
 
     monkeypatch.setattr("signal_runner.subprocess.run", fake_run)
+    monkeypatch.setenv("AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA", "b" * 40)
 
     assert _capture_process_start_strategy_source_sha() == "b" * 40
     assert captured["command"] == [
@@ -39,6 +40,21 @@ def test_process_start_source_capture_runs_clean_gate(monkeypatch):
     assert captured["env"]["PATH"] == "/usr/local/bin:/usr/bin:/bin"
     for forbidden in ("BASH_ENV", "ENV", "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD"):
         assert forbidden not in captured["env"]
+
+
+def test_process_start_source_capture_rejects_bootstrap_sha_mismatch(monkeypatch):
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="STRATEGY_SOURCE_SHA=" + ("b" * 40) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("signal_runner.subprocess.run", fake_run)
+    monkeypatch.setenv("AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA", "c" * 40)
+
+    assert _capture_process_start_strategy_source_sha() is None
 
 
 def test_strategy_parameters_sha_binds_ai_provider_and_model():

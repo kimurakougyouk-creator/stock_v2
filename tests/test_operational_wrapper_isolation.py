@@ -88,6 +88,16 @@ def test_isolated_bootstrap_does_not_process_venv_startup_hooks(tmp_path: Path):
         ],
         text=True,
     ).strip()
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    gate = scripts / "verify_strategy_source_clean.sh"
+    gate.write_text(
+        "#!/bin/bash\n"
+        "printf 'STRATEGY_SOURCE_SHA=%040d\\n' 0 | tr 0 a\n",
+        encoding="utf-8",
+    )
+    gate.chmod(0o755)
+
     venv_bin = root / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
     (venv_bin / "python").symlink_to("/usr/bin/python3")
@@ -239,3 +249,77 @@ def test_isolated_bootstrap_rejects_mismatched_venv_interpreter(tmp_path: Path):
 
     assert completed.returncode == 2
     assert "does not match the trusted bootstrap interpreter" in completed.stderr
+
+
+def test_isolated_bootstrap_blocks_before_repository_module_when_attestation_fails(
+    tmp_path: Path,
+):
+    root = tmp_path / "repo"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    gate_marker = tmp_path / "gate.marker"
+    target_marker = tmp_path / "target.marker"
+
+    gate = scripts / "verify_strategy_source_clean.sh"
+    gate.write_text(
+        "#!/bin/bash\n"
+        f"printf checked > {gate_marker!s}\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    gate.chmod(0o755)
+
+    system_version = subprocess.check_output(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ],
+        text=True,
+    ).strip()
+    venv_bin = root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to("/usr/bin/python3")
+    site_packages = (
+        root / ".venv" / "lib" / f"python{system_version}" / "site-packages"
+    )
+    site_packages.mkdir(parents=True)
+    (site_packages / "targetmod.py").write_text(
+        f"from pathlib import Path; Path({str(target_marker)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            str(ROOT / "scripts" / "run_isolated_venv_python.py"),
+            "-m",
+            "targetmod",
+        ],
+        cwd=root,
+        env={
+            "AI_ASSET_PLATFORM_ROOT": str(root),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert gate_marker.exists()
+    assert not target_marker.exists()
+    assert "pre-import strategy source attestation failed" in completed.stderr
+
+
+def test_verified_paper_wrapper_never_self_updates_checkout():
+    source = (
+        ROOT / "scripts" / "ibkr_verified_paper_runtime_once_sanitized.sh"
+    ).read_text(encoding="utf-8")
+    for forbidden in ("git pull", "git fetch", "git switch", "ext::"):
+        assert forbidden not in source

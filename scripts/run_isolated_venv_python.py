@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import runpy
+import subprocess
 import sys
 
 
@@ -21,6 +23,51 @@ def _repository_root() -> Path:
     if not root.is_dir():
         _fail("repository root does not exist")
     return root
+
+
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_BOOTSTRAP_SOURCE_SHA_ENV = "AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA"
+
+
+def _attest_clean_source_before_repository_imports(root: Path) -> str:
+    """Prove clean audited source before loading any repository module."""
+    clean_env = {
+        "HOME": os.environ.get("HOME", ""),
+        "USER": os.environ.get("USER", ""),
+        "LOGNAME": os.environ.get("LOGNAME", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "AI_ASSET_PLATFORM_ROOT": str(root),
+    }
+    try:
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                "--noprofile",
+                "--norc",
+                str(root / "scripts" / "verify_strategy_source_clean.sh"),
+            ],
+            cwd=root,
+            env=clean_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        _fail("pre-import strategy source attestation failed")
+
+    prefix = "STRATEGY_SOURCE_SHA="
+    matches = [
+        line[len(prefix):].strip().lower()
+        for line in completed.stdout.splitlines()
+        if line.startswith(prefix)
+    ]
+    if len(matches) != 1 or not _SOURCE_SHA_RE.fullmatch(matches[0]):
+        _fail("pre-import strategy source SHA is unavailable")
+    source_sha = matches[0]
+    os.environ[_BOOTSTRAP_SOURCE_SHA_ENV] = source_sha
+    return source_sha
 
 
 def _verify_matching_venv_interpreter(root: Path) -> None:
@@ -87,6 +134,7 @@ def main() -> int:
     root = _repository_root()
     os.chdir(root)
     _verify_matching_venv_interpreter(root)
+    _attest_clean_source_before_repository_imports(root)
     site_packages = _venv_site_packages(root)
     _prepare_sys_path(root, site_packages)
 

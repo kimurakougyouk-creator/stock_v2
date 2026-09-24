@@ -9,6 +9,7 @@ import subprocess
 from typing import Any
 
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_BOOTSTRAP_SOURCE_SHA_ENV = "AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA"
 
 
 def _capture_process_start_strategy_source_sha() -> str | None:
@@ -47,7 +48,17 @@ def _capture_process_start_strategy_source_sha() -> str | None:
     if len(matches) != 1:
         return None
     sha = matches[0]
-    return sha if _SOURCE_SHA_RE.fullmatch(sha) else None
+    if not _SOURCE_SHA_RE.fullmatch(sha):
+        return None
+
+    bootstrap_sha = str(os.environ.get(_BOOTSTRAP_SOURCE_SHA_ENV, "")).strip().lower()
+    if bootstrap_sha:
+        if not _SOURCE_SHA_RE.fullmatch(bootstrap_sha):
+            return None
+        if bootstrap_sha != sha:
+            return None
+        return bootstrap_sha
+    return sha
 
 
 _PROCESS_START_STRATEGY_SOURCE_SHA = _capture_process_start_strategy_source_sha()
