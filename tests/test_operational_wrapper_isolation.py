@@ -383,19 +383,36 @@ def test_verified_dependency_snapshot_isolated_from_original_mutation(tmp_path: 
         encoding="utf-8",
     )
 
-    holder, snapshot, dependency_sha = (
+    holder, snapshot, dependency_sha, verified_sources = (
         isolated_bootstrap._snapshot_verified_site_packages(site_packages)
     )
+    frozen_path = snapshot / f"{module_name}.py"
     original_sys_path = list(sys.path)
+    original_path_hooks = list(sys.path_hooks)
+    original_importer_cache = dict(sys.path_importer_cache)
     try:
-        module_path.write_text('VALUE = "mutated"\n', encoding="utf-8")
+        # Same-UID processes can undo chmod and rewrite temporary files. The
+        # importer must still execute the exact bytes captured during verification.
+        frozen_path.chmod(0o644)
+        frozen_path.write_text('VALUE = "hostile"\n', encoding="utf-8")
+        assert frozen_path.read_text(encoding="utf-8") == 'VALUE = "hostile"\n'
+
+        isolated_bootstrap._install_verified_dependency_importer(
+            snapshot,
+            verified_sources,
+        )
         sys.modules.pop(module_name, None)
         sys.path[:] = [str(snapshot), *original_sys_path]
+        sys.path_importer_cache.pop(str(snapshot), None)
+
         imported = importlib.import_module(module_name)
         assert imported.VALUE == "trusted"
         assert len(dependency_sha) == 64
-        assert (snapshot / f"{module_name}.py").read_bytes() == trusted_bytes
+        assert os.environ["AI_ASSET_RUNTIME_DEPENDENCY_SHA"] == dependency_sha
     finally:
         sys.modules.pop(module_name, None)
         sys.path[:] = original_sys_path
+        sys.path_hooks[:] = original_path_hooks
+        sys.path_importer_cache.clear()
+        sys.path_importer_cache.update(original_importer_cache)
         holder.cleanup()
