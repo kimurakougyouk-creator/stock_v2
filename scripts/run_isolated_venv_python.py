@@ -463,6 +463,7 @@ def _seal_verified_native_payload(payload: bytes, label: str) -> str:
         _fail("sealed native dependency loading requires Linux file seals")
 
     flags = getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0)
+    fd = -1
     try:
         fd = os.memfd_create(label, flags)
         offset = 0
@@ -483,10 +484,11 @@ def _seal_verified_native_payload(payload: bytes, label: str) -> str:
             raise OSError("native memfd seals were not applied")
         os.set_inheritable(fd, False)
     except OSError:
-        try:
-            os.close(fd)
-        except Exception:
-            pass
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         _fail("could not create sealed native dependency payload")
 
     _SEALED_NATIVE_FDS.append(fd)
