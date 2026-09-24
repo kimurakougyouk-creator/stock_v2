@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -247,6 +248,54 @@ def _verify_site_packages_records(site_packages: Path) -> str:
     return dependency_sha
 
 
+def _snapshot_verified_site_packages(
+    site_packages: Path,
+) -> tuple[tempfile.TemporaryDirectory[str], Path, str]:
+    """Copy dependencies, then verify and import only the frozen copy."""
+    holder = tempfile.TemporaryDirectory(prefix="stock_v2_dependencies_")
+    snapshot = (Path(holder.name) / "site-packages").resolve()
+    try:
+        shutil.copytree(
+            site_packages,
+            snapshot,
+            symlinks=True,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+    except (OSError, shutil.Error):
+        holder.cleanup()
+        _fail("could not snapshot checkout virtualenv dependencies")
+
+    try:
+        dependency_sha = _verify_site_packages_records(snapshot)
+    except SystemExit:
+        holder.cleanup()
+        raise
+
+    for path in sorted(snapshot.rglob("*"), reverse=True):
+        if path.is_symlink():
+            holder.cleanup()
+            _fail(
+                "dependency snapshot contains a symlink: "
+                f"{path.relative_to(snapshot)}"
+            )
+        try:
+            if path.is_file():
+                path.chmod(0o444)
+            elif path.is_dir():
+                path.chmod(0o555)
+        except OSError:
+            holder.cleanup()
+            _fail("could not make dependency snapshot read-only")
+    try:
+        snapshot.chmod(0o555)
+    except OSError:
+        holder.cleanup()
+        _fail("could not make dependency snapshot read-only")
+
+    os.environ[_RUNTIME_DEPENDENCY_SHA_ENV] = dependency_sha
+    return holder, snapshot, dependency_sha
+
+
 def _verify_pinned_ibapi(root: Path, site_packages: Path) -> None:
     try:
         subprocess.run(
@@ -368,7 +417,9 @@ def main() -> int:
     # repository or venv code, so fail on a stale venv before source work.
     site_packages = _venv_site_packages(root)
     source_sha = _attest_clean_source_before_repository_imports(root)
-    _verify_site_packages_records(site_packages)
+    dependency_holder, dependency_snapshot, _dependency_sha = (
+        _snapshot_verified_site_packages(site_packages)
+    )
 
     # Force importlib to ignore mutable site-packages/__pycache__ contents.
     # The temporary cache root starts empty and no trusted import may fall back
@@ -387,11 +438,11 @@ def main() -> int:
         and args[1] == "ai_asset_platform.execution.ibkr_verified_paper_runtime"
     )
     if broker_runtime:
-        _verify_pinned_ibapi(root, site_packages)
+        _verify_pinned_ibapi(root, dependency_snapshot)
 
     snapshot_holder, snapshot_root = _snapshot_repository(root, source_sha)
     try:
-        _prepare_sys_path(snapshot_root, site_packages)
+        _prepare_sys_path(snapshot_root, dependency_snapshot)
         if args[0] == "-m":
             if len(args) < 2:
                 _fail("-m requires a module name")
@@ -414,6 +465,7 @@ def main() -> int:
     finally:
         snapshot_holder.cleanup()
         pycache_holder.cleanup()
+        dependency_holder.cleanup()
 
 
 if __name__ == "__main__":
