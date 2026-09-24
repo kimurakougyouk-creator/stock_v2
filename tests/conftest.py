@@ -158,6 +158,23 @@ def bridge_legacy_signal_runner_order_spies_to_ibkr_runtime(monkeypatch, request
 
 
 @pytest.fixture(autouse=True)
+def provide_runtime_dependency_identity_for_signal_runner_order_tests(monkeypatch, request):
+    """Give order-path tests an explicit attested dependency identity."""
+
+    if request.node.fspath.basename not in {
+        "test_signal_runner_final_decision.py",
+        "test_signal_runner_execution_e2e.py",
+        "test_signal_runner_time_stop.py",
+    }:
+        return
+
+    monkeypatch.setenv(
+        "AI_ASSET_RUNTIME_DEPENDENCY_SHA",
+        "0" * 64,
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolate_position_exists_test_from_holding_age(monkeypatch, request):
     """Do not let durable holding-age state turn this BUY-block test into Time Stop."""
 
