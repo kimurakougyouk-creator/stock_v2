@@ -172,6 +172,8 @@ def provide_runtime_identity_for_signal_runner_order_tests(monkeypatch, request)
     # out. Source-attestation behavior has dedicated tests elsewhere, so do not
     # let an unrelated dirty operational worktree make these unit tests depend
     # on the module-import-time source probe.
+    import signal_runner
+
     monkeypatch.setattr(
         signal_runner,
         "_PROCESS_START_STRATEGY_SOURCE_SHA",
