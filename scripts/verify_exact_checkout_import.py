@@ -56,9 +56,13 @@ def main() -> int:
     # Match sys.path[0] to what `python -m ai_asset_platform...` actually
     # uses (cwd), not this script's own directory (`scripts/`) -- see the
     # module docstring. Must happen before resolving anything below.
-    sys.path[0] = os.getcwd()
+    snapshot_root = os.environ.get("AI_ASSET_CODE_SNAPSHOT_ROOT")
+    import_root = os.path.realpath(snapshot_root) if snapshot_root else os.getcwd()
+    sys.path[0] = import_root
 
-    expected_dir = os.path.realpath(os.path.join(os.getcwd(), "src", "ai_asset_platform"))
+    expected_dir = os.path.realpath(
+        os.path.join(import_root, "src", "ai_asset_platform")
+    )
 
     # `find_spec` only searches sys.path for a matching module/package and
     # reports where it *would* load from -- it does not execute anything,

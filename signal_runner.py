@@ -90,6 +90,12 @@ def _strategy_parameters_sha(
     runtime_dependency_sha = str(
         os.environ.get(_RUNTIME_DEPENDENCY_SHA_ENV, "unverified")
     ).strip().lower()
+    if require_order_identity and not re.fullmatch(
+        r"[0-9a-f]{64}", runtime_dependency_sha
+    ):
+        raise ValueError(
+            "runtime dependency identity is required before a natural Paper order"
+        )
 
     payload = {
         "runtime_dependency_sha": runtime_dependency_sha,

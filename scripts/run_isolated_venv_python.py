@@ -132,19 +132,18 @@ def _verify_site_packages_records(site_packages: Path) -> str:
     if site_packages.is_symlink():
         _fail("site-packages must not be a symlink")
 
-    for cache in site_packages.rglob("__pycache__"):
-        if cache.is_dir():
-            _fail(
-                "executable dependency cache is present: "
-                f"{cache.relative_to(site_packages)}"
-            )
+    # Existing __pycache__ files are ignored at import time by rebinding
+    # sys.pycache_prefix to an empty trusted directory before any dependency
+    # import. Standalone/legacy bytecode outside __pycache__ remains forbidden
+    # because PathFinder can load it directly without source.
     for suffix in ("*.pyc", "*.pyo"):
-        found = next(site_packages.rglob(suffix), None)
-        if found is not None:
-            _fail(
-                "executable dependency bytecode is present: "
-                f"{found.relative_to(site_packages)}"
-            )
+        for found in site_packages.rglob(suffix):
+            rel_parts = found.relative_to(site_packages).parts
+            if "__pycache__" not in rel_parts:
+                _fail(
+                    "standalone dependency bytecode is present: "
+                    f"{found.relative_to(site_packages)}"
+                )
 
     records = sorted(site_packages.glob("*.dist-info/RECORD"))
     if not records:
@@ -211,6 +210,9 @@ def _verify_site_packages_records(site_packages: Path) -> str:
                     "dependency directory symlink is not allowed: "
                     f"{child.relative_to(site_packages)}"
                 )
+        # Never trust or enumerate installed caches. They are not importable
+        # in this process because sys.pycache_prefix is redirected below.
+        dirnames[:] = [name for name in dirnames if name != "__pycache__"]
         for filename in filenames:
             child = current_path / filename
             if child.is_symlink():
@@ -221,8 +223,8 @@ def _verify_site_packages_records(site_packages: Path) -> str:
             rel = child.relative_to(site_packages).as_posix()
             if rel.endswith(".dist-info/RECORD"):
                 continue
-            if rel.endswith((".pyc", ".pyo")) or "/__pycache__/" in f"/{rel}":
-                _fail(f"executable dependency cache is present: {rel}")
+            if rel.endswith((".pyc", ".pyo")):
+                _fail(f"standalone dependency bytecode is present: {rel}")
             if rel not in verified:
                 _fail(f"dependency file is not covered by RECORD hashes: {rel}")
 
@@ -362,9 +364,18 @@ def main() -> int:
     root = _repository_root()
     os.chdir(root)
     _verify_matching_venv_interpreter(root)
-    source_sha = _attest_clean_source_before_repository_imports(root)
+    # Interpreter/ABI compatibility can be checked without importing any
+    # repository or venv code, so fail on a stale venv before source work.
     site_packages = _venv_site_packages(root)
+    source_sha = _attest_clean_source_before_repository_imports(root)
     _verify_site_packages_records(site_packages)
+
+    # Force importlib to ignore mutable site-packages/__pycache__ contents.
+    # The temporary cache root starts empty and no trusted import may fall back
+    # to package-local bytecode caches.
+    pycache_holder = tempfile.TemporaryDirectory(prefix="stock_v2_pycache_")
+    sys.pycache_prefix = pycache_holder.name
+    sys.dont_write_bytecode = True
 
     args = sys.argv[1:]
     if not args:
@@ -402,6 +413,7 @@ def main() -> int:
         return 0
     finally:
         snapshot_holder.cleanup()
+        pycache_holder.cleanup()
 
 
 if __name__ == "__main__":

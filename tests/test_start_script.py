@@ -10,7 +10,7 @@ def test_start_script_runs_step8_after_safe_setup_and_env_load():
     setup_index = script.index('"$VENV_PYTHON" setup_wizard.py --check')
     safe_env_index = script.index('"$VENV_PYTHON" scripts/load_start_env.py .env')
     second_verify_index = script.rindex("\nverify_exact_checkout_runtime\n")
-    step8_index = script.index('"$VENV_PYTHON" main_simple_step8.py')
+    step8_index = script.index("run_isolated main_simple_step8.py")
 
     assert "source .env" not in script
     assert "source .venv/bin/activate" not in script
