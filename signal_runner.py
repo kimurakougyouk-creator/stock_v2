@@ -10,6 +10,7 @@ from typing import Any
 
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _BOOTSTRAP_SOURCE_SHA_ENV = "AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA"
+_RUNTIME_DEPENDENCY_SHA_ENV = "AI_ASSET_RUNTIME_DEPENDENCY_SHA"
 
 
 def _capture_process_start_strategy_source_sha() -> str | None:
@@ -86,7 +87,12 @@ def _strategy_parameters_sha(
         if not ai_model_name:
             ai_model_name = "unspecified"
 
+    runtime_dependency_sha = str(
+        os.environ.get(_RUNTIME_DEPENDENCY_SHA_ENV, "unverified")
+    ).strip().lower()
+
     payload = {
+        "runtime_dependency_sha": runtime_dependency_sha,
         "ma_short": int(settings["ma_short"]),
         "ma_middle": int(settings["ma_middle"]),
         "ma_long": int(settings["ma_long"]),
@@ -352,7 +358,15 @@ def run_signal_scan(
     allow_email: bool = True,
 ) -> dict[str, Any]:
     if tickers is None:
-        ticker_df = pd.read_csv("tickers.csv")
+        snapshot_root = str(
+            os.environ.get("AI_ASSET_CODE_SNAPSHOT_ROOT", "")
+        ).strip()
+        ticker_path = (
+            Path(snapshot_root) / "tickers.csv"
+            if snapshot_root
+            else Path("tickers.csv")
+        )
+        ticker_df = pd.read_csv(ticker_path)
         tickers = ticker_df["Ticker"].tolist()
 
     all_settings = load_optimized_settings()

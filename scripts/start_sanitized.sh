@@ -72,17 +72,29 @@ fi
 /bin/bash scripts/verify_strategy_source_clean.sh
 verify_exact_checkout_runtime
 
+run_isolated() {
+  /usr/bin/env -i \
+    AI_ASSET_PLATFORM_ROOT="$ROOT" \
+    HOME="${HOME:-}" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-}" \
+    LANG="${LANG:-C.UTF-8}" \
+    PATH="/usr/local/bin:/usr/bin:/bin" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/python3 -I -S "$ROOT/scripts/run_isolated_venv_python.py" "$@"
+}
+
 echo "バックテストを開始します..."
-"$VENV_PYTHON" main_simple_step8.py
+run_isolated main_simple_step8.py
 
 echo "最新シグナル判定を開始します..."
-"$VENV_PYTHON" -m signal_runner
+run_isolated -m signal_runner
 
 echo "ダッシュボードを生成します..."
-"$VENV_PYTHON" -m dashboard
+run_isolated -m dashboard
 
 echo "BUY・SELL候補ダッシュボードを生成します..."
-"$VENV_PYTHON" -m candidate_dashboard
+run_isolated -m candidate_dashboard
 
 echo "変更追跡を実行します..."
-"$VENV_PYTHON" -m change_tracker
+run_isolated -m change_tracker
