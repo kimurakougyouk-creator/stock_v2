@@ -627,6 +627,8 @@ def test_ibapi_verifier_uses_retained_repository_bytes(tmp_path: Path):
         encoding="utf-8",
     )
 
+    trusted_payload = b"VALUE = 1\n"
+    digest = hashlib.sha256(trusted_payload).hexdigest()
     verifier_source = (
         b"import argparse, json\n"
         b"from pathlib import Path\n"
@@ -634,15 +636,78 @@ def test_ibapi_verifier_uses_retained_repository_bytes(tmp_path: Path):
         b"p.add_argument('--site-packages', required=True)\n"
         b"p.add_argument('--manifest', required=True)\n"
         b"a = p.parse_args()\n"
-        b"assert json.loads(Path(a.manifest).read_text(encoding='utf-8')) == {'trusted': True}\n"
+        b"payload = json.loads(Path(a.manifest).read_text(encoding='utf-8'))\n"
+        b"assert payload['distribution'] == 'ibapi'\n"
     )
+    manifest_payload = json.dumps(
+        {
+            "schema_version": 1,
+            "distribution": "ibapi",
+            "version": "9.81.1.post1",
+            "package_files": {"__init__.py": digest},
+        },
+        sort_keys=True,
+    ).encode("utf-8")
     verified_repository_sources = {
         "scripts/verify_live_ibapi_runtime.py": verifier_source,
-        "scripts/live_ibapi_manifest.json": b'{"trusted": true}\n',
+        "scripts/live_ibapi_manifest.json": manifest_payload,
     }
+    verified_python_sources = {"ibapi/__init__.py": trusted_payload}
 
     isolated_bootstrap._verify_pinned_ibapi(
         root,
         site_packages,
         verified_repository_sources,
+        verified_python_sources,
     )
+
+
+def test_ibapi_verifier_rejects_retained_payload_swap(tmp_path: Path, monkeypatch):
+    from scripts import run_isolated_venv_python as isolated_bootstrap
+
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    site_packages = tmp_path / "site-packages"
+    package = site_packages / "ibapi"
+    package.mkdir(parents=True)
+
+    trusted_payload = b"VALUE = 1\n"
+    hostile_retained_payload = b"VALUE = 'hostile retained bytes'\n"
+    (package / "__init__.py").write_bytes(trusted_payload)
+
+    digest = hashlib.sha256(trusted_payload).hexdigest()
+    manifest_payload = json.dumps(
+        {
+            "schema_version": 1,
+            "distribution": "ibapi",
+            "version": "9.81.1.post1",
+            "package_files": {"__init__.py": digest},
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    verified_repository_sources = {
+        "scripts/verify_live_ibapi_runtime.py": b"raise AssertionError('subprocess must not run')\n",
+        "scripts/live_ibapi_manifest.json": manifest_payload,
+    }
+    verified_python_sources = {
+        "ibapi/__init__.py": hostile_retained_payload,
+    }
+
+    called = False
+
+    def _unexpected_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("verifier subprocess must not run after retained-byte mismatch")
+
+    monkeypatch.setattr(isolated_bootstrap.subprocess, "run", _unexpected_run)
+
+    with pytest.raises(SystemExit, match="retained ibapi payload SHA-256 mismatch"):
+        isolated_bootstrap._verify_pinned_ibapi(
+            root,
+            site_packages,
+            verified_repository_sources,
+            verified_python_sources,
+        )
+
+    assert called is False

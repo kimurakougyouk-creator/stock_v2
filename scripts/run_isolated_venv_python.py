@@ -8,6 +8,7 @@ import ctypes
 import fcntl
 import hashlib
 import io
+import json
 import importlib.abc
 import importlib.machinery
 import importlib.util
@@ -650,6 +651,7 @@ def _verify_pinned_ibapi(
     snapshot_root: Path,
     site_packages: Path,
     verified_repository_sources: dict[str, bytes],
+    verified_python_sources: dict[str, bytes],
 ) -> None:
     verifier_rel = "scripts/verify_live_ibapi_runtime.py"
     manifest_rel = "scripts/live_ibapi_manifest.json"
@@ -657,6 +659,38 @@ def _verify_pinned_ibapi(
     manifest_payload = verified_repository_sources.get(manifest_rel)
     if verifier_source is None or manifest_payload is None:
         _fail("pinned ibapi verifier/manifest is missing from attested Git archive")
+
+    try:
+        manifest = json.loads(manifest_payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        _fail("attested ibapi manifest is unreadable")
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("distribution") != "ibapi"
+        or manifest.get("version") != "9.81.1.post1"
+    ):
+        _fail("attested ibapi manifest metadata is invalid")
+    expected_files = manifest.get("package_files")
+    if not isinstance(expected_files, dict) or not expected_files:
+        _fail("attested ibapi manifest package_files is invalid")
+
+    retained_ibapi: dict[str, bytes] = {}
+    prefix = "ibapi/"
+    for rel, payload in verified_python_sources.items():
+        if rel.startswith(prefix):
+            retained_ibapi[rel[len(prefix):]] = payload
+
+    if set(retained_ibapi) != set(expected_files):
+        _fail("retained ibapi payload set does not match attested manifest")
+    for rel, payload in retained_ibapi.items():
+        expected_digest = expected_files.get(rel)
+        if not isinstance(expected_digest, str) or not _SHA256_RE.fullmatch(
+            expected_digest.lower()
+        ):
+            _fail(f"attested ibapi manifest hash is invalid for {rel}")
+        if hashlib.sha256(payload).hexdigest() != expected_digest.lower():
+            _fail(f"retained ibapi payload SHA-256 mismatch: {rel}")
 
     manifest_path = _seal_verified_native_payload(
         manifest_payload,
@@ -899,6 +933,7 @@ def main() -> int:
                 snapshot_root,
                 dependency_snapshot,
                 verified_repository_sources,
+                verified_python_sources,
             )
         _prepare_sys_path(
             snapshot_root,
