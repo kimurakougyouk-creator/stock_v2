@@ -13,10 +13,10 @@ bash scripts/setup.sh
 ## 通常起動
 
 ```bash
-bash scripts/run.sh
+./scripts/run.sh
 ```
 
-`scripts/run.sh` は正式な `start.sh` を呼び出します。実際の秘密情報は `.env` にのみ保存し、Gitには追加しないでください。必要な項目名だけを `.env.example` で確認できます。
+`scripts/run.sh` は正式な `start.sh` を直接呼び出します。安全境界のため `bash scripts/run.sh` / `bash start.sh` ではなく、上記の直接実行だけを使用してください。実際の秘密情報は `.env` にのみ保存し、Gitには追加しないでください。必要な項目名だけを `.env.example` で確認できます。
 
 ## Paper共通基盤の最終監査
 

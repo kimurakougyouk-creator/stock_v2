@@ -6,11 +6,28 @@ cd "$ROOT_DIR"
 
 echo "=== stock_v2 初回セットアップを開始します ==="
 
+TRUSTED_PYTHON="/usr/bin/python3"
+if [[ ! -x "$TRUSTED_PYTHON" ]]; then
+  echo "FATAL: trusted Python $TRUSTED_PYTHON is unavailable." >&2
+  exit 2
+fi
+
 if [[ ! -d .venv ]]; then
   echo "仮想環境 .venv を作成します。"
-  python3 -m venv .venv
+  "$TRUSTED_PYTHON" -m venv .venv
 else
   echo "既存の仮想環境 .venv を使用します。"
+fi
+
+if [[ ! -x .venv/bin/python ]]; then
+  echo "FATAL: .venv/bin/python is unavailable." >&2
+  exit 2
+fi
+VENV_PYTHON_REAL="$(/usr/bin/readlink -f -- .venv/bin/python)"
+TRUSTED_PYTHON_REAL="$(/usr/bin/readlink -f -- "$TRUSTED_PYTHON")"
+if [[ "$VENV_PYTHON_REAL" != "$TRUSTED_PYTHON_REAL" ]]; then
+  echo "FATAL: existing .venv uses a different Python interpreter. Recreate it with /usr/bin/python3." >&2
+  exit 2
 fi
 
 # shellcheck disable=SC1091

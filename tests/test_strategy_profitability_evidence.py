@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ai_asset_platform.reports.strategy_profitability_evidence import (
@@ -20,6 +21,8 @@ def _fill(
     currency: str = "JPY",
     fx: float | None = 1.0,
     exec_ids: list[str] | None = None,
+    strategy_source_sha: str | None = "c" * 40,
+    strategy_parameters_sha: str | None = "e" * 64,
 ) -> dict:
     row = {
         "created_at": "2026-09-01T10:00:00+09:00",
@@ -32,6 +35,10 @@ def _fill(
         "status": "FILLED",
         "order_intent_id": intent,
     }
+    if strategy_source_sha is not None:
+        row["strategy_source_sha"] = strategy_source_sha
+    if strategy_parameters_sha is not None:
+        row["strategy_parameters_sha"] = strategy_parameters_sha
     if fx is not None:
         row["fx_to_account_rate"] = fx
     if exec_ids is not None:
@@ -140,6 +147,7 @@ def test_metrics_use_only_natural_strategy_closed_trades():
     assert result.net_realized_pnl is None
     assert result.net_profitability_proven is False
     assert result.live_ready is False
+    assert result.broker_provenance_verified is False
 
 
 def test_no_natural_strategy_fill_never_reuses_validation_profit():
@@ -166,6 +174,29 @@ def test_no_natural_strategy_fill_never_reuses_validation_profit():
     assert result.closed_trade_count == 0
     assert result.excluded_ibkr_fill_count == 4
     assert result.gross_performance["net_profit"] == 0.0
+
+
+
+
+def test_blocked_evidence_preserves_unattributed_recovery_fill_count():
+    natural = _fill(
+        intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+        side="BUY",
+        price=150.0,
+    )
+    recovery = _fill(
+        intent="broker-recovery:exec-1",
+        side="BUY",
+        price=150.0,
+    )
+
+    result = build_strategy_profitability_evidence(
+        [natural, recovery],
+        account_currency="JPY",
+    )
+
+    assert result.evidence_status == "NO_NATURAL_CLOSED_TRADES"
+    assert result.unattributed_recovery_fill_count == 1
 
 
 def test_open_natural_position_is_not_counted_as_profit():
@@ -222,8 +253,15 @@ def test_cross_currency_fx_is_required_instead_of_guessed():
 
 def test_serialized_evidence_matches_live_cash_readiness_schema_and_blocks_live():
     result = build_strategy_profitability_evidence([], account_currency="JPY")
-    record = evidence_record(result)
+    record = evidence_record(
+        result,
+        source_sha="a" * 40,
+        generated_at=datetime(2026, 9, 23, 3, 0, tzinfo=timezone.utc),
+    )
 
+    assert record["schema_version"] == 4
+    assert record["source_sha"] == "a" * 40
+    assert record["generated_at"] == "2026-09-23T03:00:00+00:00"
     assert record["paper_only"] is True
     assert record["broker_connection_used"] is False
     assert record["order_sent"] is False
@@ -277,6 +315,44 @@ def test_fee_aware_jpy_roundtrip_reports_true_net_pnl():
     assert result.fee_aware is True
     assert result.net_profitability_proven is False
     assert result.live_ready is False
+
+
+def test_fee_aware_evidence_counts_unattributed_broker_recovery_fills():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+        _fill(
+            intent="broker-recovery:lost-natural-exec",
+            side="SELL",
+            price=120.0,
+            exec_ids=["recovered-1"],
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert result.unattributed_recovery_fill_count == 1
 
 
 def test_fee_aware_cross_currency_uses_fill_fx_for_commissions():
@@ -750,6 +826,145 @@ def test_execution_quantity_ids_must_match_commission_bound_exec_ids():
 
     assert result.evidence_status == "BLOCKED_FEE_EVIDENCE"
     assert "do not match broker_exec_ids" in result.reason
+
+
+def test_fee_aware_report_carries_one_exact_strategy_source_sha():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+    assert result.strategy_source_sha == "c" * 40
+
+
+
+
+def test_fee_aware_local_ledgers_never_claim_authenticated_broker_provenance():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+
+    assert result.fees_accounted is True
+    assert result.broker_provenance_verified is False
+    assert "not yet authenticated" in result.reason
+
+
+
+
+def test_mixed_strategy_parameter_sha_never_proves_one_strategy():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+            strategy_parameters_sha="e" * 64,
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+            strategy_parameters_sha="f" * 64,
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+    assert result.strategy_parameters_sha is None
+    assert result.net_profitability_proven is False
+    assert result.live_ready is False
+
+
+def test_mixed_strategy_source_sha_never_proves_one_version():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+            strategy_source_sha="c" * 40,
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+            strategy_source_sha="d" * 40,
+        ),
+    ]
+    result = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=_commission_report(
+            _commission("buy-1", 5.0, "JPY"),
+            _commission("sell-1", 5.0, "JPY"),
+        ),
+    )
+    assert result.strategy_source_sha is None
+    assert result.net_profitability_proven is False
+    assert result.live_ready is False
 
 
 def test_module_contains_no_broker_mutation_api_calls():

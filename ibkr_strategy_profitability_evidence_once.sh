@@ -1,18 +1,22 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-ROOT="${AI_ASSET_PLATFORM_ROOT:-$HOME/stock_v2_latest}"
-cd "$ROOT"
-
-if [[ ! -f .venv/bin/activate ]]; then
-  echo "BLOCKED: .venv is missing. No Paper or Live order was sent."
+# Security contract: execute this entrypoint directly (./ibkr_strategy_profitability_evidence_once.sh).
+# An explicitly caller-chosen Bash starts before this file can sanitize that
+# shell's startup environment, so that invocation mode is unsupported.
+if [ -n "${BASH_VERSION:-}" ]; then
+  echo "BLOCKED: invoke this operational entrypoint directly (./ibkr_strategy_profitability_evidence_once.sh); explicit Bash invocation is unsupported." >&2
   exit 2
 fi
 
-# shellcheck disable=SC1091
-source .venv/bin/activate
-unset PYTHONPATH
-bash scripts/ensure_exact_checkout_runtime.sh
+ROOT="${AI_ASSET_PLATFORM_ROOT:-${HOME:-}/stock_v2_latest}"
 
-pytest -q tests/test_strategy_profitability_evidence.py
-python -m ai_asset_platform.reports.strategy_profitability_evidence
+exec /usr/bin/env -i \
+  HOME="${HOME:-}" \
+  USER="${USER:-}" \
+  LOGNAME="${LOGNAME:-}" \
+  LANG="${LANG:-C.UTF-8}" \
+  PATH="/usr/local/bin:/usr/bin:/bin" \
+  PYTHONDONTWRITEBYTECODE=1 \
+  AI_ASSET_PLATFORM_ROOT="$ROOT" \
+  /bin/bash --noprofile --norc "$ROOT/scripts/ibkr_strategy_profitability_evidence_once_sanitized.sh" "$@"

@@ -33,7 +33,19 @@ AUDITED_PATHS: tuple[str, ...] = (
     "live_pilot_operational_once.sh",
 )
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+SAFE_GIT_PREFIX: tuple[str, ...] = (
+    "/usr/bin/git",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+)
 REPORT_SCHEMA_VERSION = 1
+
+
+def safe_git_command(*args: str) -> list[str]:
+    """Build a Git command with repo-configured executable hooks disabled."""
+    return [*SAFE_GIT_PREFIX, *args]
 _IMPORTABLE_IGNORED_SUFFIXES = (".py", ".pyc", ".pyo", ".pyz", ".so", ".pyd", ".dylib")
 
 
@@ -124,7 +136,7 @@ def _run_git(
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> str:
     completed = runner(
-        ["git", *args],
+        safe_git_command(*args),
         cwd=str(cwd),
         check=True,
         capture_output=True,

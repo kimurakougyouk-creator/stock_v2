@@ -740,6 +740,14 @@ def test_install_autopilot_migrates_and_verifies_before_restart():
 _SETUP_SH_PATH = ROOT_DIR / "scripts" / "setup.sh"
 
 
+def test_setup_sh_pins_venv_to_trusted_system_python():
+    source = _SETUP_SH_PATH.read_text(encoding="utf-8")
+    assert 'TRUSTED_PYTHON="/usr/bin/python3"' in source
+    assert '"$TRUSTED_PYTHON" -m venv .venv' in source
+    assert 'VENV_PYTHON_REAL="$(/usr/bin/readlink -f -- .venv/bin/python)"' in source
+    assert 'TRUSTED_PYTHON_REAL="$(/usr/bin/readlink -f -- "$TRUSTED_PYTHON")"' in source
+
+
 def test_setup_sh_unsets_pythonpath_before_editable_install_and_verify():
     """Codex PR #287 P2, `scripts/setup.sh`: activation left an inherited
     PYTHONPATH in place through both `pip install -e .` and the
@@ -1763,9 +1771,14 @@ def test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_f
         lines = path.read_text(encoding="utf-8").splitlines()
         failures.extend(_check_exact_checkout_binding(path.name, lines))
 
-    assert checked >= 7, (
-        f"expected at least 7 non-self-updating wrappers to require the gate "
-        f"(all but the installer-gated exemption), found {checked}"
+    # Three strategy-promotion/Paper wrappers now invoke their venv Python
+    # through an explicit env -i boundary instead of the legacy
+    # activate -> unset -> helper pattern counted by this checker. Keep this
+    # sanity floor aligned with the remaining legacy-pattern wrappers; the
+    # sanitized wrappers have dedicated source-gate regression coverage.
+    assert checked >= 6, (
+        f"expected at least 6 legacy-pattern non-self-updating wrappers to "
+        f"require the gate (all but the installer-gated exemption), found {checked}"
     )
     assert not failures, (
         "non-self-updating wrappers not exact-checkout-bound before first use:\n"

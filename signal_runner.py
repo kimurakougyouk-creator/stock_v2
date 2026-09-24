@@ -1,7 +1,121 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from pathlib import Path
+import re
+import subprocess
 from typing import Any
+
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_BOOTSTRAP_SOURCE_SHA_ENV = "AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA"
+_RUNTIME_DEPENDENCY_SHA_ENV = "AI_ASSET_RUNTIME_DEPENDENCY_SHA"
+
+
+def _capture_process_start_strategy_source_sha() -> str | None:
+    """Attest clean strategy source before importing strategy/application modules."""
+    clean_env = {
+        "HOME": os.environ.get("HOME", ""),
+        "USER": os.environ.get("USER", ""),
+        "LOGNAME": os.environ.get("LOGNAME", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    try:
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                "--noprofile",
+                "--norc",
+                "scripts/verify_strategy_source_clean.sh",
+            ],
+            cwd=Path("."),
+            env=clean_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    prefix = "STRATEGY_SOURCE_SHA="
+    matches = [
+        line[len(prefix):].strip().lower()
+        for line in completed.stdout.splitlines()
+        if line.startswith(prefix)
+    ]
+    if len(matches) != 1:
+        return None
+    sha = matches[0]
+    if not _SOURCE_SHA_RE.fullmatch(sha):
+        return None
+
+    bootstrap_sha = str(os.environ.get(_BOOTSTRAP_SOURCE_SHA_ENV, "")).strip().lower()
+    if bootstrap_sha:
+        if not _SOURCE_SHA_RE.fullmatch(bootstrap_sha):
+            return None
+        if bootstrap_sha != sha:
+            return None
+        return bootstrap_sha
+    return sha
+
+
+_PROCESS_START_STRATEGY_SOURCE_SHA = _capture_process_start_strategy_source_sha()
+
+
+def _strategy_parameters_sha(
+    settings: dict[str, Any],
+    *,
+    ai_provider: Any | None,
+    require_order_identity: bool = False,
+) -> str:
+    """Stable identity for technical parameters plus the effective AI strategy."""
+    if ai_provider is None:
+        ai_provider_name = "none"
+        ai_model_name = "none"
+    else:
+        ai_provider_name = str(getattr(ai_provider, "name", "") or "").strip().lower()
+        ai_model_name = str(getattr(ai_provider, "model", "") or "").strip()
+        if require_order_identity and (not ai_provider_name or not ai_model_name):
+            raise ValueError(
+                "AI provider/model identity is required before a natural Paper order"
+            )
+        if not ai_provider_name:
+            ai_provider_name = "unknown"
+        if not ai_model_name:
+            ai_model_name = "unspecified"
+
+    runtime_dependency_sha = str(
+        os.environ.get(_RUNTIME_DEPENDENCY_SHA_ENV, "unverified")
+    ).strip().lower()
+    if require_order_identity and not re.fullmatch(
+        r"[0-9a-f]{64}", runtime_dependency_sha
+    ):
+        raise ValueError(
+            "runtime dependency identity is required before a natural Paper order"
+        )
+
+    payload = {
+        "runtime_dependency_sha": runtime_dependency_sha,
+        "ma_short": int(settings["ma_short"]),
+        "ma_middle": int(settings["ma_middle"]),
+        "ma_long": int(settings["ma_long"]),
+        "rsi_low": int(settings["rsi_low"]),
+        "rsi_high": int(settings["rsi_high"]),
+        "atr_multiplier": float(settings["atr_multiplier"]),
+        "ai_provider": ai_provider_name,
+        "ai_model": ai_model_name,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
 
 import pandas as pd
 import yfinance as yf
@@ -24,6 +138,7 @@ from config import (
 )
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.execution.ibkr_signal_runtime import (
+    bind_strategy_runtime_identity,
     execute_approved_signal_via_ibkr_paper,
 )
 from ai_asset_platform.execution.order_limit_reason import detect_buy_order_limit_reason
@@ -249,7 +364,15 @@ def run_signal_scan(
     allow_email: bool = True,
 ) -> dict[str, Any]:
     if tickers is None:
-        ticker_df = pd.read_csv("tickers.csv")
+        snapshot_root = str(
+            os.environ.get("AI_ASSET_CODE_SNAPSHOT_ROOT", "")
+        ).strip()
+        ticker_path = (
+            Path(snapshot_root) / "tickers.csv"
+            if snapshot_root
+            else Path("tickers.csv")
+        )
+        ticker_df = pd.read_csv(ticker_path)
         tickers = ticker_df["Ticker"].tolist()
 
     all_settings = load_optimized_settings()
@@ -265,6 +388,11 @@ def run_signal_scan(
 
         try:
             settings = get_ticker_settings(ticker, all_settings)
+            strategy_parameters_sha = _strategy_parameters_sha(
+                settings,
+                ai_provider=ai_provider,
+                require_order_identity=allow_orders,
+            )
             prepared = add_indicators(
                 df.copy(),
                 ma_short=settings["ma_short"],
@@ -803,6 +931,14 @@ def run_signal_scan(
                                         order_reason = "AI最終判定"
 
                                     try:
+                                        bind_strategy_runtime_identity(
+                                            process_start_source_sha=(
+                                                _PROCESS_START_STRATEGY_SOURCE_SHA
+                                            ),
+                                            strategy_parameters_sha=(
+                                                strategy_parameters_sha
+                                            ),
+                                        )
                                         execution = (
                                             execute_approved_signal_via_ibkr_paper(
                                                 ticker=ticker,
@@ -941,6 +1077,8 @@ def run_signal_scan(
                 "AIAvailable": ai_result.available,
                 "FinalSignal": final_decision.signal,
                 "FinalReason": final_decision.reason,
+                "StrategySourceSHA": _PROCESS_START_STRATEGY_SOURCE_SHA,
+                "StrategyParametersSHA": strategy_parameters_sha,
             }
             records.append(record)
 
@@ -1000,6 +1138,8 @@ def run_signal_scan(
                 "AIAvailable": False,
                 "FinalSignal": "HOLD",
                 "FinalReason": "判定エラーのため、安全側でHOLDとします。",
+                "StrategySourceSHA": _PROCESS_START_STRATEGY_SOURCE_SHA,
+                "StrategyParametersSHA": None,
             }
             records.append(record)
             print(f"{ticker}: 判定中にエラーが発生しました。{exc}")
