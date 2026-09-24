@@ -921,6 +921,10 @@ def main() -> int:
         and args[0] == "-m"
         and args[1] == "ai_asset_platform.execution.ibkr_verified_paper_runtime"
     )
+    raw_require_pinned_ibapi = os.environ.get("AI_ASSET_REQUIRE_PINNED_IBAPI", "0")
+    if raw_require_pinned_ibapi not in {"0", "1"}:
+        _fail("AI_ASSET_REQUIRE_PINNED_IBAPI must be exactly 0 or 1")
+    require_pinned_ibapi = broker_runtime or raw_require_pinned_ibapi == "1"
 
     (
         snapshot_holder,
@@ -928,7 +932,7 @@ def main() -> int:
         verified_repository_sources,
     ) = _snapshot_repository(root, source_sha)
     try:
-        if broker_runtime:
+        if require_pinned_ibapi:
             _verify_pinned_ibapi(
                 snapshot_root,
                 dependency_snapshot,

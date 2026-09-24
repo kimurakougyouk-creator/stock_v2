@@ -18,6 +18,7 @@ run_clean() {
 run_isolated() {
   run_clean \
     AI_ASSET_PLATFORM_ROOT="$ROOT" \
+    AI_ASSET_REQUIRE_PINNED_IBAPI="${AI_ASSET_REQUIRE_PINNED_IBAPI:-0}" \
     /usr/bin/python3 -I -S "$ROOT/scripts/run_isolated_venv_python.py" "$@"
 }
 
@@ -34,7 +35,7 @@ fi
 
 run_isolated scripts/verify_exact_checkout_import.py
 
-run_isolated -m pytest -q \
+AI_ASSET_REQUIRE_PINNED_IBAPI=1 run_isolated -m pytest -q \
   tests/test_ibkr_verified_paper_runtime.py \
   tests/test_paper_trading_runner.py \
   tests/test_verified_paper_scan.py \
