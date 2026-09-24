@@ -74,7 +74,7 @@ def test_wrapper_enters_clean_shell_before_bash_body(
     assert not hook_marker.exists()
 
 
-def test_isolated_bootstrap_does_not_process_venv_startup_hooks(tmp_path: Path):
+def test_isolated_bootstrap_rejects_unverified_venv_startup_hooks(tmp_path: Path):
     root = tmp_path / "repo"
     src = root / "src"
     src.mkdir(parents=True)
@@ -133,6 +133,10 @@ def test_isolated_bootstrap_does_not_process_venv_startup_hooks(tmp_path: Path):
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    dist = site_packages / "fixture-1.0.dist-info"
+    dist.mkdir()
+    (dist / "RECORD").write_text("", encoding="utf-8")
+
     completed = subprocess.run(
         [
             "/usr/bin/python3",
@@ -148,8 +152,8 @@ def test_isolated_bootstrap_does_not_process_venv_startup_hooks(tmp_path: Path):
         capture_output=True,
         text=True,
     )
-    assert completed.returncode == 0, completed.stderr
-    assert target_marker.read_text(encoding="utf-8") == "ok"
+    assert completed.returncode == 2
+    assert not target_marker.exists()
     assert not pth_marker.exists()
     assert not site_marker.exists()
     assert not user_marker.exists()
@@ -323,3 +327,33 @@ def test_verified_paper_wrapper_never_self_updates_checkout():
     ).read_text(encoding="utf-8")
     for forbidden in ("git pull", "git fetch", "git switch", "ext::"):
         assert forbidden not in source
+
+
+def test_venv_site_packages_must_match_running_python_minor(tmp_path: Path):
+    root = tmp_path / "repo"
+    (root / ".venv" / "bin").mkdir(parents=True)
+    (root / ".venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    (root / ".venv" / "lib" / "python9.99" / "site-packages").mkdir(parents=True)
+
+    completed = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            str(ROOT / "scripts" / "run_isolated_venv_python.py"),
+            "-m",
+            "does_not_matter",
+        ],
+        cwd=root,
+        env={
+            "AI_ASSET_PLATFORM_ROOT": str(root),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "interpreter-matching" in completed.stderr

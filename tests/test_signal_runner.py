@@ -57,6 +57,24 @@ def test_process_start_source_capture_rejects_bootstrap_sha_mismatch(monkeypatch
     assert _capture_process_start_strategy_source_sha() is None
 
 
+def test_strategy_parameters_sha_binds_runtime_dependency_identity(monkeypatch):
+    settings = {
+        "ma_short": 5,
+        "ma_middle": 25,
+        "ma_long": 75,
+        "rsi_low": 30,
+        "rsi_high": 70,
+        "atr_multiplier": 2.0,
+    }
+
+    monkeypatch.setenv("AI_ASSET_RUNTIME_DEPENDENCY_SHA", "a" * 64)
+    first = _strategy_parameters_sha(settings, ai_provider=None)
+    monkeypatch.setenv("AI_ASSET_RUNTIME_DEPENDENCY_SHA", "b" * 64)
+    second = _strategy_parameters_sha(settings, ai_provider=None)
+
+    assert first != second
+
+
 def test_strategy_parameters_sha_binds_ai_provider_and_model():
     settings = {
         "ma_short": 5,

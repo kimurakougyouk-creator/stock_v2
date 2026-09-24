@@ -412,7 +412,7 @@ def test_start_sh_verifies_exact_checkout_before_repository_python():
         "\nverify_exact_checkout_runtime\n",
         first_runtime_gate + 1,
     )
-    first_application = source.index('"$VENV_PYTHON" main_simple_step8.py')
+    first_application = source.index("run_isolated main_simple_step8.py")
 
     assert (
         first_source_gate
@@ -434,7 +434,7 @@ def test_start_sh_rechecks_full_source_boundary_after_setup_and_env_data():
         "/bin/bash scripts/verify_strategy_source_clean.sh",
         first_gate + 1,
     )
-    first_application = source.index('"$VENV_PYTHON" main_simple_step8.py')
+    first_application = source.index("run_isolated main_simple_step8.py")
 
     assert first_gate < safe_env < second_gate < first_application
 
@@ -447,7 +447,8 @@ def test_start_sh_sanitizes_inherited_command_environment_before_gates():
     assert "AI_ASSET_START_SANITIZED" not in launcher
     assert "exec /usr/bin/env -i" in launcher
     assert "scripts/start_sanitized.sh" in launcher
-    assert "unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH" in launcher
+    assert launcher.startswith("#!/bin/sh\n")
+    assert "explicit Bash invocation is unsupported" in launcher
     assert 'export PATH="/usr/local/bin:/usr/bin:/bin"' in source
     assert "source .venv/bin/activate" not in source
     assert "source .env" not in source
@@ -562,8 +563,9 @@ def test_start_sh_blocks_env_shell_function_injection(tmp_path: Path):
         encoding="utf-8",
     )
 
+    (root / "start.sh").chmod(0o755)
     completed = subprocess.run(
-        ["bash", "start.sh"],
+        [str(root / "start.sh")],
         cwd=root,
         check=False,
         capture_output=True,
@@ -670,8 +672,29 @@ def test_promotion_wrapper_preserves_completed_detailed_blocked_decision(tmp_pat
     )
     pytest_pkg = site_packages / "pytest"
     pytest_pkg.mkdir(parents=True)
-    (pytest_pkg / "__init__.py").write_text("", encoding="utf-8")
-    (pytest_pkg / "__main__.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    init_file = pytest_pkg / "__init__.py"
+    main_file = pytest_pkg / "__main__.py"
+    init_file.write_text("", encoding="utf-8")
+    main_file.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    dist = site_packages / "pytest-1.0.dist-info"
+    dist.mkdir()
+    import base64
+    import hashlib
+    record_lines = []
+    for rel, path in (
+        ("pytest/__init__.py", init_file),
+        ("pytest/__main__.py", main_file),
+    ):
+        data = path.read_bytes()
+        digest = base64.urlsafe_b64encode(
+            hashlib.sha256(data).digest()
+        ).rstrip(b"=").decode("ascii")
+        record_lines.append(f"{rel},sha256={digest},{len(data)}")
+    record_lines.append("pytest-1.0.dist-info/RECORD,,")
+    (dist / "RECORD").write_text(
+        "\n".join(record_lines) + "\n",
+        encoding="utf-8",
+    )
 
     (root / "strategy_promotion_policy_once.sh").chmod(0o755)
     completed = subprocess.run(
@@ -824,3 +847,27 @@ def test_shell_gate_blocks_external_root_package_symlink_shadow(tmp_path: Path):
 
     assert result.returncode != 0
     assert "root module symlink/package shadow" in result.stderr
+
+
+def test_start_and_run_entrypoints_use_direct_posix_boundary():
+    root = Path(__file__).parents[1]
+    start = (root / "start.sh").read_text(encoding="utf-8")
+    run = (root / "scripts" / "run.sh").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    assert start.startswith("#!/bin/sh\n")
+    assert run.startswith("#!/bin/sh\n")
+    assert "explicit Bash invocation is unsupported" in start
+    assert "explicit Bash invocation is unsupported" in run
+    assert "./scripts/run.sh" in readme
+
+
+def test_shell_gate_blocks_root_pycache_bytecode(tmp_path: Path):
+    root = _repo(tmp_path)
+    cache = root / "__pycache__"
+    cache.mkdir()
+    (cache / "signal_runner.cpython-313.pyc").write_bytes(b"forged")
+
+    result = _run_gate(root)
+
+    assert result.returncode != 0
