@@ -41,6 +41,8 @@ AUDITED_PATHS=(
   scripts/verify_strategy_source_clean.sh
   scripts/ensure_exact_checkout_runtime.sh
   scripts/verify_exact_checkout_import.py
+  scripts/verify_live_ibapi_runtime.py
+  scripts/live_ibapi_manifest.json
   scripts/load_start_env.py
   scripts/run_isolated_venv_python.py
   scripts/ibkr_verified_paper_runtime_once_sanitized.sh

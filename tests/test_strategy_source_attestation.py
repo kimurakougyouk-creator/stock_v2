@@ -207,3 +207,28 @@ def test_strategy_attestation_disables_repo_git_hooks_and_fsmonitor(tmp_path: Pa
             "-c",
             "core.hooksPath=/dev/null",
         ]
+
+
+
+def test_attestation_scope_includes_ibapi_trust_anchors():
+    assert "scripts/verify_live_ibapi_runtime.py" in STRATEGY_AUDITED_PATHS
+    assert "scripts/live_ibapi_manifest.json" in STRATEGY_AUDITED_PATHS
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "scripts/verify_live_ibapi_runtime.py",
+        "scripts/live_ibapi_manifest.json",
+    ),
+)
+def test_dirty_ibapi_trust_anchor_fails_closed(tmp_path: Path, relative_path: str):
+    with pytest.raises(
+        StrategySourceAttestationError,
+        match="strategy source attestation blocked",
+    ):
+        attest_strategy_source(
+            SHA,
+            repository_root=tmp_path,
+            runner=FakeRunner(status=f" M {relative_path}\n"),
+        )

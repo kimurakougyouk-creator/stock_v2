@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import ctypes
 import fcntl
 import hashlib
 import io
@@ -31,6 +32,9 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BOOTSTRAP_SOURCE_SHA_ENV = "AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA"
 _RUNTIME_DEPENDENCY_SHA_ENV = "AI_ASSET_RUNTIME_DEPENDENCY_SHA"
 _SEALED_NATIVE_FDS: list[int] = []
+_SEALED_NATIVE_HANDLES: list[ctypes.CDLL] = []
+_SEALED_NATIVE_PATHS: dict[tuple[str, str, str], str] = {}
+_PRELOADED_NATIVE_RELS: set[tuple[str, str, str]] = set()
 
 
 def _repository_root() -> Path:
@@ -495,6 +499,96 @@ def _seal_verified_native_payload(payload: bytes, label: str) -> str:
     return f"/proc/self/fd/{fd}"
 
 
+def _sealed_verified_dependency_path(
+    path: Path,
+    root: Path,
+    verified_hashes: dict[str, str],
+) -> str | None:
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    expected = verified_hashes.get(rel)
+    if expected is None:
+        return None
+    key = (str(root), rel, expected)
+    cached = _SEALED_NATIVE_PATHS.get(key)
+    if cached is not None:
+        return cached
+    payload = _read_exact_verified_file(path, root, verified_hashes)
+    if payload is None:
+        return None
+    sealed_path = _seal_verified_native_payload(payload, path.name)
+    _SEALED_NATIVE_PATHS[key] = sealed_path
+    return sealed_path
+
+
+def _is_bundled_native_library(rel: str, package_root: str) -> bool:
+    prefixes = (
+        f"{package_root}.libs/",
+        f"{package_root}/.libs/",
+        f"{package_root}/libs/",
+    )
+    if not rel.startswith(prefixes):
+        return False
+    name = Path(rel).name.lower()
+    return ".so" in name or name.endswith((".dylib", ".dll"))
+
+
+def _preload_verified_bundled_libraries(
+    candidate: Path,
+    root: Path,
+    verified_hashes: dict[str, str],
+) -> None:
+    """Preload RECORD-bound wheel libraries so sealed extensions keep $ORIGIN semantics."""
+    try:
+        candidate_rel = candidate.relative_to(root).as_posix()
+    except ValueError:
+        return
+    package_root = candidate_rel.split("/", 1)[0]
+    bundled = [
+        rel
+        for rel in sorted(verified_hashes)
+        if _is_bundled_native_library(rel, package_root)
+    ]
+    if not bundled:
+        return
+
+    pending: list[tuple[tuple[str, str, str], str]] = []
+    for rel in bundled:
+        expected = verified_hashes[rel]
+        key = (str(root), rel, expected)
+        if key in _PRELOADED_NATIVE_RELS:
+            continue
+        sealed_path = _sealed_verified_dependency_path(
+            root / rel,
+            root,
+            verified_hashes,
+        )
+        if sealed_path is not None:
+            pending.append((key, sealed_path))
+
+    if not pending:
+        return
+
+    mode = getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_GLOBAL", 0x100)
+    while pending:
+        progress = False
+        retry: list[tuple[tuple[str, str, str], str]] = []
+        for key, sealed_path in pending:
+            try:
+                handle = ctypes.CDLL(sealed_path, mode=mode)
+            except OSError:
+                retry.append((key, sealed_path))
+                continue
+            _SEALED_NATIVE_HANDLES.append(handle)
+            _PRELOADED_NATIVE_RELS.add(key)
+            progress = True
+        if not retry or not progress:
+            break
+        pending = retry
+
+
 def _sealed_verified_native_spec(
     fullname: str,
     candidate: Path,
@@ -504,10 +598,10 @@ def _sealed_verified_native_spec(
     is_package: bool,
     package_dir: Path | None = None,
 ):
-    payload = _read_exact_verified_file(candidate, root, verified_hashes)
-    if payload is None:
+    _preload_verified_bundled_libraries(candidate, root, verified_hashes)
+    sealed_path = _sealed_verified_dependency_path(candidate, root, verified_hashes)
+    if sealed_path is None:
         return None
-    sealed_path = _seal_verified_native_payload(payload, candidate.name)
     loader = importlib.machinery.ExtensionFileLoader(fullname, sealed_path)
     spec = importlib.util.spec_from_loader(
         fullname,
@@ -552,7 +646,38 @@ def _install_verified_dependency_importer(
         sys.path_importer_cache.pop(cached, None)
 
 
-def _verify_pinned_ibapi(root: Path, site_packages: Path) -> None:
+def _verify_pinned_ibapi(
+    snapshot_root: Path,
+    site_packages: Path,
+    verified_repository_sources: dict[str, bytes],
+) -> None:
+    verifier_rel = "scripts/verify_live_ibapi_runtime.py"
+    manifest_rel = "scripts/live_ibapi_manifest.json"
+    verifier_source = verified_repository_sources.get(verifier_rel)
+    manifest_payload = verified_repository_sources.get(manifest_rel)
+    if verifier_source is None or manifest_payload is None:
+        _fail("pinned ibapi verifier/manifest is missing from attested Git archive")
+
+    manifest_path = _seal_verified_native_payload(
+        manifest_payload,
+        "stock_v2_live_ibapi_manifest",
+    )
+    try:
+        manifest_fd = int(manifest_path.rsplit("/", 1)[-1])
+    except (ValueError, IndexError):
+        _fail("sealed ibapi manifest descriptor is unavailable")
+
+    bootstrap = (
+        "import sys\n"
+        + f"source = {verifier_source!r}\n"
+        + f"sys.argv = [{verifier_rel!r}, '--site-packages', {str(site_packages)!r}, "
+        + f"'--manifest', {manifest_path!r}]\n"
+        + "namespace = {"
+        + f"'__name__': '__main__', '__file__': {verifier_rel!r}, "
+        + "'__package__': None, '__spec__': None, '__cached__': None, "
+        + "'__builtins__': __builtins__}\n"
+        + f"exec(compile(source, {verifier_rel!r}, 'exec'), namespace, namespace)\n"
+    )
     try:
         subprocess.run(
             [
@@ -560,14 +685,12 @@ def _verify_pinned_ibapi(root: Path, site_packages: Path) -> None:
                 "-I",
                 "-P",
                 "-S",
-                str(root / "scripts" / "verify_live_ibapi_runtime.py"),
-                "--site-packages",
-                str(site_packages),
-                "--manifest",
-                str(root / "scripts" / "live_ibapi_manifest.json"),
+                "-c",
+                bootstrap,
             ],
-            cwd=root,
-            env=_clean_env(root),
+            cwd=snapshot_root,
+            env=_clean_env(snapshot_root),
+            pass_fds=(manifest_fd,),
             check=True,
             capture_output=True,
             text=True,
@@ -616,10 +739,13 @@ def _snapshot_repository(
                         "Git archive contains an unsupported link/device: "
                         f"{member.name}"
                     )
-                if member.isfile() and member.name.endswith(".py"):
+                if member.isfile() and (
+                    member.name.endswith(".py")
+                    or member.name == "scripts/live_ibapi_manifest.json"
+                ):
                     stream = archive.extractfile(member)
                     if stream is None:
-                        _fail(f"could not read archived Python source: {member.name}")
+                        _fail(f"could not read archived repository source: {member.name}")
                     verified_repository_sources[member.name] = stream.read()
             archive.extractall(snapshot, filter="data")
     except (tarfile.TarError, OSError):
@@ -761,8 +887,6 @@ def main() -> int:
         and args[0] == "-m"
         and args[1] == "ai_asset_platform.execution.ibkr_verified_paper_runtime"
     )
-    if broker_runtime:
-        _verify_pinned_ibapi(root, dependency_snapshot)
 
     (
         snapshot_holder,
@@ -770,6 +894,12 @@ def main() -> int:
         verified_repository_sources,
     ) = _snapshot_repository(root, source_sha)
     try:
+        if broker_runtime:
+            _verify_pinned_ibapi(
+                snapshot_root,
+                dependency_snapshot,
+                verified_repository_sources,
+            )
         _prepare_sys_path(
             snapshot_root,
             dependency_snapshot,

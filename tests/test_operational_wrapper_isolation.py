@@ -520,3 +520,129 @@ def test_native_payload_is_loaded_from_sealed_verified_bytes(tmp_path: Path):
         sys.modules.pop("_testcapi", None)
         if previous is not None:
             sys.modules["_testcapi"] = previous
+
+
+
+def test_sealed_native_loader_preserves_bundled_origin_dependencies(tmp_path: Path):
+    from scripts import run_isolated_venv_python as isolated_bootstrap
+
+    import ctypes
+
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("C compiler is unavailable")
+
+    root = tmp_path / "site-packages"
+    package = root / "fixture"
+    bundled = root / "fixture.libs"
+    package.mkdir(parents=True)
+    bundled.mkdir(parents=True)
+
+    dep_source = tmp_path / "dep.c"
+    main_source = tmp_path / "main.c"
+    dep_source.write_text(
+        "int stock_v2_fixture_value(void) { return 41; }\n",
+        encoding="utf-8",
+    )
+    main_source.write_text(
+        "extern int stock_v2_fixture_value(void);\n"
+        "int stock_v2_fixture_main(void) { return stock_v2_fixture_value() + 1; }\n",
+        encoding="utf-8",
+    )
+
+    dep = bundled / "libstock_v2_fixture_dep.so"
+    main = package / "libstock_v2_fixture_main.so"
+    subprocess.run(
+        [
+            compiler,
+            "-shared",
+            "-fPIC",
+            str(dep_source),
+            "-Wl,-soname,libstock_v2_fixture_dep.so",
+            "-o",
+            str(dep),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            compiler,
+            "-shared",
+            "-fPIC",
+            str(main_source),
+            "-L",
+            str(bundled),
+            "-lstock_v2_fixture_dep",
+            "-Wl,-rpath,$ORIGIN/../fixture.libs",
+            "-o",
+            str(main),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    verified_hashes = {
+        dep.relative_to(root).as_posix(): hashlib.sha256(dep.read_bytes()).hexdigest(),
+        main.relative_to(root).as_posix(): hashlib.sha256(main.read_bytes()).hexdigest(),
+    }
+
+    isolated_bootstrap._preload_verified_bundled_libraries(
+        main,
+        root,
+        verified_hashes,
+    )
+    sealed_main = isolated_bootstrap._sealed_verified_dependency_path(
+        main,
+        root,
+        verified_hashes,
+    )
+    assert sealed_main is not None
+
+    dep.write_bytes(b"hostile dependency replacement")
+    main.write_bytes(b"hostile extension replacement")
+
+    loaded = ctypes.CDLL(sealed_main)
+    loaded.stock_v2_fixture_main.restype = ctypes.c_int
+    assert loaded.stock_v2_fixture_main() == 42
+
+
+def test_ibapi_verifier_uses_retained_repository_bytes(tmp_path: Path):
+    from scripts import run_isolated_venv_python as isolated_bootstrap
+
+    root = tmp_path / "snapshot"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+
+    (scripts / "verify_live_ibapi_runtime.py").write_text(
+        "raise SystemExit('hostile worktree verifier executed')\n",
+        encoding="utf-8",
+    )
+    (scripts / "live_ibapi_manifest.json").write_text(
+        '{"trusted": false}\n',
+        encoding="utf-8",
+    )
+
+    verifier_source = (
+        b"import argparse, json\n"
+        b"from pathlib import Path\n"
+        b"p = argparse.ArgumentParser()\n"
+        b"p.add_argument('--site-packages', required=True)\n"
+        b"p.add_argument('--manifest', required=True)\n"
+        b"a = p.parse_args()\n"
+        b"assert json.loads(Path(a.manifest).read_text(encoding='utf-8')) == {'trusted': True}\n"
+    )
+    verified_repository_sources = {
+        "scripts/verify_live_ibapi_runtime.py": verifier_source,
+        "scripts/live_ibapi_manifest.json": b'{"trusted": true}\n',
+    }
+
+    isolated_bootstrap._verify_pinned_ibapi(
+        root,
+        site_packages,
+        verified_repository_sources,
+    )

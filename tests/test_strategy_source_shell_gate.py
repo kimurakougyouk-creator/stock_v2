@@ -871,3 +871,41 @@ def test_shell_gate_blocks_root_pycache_bytecode(tmp_path: Path):
     result = _run_gate(root)
 
     assert result.returncode != 0
+
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "scripts/verify_live_ibapi_runtime.py",
+        "scripts/live_ibapi_manifest.json",
+    ),
+)
+def test_shell_gate_blocks_ibapi_trust_anchor_edit(tmp_path: Path, relative_path: str):
+    root = _repo(tmp_path)
+    target = root / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("trusted\n", encoding="utf-8")
+    _git(root, "add", relative_path)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "ibapi trust anchor fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    target.write_text("tampered\n", encoding="utf-8")
+    result = _run_gate(root)
+
+    assert result.returncode != 0
+    assert "tracked or untracked strategy source changes" in result.stderr
