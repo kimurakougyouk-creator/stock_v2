@@ -6,6 +6,9 @@ import base64
 import csv
 import hashlib
 import io
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -128,8 +131,10 @@ def _venv_site_packages(root: Path) -> Path:
     return candidate
 
 
-def _verify_site_packages_records(site_packages: Path) -> str:
-    """Verify wheel RECORD hashes and bind the exact dependency byte set."""
+def _verify_site_packages_records(
+    site_packages: Path,
+) -> tuple[str, dict[str, bytes]]:
+    """Verify wheel RECORD hashes and retain exact verified Python source bytes."""
     if site_packages.is_symlink():
         _fail("site-packages must not be a symlink")
 
@@ -152,6 +157,7 @@ def _verify_site_packages_records(site_packages: Path) -> str:
 
     root = site_packages.resolve()
     verified: dict[str, str] = {}
+    verified_python_sources: dict[str, bytes] = {}
     record_digests: dict[str, str] = {}
 
     for record in records:
@@ -194,13 +200,16 @@ def _verify_site_packages_records(site_packages: Path) -> str:
                 ).hex()
             except (ValueError, TypeError):
                 _fail(f"dependency RECORD hash encoding is invalid: {rel}")
-            observed = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            payload = resolved.read_bytes()
+            observed = hashlib.sha256(payload).hexdigest()
             if observed != expected:
                 _fail(f"dependency SHA-256 mismatch: {rel}")
             previous = verified.get(rel)
             if previous is not None and previous != observed:
                 _fail(f"dependency file has conflicting RECORD ownership: {rel}")
             verified[rel] = observed
+            if rel.endswith(".py"):
+                verified_python_sources[rel] = payload
 
     for current, dirnames, filenames in os.walk(site_packages, followlinks=False):
         current_path = Path(current)
@@ -245,13 +254,13 @@ def _verify_site_packages_records(site_packages: Path) -> str:
     if not _SHA256_RE.fullmatch(dependency_sha):
         _fail("runtime dependency digest is unavailable")
     os.environ[_RUNTIME_DEPENDENCY_SHA_ENV] = dependency_sha
-    return dependency_sha
+    return dependency_sha, verified_python_sources
 
 
 def _snapshot_verified_site_packages(
     site_packages: Path,
-) -> tuple[tempfile.TemporaryDirectory[str], Path, str]:
-    """Copy dependencies, then verify and import only the frozen copy."""
+) -> tuple[tempfile.TemporaryDirectory[str], Path, str, dict[str, bytes]]:
+    """Copy dependencies and retain verified Python bytes for later imports."""
     holder = tempfile.TemporaryDirectory(prefix="stock_v2_dependencies_")
     snapshot = (Path(holder.name) / "site-packages").resolve()
     try:
@@ -266,7 +275,7 @@ def _snapshot_verified_site_packages(
         _fail("could not snapshot checkout virtualenv dependencies")
 
     try:
-        dependency_sha = _verify_site_packages_records(snapshot)
+        dependency_sha, verified_python_sources = _verify_site_packages_records(snapshot)
     except SystemExit:
         holder.cleanup()
         raise
@@ -293,7 +302,114 @@ def _snapshot_verified_site_packages(
         _fail("could not make dependency snapshot read-only")
 
     os.environ[_RUNTIME_DEPENDENCY_SHA_ENV] = dependency_sha
-    return holder, snapshot, dependency_sha
+    return holder, snapshot, dependency_sha, verified_python_sources
+
+
+class _VerifiedDependencySourceLoader(importlib.abc.SourceLoader):
+    """Load Python code from the exact bytes captured during RECORD verification."""
+
+    def __init__(self, fullname: str, filename: Path, source: bytes):
+        self._fullname = fullname
+        self._filename = filename
+        self._source = source
+
+    def get_filename(self, fullname: str) -> str:
+        if fullname != self._fullname:
+            raise ImportError(fullname)
+        return str(self._filename)
+
+    def get_data(self, path: str) -> bytes:
+        if Path(path).resolve() != self._filename.resolve():
+            raise OSError(path)
+        return self._source
+
+    def set_data(self, path: str, data: bytes, *_args, **_kwargs) -> None:
+        return None
+
+
+class _VerifiedDependencyPathFinder(importlib.abc.PathEntryFinder):
+    """Resolve dependency Python modules from verified in-memory source bytes."""
+
+    def __init__(
+        self,
+        path_entry: str,
+        snapshot_root: Path,
+        verified_python_sources: dict[str, bytes],
+    ):
+        self._entry = Path(path_entry).resolve()
+        self._root = snapshot_root.resolve()
+        self._sources = verified_python_sources
+        self._fallback = importlib.machinery.FileFinder(
+            str(self._entry),
+            (
+                importlib.machinery.ExtensionFileLoader,
+                importlib.machinery.EXTENSION_SUFFIXES,
+            ),
+        )
+
+    def _verified_loader(
+        self, fullname: str, candidate: Path
+    ) -> _VerifiedDependencySourceLoader | None:
+        try:
+            rel = candidate.resolve().relative_to(self._root).as_posix()
+        except ValueError:
+            return None
+        source = self._sources.get(rel)
+        if source is None:
+            return None
+        return _VerifiedDependencySourceLoader(fullname, candidate.resolve(), source)
+
+    def find_spec(self, fullname: str, target=None):
+        leaf = fullname.rsplit(".", 1)[-1]
+        package_init = self._entry / leaf / "__init__.py"
+        loader = self._verified_loader(fullname, package_init)
+        if loader is not None:
+            return importlib.util.spec_from_loader(
+                fullname,
+                loader,
+                origin=str(package_init),
+                is_package=True,
+            )
+
+        module_file = self._entry / f"{leaf}.py"
+        loader = self._verified_loader(fullname, module_file)
+        if loader is not None:
+            return importlib.util.spec_from_loader(
+                fullname,
+                loader,
+                origin=str(module_file),
+                is_package=False,
+            )
+
+        return self._fallback.find_spec(fullname, target)
+
+
+def _install_verified_dependency_importer(
+    snapshot_root: Path,
+    verified_python_sources: dict[str, bytes],
+) -> None:
+    """Bind site-packages Python imports to bytes captured during verification."""
+    root = snapshot_root.resolve()
+
+    def path_hook(path_entry: str):
+        entry = Path(path_entry).resolve()
+        try:
+            entry.relative_to(root)
+        except ValueError as exc:
+            raise ImportError(path_entry) from exc
+        return _VerifiedDependencyPathFinder(
+            str(entry),
+            root,
+            verified_python_sources,
+        )
+
+    sys.path_hooks.insert(0, path_hook)
+    for cached in tuple(sys.path_importer_cache):
+        try:
+            Path(cached).resolve().relative_to(root)
+        except (ValueError, OSError):
+            continue
+        sys.path_importer_cache.pop(cached, None)
 
 
 def _verify_pinned_ibapi(root: Path, site_packages: Path) -> None:
@@ -378,7 +494,11 @@ def _snapshot_repository(
     return holder, snapshot
 
 
-def _prepare_sys_path(snapshot_root: Path, site_packages: Path) -> None:
+def _prepare_sys_path(
+    snapshot_root: Path,
+    site_packages: Path,
+    verified_python_sources: dict[str, bytes],
+) -> None:
     stdlib = [
         entry
         for entry in sys.path
@@ -386,6 +506,7 @@ def _prepare_sys_path(snapshot_root: Path, site_packages: Path) -> None:
         and Path(entry).resolve()
         not in {Path.cwd().resolve(), snapshot_root.resolve()}
     ]
+    _install_verified_dependency_importer(site_packages, verified_python_sources)
     sys.path[:] = [
         str(snapshot_root),
         str(snapshot_root / "src"),
@@ -417,9 +538,12 @@ def main() -> int:
     # repository or venv code, so fail on a stale venv before source work.
     site_packages = _venv_site_packages(root)
     source_sha = _attest_clean_source_before_repository_imports(root)
-    dependency_holder, dependency_snapshot, _dependency_sha = (
-        _snapshot_verified_site_packages(site_packages)
-    )
+    (
+        dependency_holder,
+        dependency_snapshot,
+        _dependency_sha,
+        verified_python_sources,
+    ) = _snapshot_verified_site_packages(site_packages)
 
     # Force importlib to ignore mutable site-packages/__pycache__ contents.
     # The temporary cache root starts empty and no trusted import may fall back
@@ -442,7 +566,11 @@ def main() -> int:
 
     snapshot_holder, snapshot_root = _snapshot_repository(root, source_sha)
     try:
-        _prepare_sys_path(snapshot_root, dependency_snapshot)
+        _prepare_sys_path(
+            snapshot_root,
+            dependency_snapshot,
+            verified_python_sources,
+        )
         if args[0] == "-m":
             if len(args) < 2:
                 _fail("-m requires a module name")
