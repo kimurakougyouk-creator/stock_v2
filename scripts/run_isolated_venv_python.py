@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import fcntl
 import hashlib
 import io
 import importlib.abc
@@ -29,6 +30,7 @@ _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BOOTSTRAP_SOURCE_SHA_ENV = "AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA"
 _RUNTIME_DEPENDENCY_SHA_ENV = "AI_ASSET_RUNTIME_DEPENDENCY_SHA"
+_SEALED_NATIVE_FDS: list[int] = []
 
 
 def _repository_root() -> Path:
@@ -133,8 +135,8 @@ def _venv_site_packages(root: Path) -> Path:
 
 def _verify_site_packages_records(
     site_packages: Path,
-) -> tuple[str, dict[str, bytes]]:
-    """Verify wheel RECORD hashes and retain exact verified Python source bytes."""
+) -> tuple[str, dict[str, bytes], dict[str, str]]:
+    """Verify wheel RECORD hashes and retain exact verified import identities."""
     if site_packages.is_symlink():
         _fail("site-packages must not be a symlink")
 
@@ -254,13 +256,19 @@ def _verify_site_packages_records(
     if not _SHA256_RE.fullmatch(dependency_sha):
         _fail("runtime dependency digest is unavailable")
     os.environ[_RUNTIME_DEPENDENCY_SHA_ENV] = dependency_sha
-    return dependency_sha, verified_python_sources
+    return dependency_sha, verified_python_sources, dict(verified)
 
 
 def _snapshot_verified_site_packages(
     site_packages: Path,
-) -> tuple[tempfile.TemporaryDirectory[str], Path, str, dict[str, bytes]]:
-    """Copy dependencies and retain verified Python bytes for later imports."""
+) -> tuple[
+    tempfile.TemporaryDirectory[str],
+    Path,
+    str,
+    dict[str, bytes],
+    dict[str, str],
+]:
+    """Copy dependencies and retain verified import identities for later imports."""
     holder = tempfile.TemporaryDirectory(prefix="stock_v2_dependencies_")
     snapshot = (Path(holder.name) / "site-packages").resolve()
     try:
@@ -275,7 +283,9 @@ def _snapshot_verified_site_packages(
         _fail("could not snapshot checkout virtualenv dependencies")
 
     try:
-        dependency_sha, verified_python_sources = _verify_site_packages_records(snapshot)
+        dependency_sha, verified_python_sources, verified_hashes = (
+            _verify_site_packages_records(snapshot)
+        )
     except SystemExit:
         holder.cleanup()
         raise
@@ -302,7 +312,13 @@ def _snapshot_verified_site_packages(
         _fail("could not make dependency snapshot read-only")
 
     os.environ[_RUNTIME_DEPENDENCY_SHA_ENV] = dependency_sha
-    return holder, snapshot, dependency_sha, verified_python_sources
+    return (
+        holder,
+        snapshot,
+        dependency_sha,
+        verified_python_sources,
+        verified_hashes,
+    )
 
 
 class _VerifiedDependencySourceLoader(importlib.abc.SourceLoader):
@@ -335,17 +351,12 @@ class _VerifiedDependencyPathFinder(importlib.abc.PathEntryFinder):
         path_entry: str,
         snapshot_root: Path,
         verified_python_sources: dict[str, bytes],
+        verified_hashes: dict[str, str],
     ):
         self._entry = Path(path_entry).resolve()
         self._root = snapshot_root.resolve()
         self._sources = verified_python_sources
-        self._fallback = importlib.machinery.FileFinder(
-            str(self._entry),
-            (
-                importlib.machinery.ExtensionFileLoader,
-                importlib.machinery.EXTENSION_SUFFIXES,
-            ),
-        )
+        self._hashes = verified_hashes
 
     def _verified_loader(
         self, fullname: str, candidate: Path
@@ -385,14 +396,136 @@ class _VerifiedDependencyPathFinder(importlib.abc.PathEntryFinder):
                 is_package=False,
             )
 
-        return self._fallback.find_spec(fullname, target)
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+            package_native = self._entry / leaf / f"__init__{suffix}"
+            spec = _sealed_verified_native_spec(
+                fullname,
+                package_native,
+                self._root,
+                self._hashes,
+                is_package=True,
+                package_dir=package_native.parent,
+            )
+            if spec is not None:
+                return spec
+
+            module_native = self._entry / f"{leaf}{suffix}"
+            spec = _sealed_verified_native_spec(
+                fullname,
+                module_native,
+                self._root,
+                self._hashes,
+                is_package=False,
+            )
+            if spec is not None:
+                return spec
+
+        return None
+
+
+def _read_exact_verified_file(
+    path: Path,
+    root: Path,
+    verified_hashes: dict[str, str],
+) -> bytes | None:
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    expected = verified_hashes.get(rel)
+    if expected is None:
+        return None
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        _fail(f"verified dependency disappeared before import: {rel}")
+    except OSError:
+        _fail(f"verified dependency could not be opened safely: {rel}")
+    try:
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            payload = handle.read()
+    except OSError:
+        _fail(f"verified dependency could not be read safely: {rel}")
+
+    observed = hashlib.sha256(payload).hexdigest()
+    if observed != expected:
+        _fail(f"verified dependency changed before import: {rel}")
+    return payload
+
+
+def _seal_verified_native_payload(payload: bytes, label: str) -> str:
+    if not hasattr(os, "memfd_create"):
+        _fail("sealed native dependency loading requires Linux memfd support")
+    required = ("F_ADD_SEALS", "F_GET_SEALS", "F_SEAL_WRITE", "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_SEAL")
+    if any(not hasattr(fcntl, name) for name in required):
+        _fail("sealed native dependency loading requires Linux file seals")
+
+    flags = getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0)
+    try:
+        fd = os.memfd_create(label, flags)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise OSError("short memfd write")
+            offset += written
+        os.lseek(fd, 0, os.SEEK_SET)
+        seals = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+        if (fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals) != seals:
+            raise OSError("native memfd seals were not applied")
+        os.set_inheritable(fd, False)
+    except OSError:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        _fail("could not create sealed native dependency payload")
+
+    _SEALED_NATIVE_FDS.append(fd)
+    return f"/proc/self/fd/{fd}"
+
+
+def _sealed_verified_native_spec(
+    fullname: str,
+    candidate: Path,
+    root: Path,
+    verified_hashes: dict[str, str],
+    *,
+    is_package: bool,
+    package_dir: Path | None = None,
+):
+    payload = _read_exact_verified_file(candidate, root, verified_hashes)
+    if payload is None:
+        return None
+    sealed_path = _seal_verified_native_payload(payload, candidate.name)
+    loader = importlib.machinery.ExtensionFileLoader(fullname, sealed_path)
+    spec = importlib.util.spec_from_loader(
+        fullname,
+        loader,
+        origin=sealed_path,
+        is_package=is_package,
+    )
+    if spec is None:
+        _fail(f"could not create sealed native import spec: {fullname}")
+    if is_package:
+        spec.submodule_search_locations = [str((package_dir or candidate.parent).resolve())]
+    return spec
 
 
 def _install_verified_dependency_importer(
     snapshot_root: Path,
     verified_python_sources: dict[str, bytes],
+    verified_hashes: dict[str, str],
 ) -> None:
-    """Bind site-packages Python imports to bytes captured during verification."""
+    """Bind dependency imports to exact bytes validated during verification."""
     root = snapshot_root.resolve()
 
     def path_hook(path_entry: str):
@@ -405,6 +538,7 @@ def _install_verified_dependency_importer(
             str(entry),
             root,
             verified_python_sources,
+            verified_hashes,
         )
 
     sys.path_hooks.insert(0, path_hook)
@@ -442,8 +576,8 @@ def _verify_pinned_ibapi(root: Path, site_packages: Path) -> None:
 
 def _snapshot_repository(
     root: Path, source_sha: str
-) -> tuple[tempfile.TemporaryDirectory[str], Path]:
-    """Extract exact committed bytes so imports cannot race worktree mutations."""
+) -> tuple[tempfile.TemporaryDirectory[str], Path, dict[str, bytes]]:
+    """Extract committed bytes and retain exact Python bytes for execution."""
     try:
         completed = subprocess.run(
             [
@@ -466,6 +600,7 @@ def _snapshot_repository(
 
     holder = tempfile.TemporaryDirectory(prefix="stock_v2_attested_")
     snapshot = Path(holder.name).resolve()
+    verified_repository_sources: dict[str, bytes] = {}
     try:
         with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as archive:
             for member in archive.getmembers():
@@ -479,6 +614,11 @@ def _snapshot_repository(
                         "Git archive contains an unsupported link/device: "
                         f"{member.name}"
                     )
+                if member.isfile() and member.name.endswith(".py"):
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        _fail(f"could not read archived Python source: {member.name}")
+                    verified_repository_sources[member.name] = stream.read()
             archive.extractall(snapshot, filter="data")
     except (tarfile.TarError, OSError):
         holder.cleanup()
@@ -495,13 +635,44 @@ def _snapshot_repository(
             _fail("could not make source snapshot read-only")
     snapshot.chmod(0o555)
     os.environ["AI_ASSET_CODE_SNAPSHOT_ROOT"] = str(snapshot)
-    return holder, snapshot
+    return holder, snapshot, verified_repository_sources
+
+
+def _install_verified_repository_importer(
+    snapshot_root: Path,
+    verified_repository_sources: dict[str, bytes],
+) -> None:
+    """Bind repository Python imports to bytes read from the exact Git archive."""
+    root = snapshot_root.resolve()
+
+    def path_hook(path_entry: str):
+        entry = Path(path_entry).resolve()
+        try:
+            entry.relative_to(root)
+        except ValueError as exc:
+            raise ImportError(path_entry) from exc
+        return _VerifiedDependencyPathFinder(
+            str(entry),
+            root,
+            verified_repository_sources,
+            {},
+        )
+
+    sys.path_hooks.insert(0, path_hook)
+    for cached in tuple(sys.path_importer_cache):
+        try:
+            Path(cached).resolve().relative_to(root)
+        except (ValueError, OSError):
+            continue
+        sys.path_importer_cache.pop(cached, None)
 
 
 def _prepare_sys_path(
     snapshot_root: Path,
     site_packages: Path,
     verified_python_sources: dict[str, bytes],
+    verified_hashes: dict[str, str],
+    verified_repository_sources: dict[str, bytes],
 ) -> None:
     stdlib = [
         entry
@@ -510,7 +681,15 @@ def _prepare_sys_path(
         and Path(entry).resolve()
         not in {Path.cwd().resolve(), snapshot_root.resolve()}
     ]
-    _install_verified_dependency_importer(site_packages, verified_python_sources)
+    _install_verified_dependency_importer(
+        site_packages,
+        verified_python_sources,
+        verified_hashes,
+    )
+    _install_verified_repository_importer(
+        snapshot_root,
+        verified_repository_sources,
+    )
     sys.path[:] = [
         str(snapshot_root),
         str(snapshot_root / "src"),
@@ -519,16 +698,30 @@ def _prepare_sys_path(
     ]
 
 
-def _run_script(snapshot_root: Path, raw_path: str, args: list[str]) -> None:
+def _run_script(
+    snapshot_root: Path,
+    verified_repository_sources: dict[str, bytes],
+    raw_path: str,
+    args: list[str],
+) -> None:
     target = (snapshot_root / raw_path).resolve()
     try:
-        target.relative_to(snapshot_root)
+        rel = target.relative_to(snapshot_root).as_posix()
     except ValueError:
         _fail("requested script escapes the attested snapshot")
-    if not target.is_file():
-        _fail(f"requested script is missing from attested snapshot: {raw_path}")
+    source = verified_repository_sources.get(rel)
+    if source is None:
+        _fail(f"requested script is not verified archive Python: {raw_path}")
     sys.argv = [str(target), *args]
-    runpy.run_path(str(target), run_name="__main__")
+    namespace = {
+        "__name__": "__main__",
+        "__file__": str(target),
+        "__package__": None,
+        "__spec__": None,
+        "__cached__": None,
+        "__builtins__": __builtins__,
+    }
+    exec(compile(source, str(target), "exec"), namespace, namespace)
 
 
 def main() -> int:
@@ -547,6 +740,7 @@ def main() -> int:
         dependency_snapshot,
         _dependency_sha,
         verified_python_sources,
+        verified_hashes,
     ) = _snapshot_verified_site_packages(site_packages)
 
     # Force importlib to ignore mutable site-packages/__pycache__ contents.
@@ -568,12 +762,18 @@ def main() -> int:
     if broker_runtime:
         _verify_pinned_ibapi(root, dependency_snapshot)
 
-    snapshot_holder, snapshot_root = _snapshot_repository(root, source_sha)
+    (
+        snapshot_holder,
+        snapshot_root,
+        verified_repository_sources,
+    ) = _snapshot_repository(root, source_sha)
     try:
         _prepare_sys_path(
             snapshot_root,
             dependency_snapshot,
             verified_python_sources,
+            verified_hashes,
+            verified_repository_sources,
         )
         if args[0] == "-m":
             if len(args) < 2:
@@ -592,7 +792,12 @@ def main() -> int:
             return 0
         if args[0] in {"-c", "-"}:
             _fail("inline/stdin Python execution is not allowed by this bootstrap")
-        _run_script(snapshot_root, args[0], args[1:])
+        _run_script(
+            snapshot_root,
+            verified_repository_sources,
+            args[0],
+            args[1:],
+        )
         return 0
     finally:
         snapshot_holder.cleanup()
