@@ -383,7 +383,7 @@ def test_verified_dependency_snapshot_isolated_from_original_mutation(tmp_path: 
         encoding="utf-8",
     )
 
-    holder, snapshot, dependency_sha, verified_sources = (
+    holder, snapshot, dependency_sha, verified_sources, verified_hashes = (
         isolated_bootstrap._snapshot_verified_site_packages(site_packages)
     )
     frozen_path = snapshot / f"{module_name}.py"
@@ -416,3 +416,106 @@ def test_verified_dependency_snapshot_isolated_from_original_mutation(tmp_path: 
         sys.path_importer_cache.clear()
         sys.path_importer_cache.update(original_importer_cache)
         holder.cleanup()
+
+
+
+def test_repository_importer_uses_verified_archive_bytes_after_same_uid_rewrite(
+    tmp_path: Path,
+):
+    from scripts import run_isolated_venv_python as isolated_bootstrap
+
+    snapshot = tmp_path / "repo"
+    snapshot.mkdir()
+    module_name = "verified_repository_fixture"
+    module_path = snapshot / f"{module_name}.py"
+    module_path.write_text('VALUE = "hostile"\n', encoding="utf-8")
+    verified_sources = {f"{module_name}.py": b'VALUE = "trusted"\n'}
+
+    original_sys_path = list(sys.path)
+    original_path_hooks = list(sys.path_hooks)
+    original_importer_cache = dict(sys.path_importer_cache)
+    try:
+        isolated_bootstrap._install_verified_repository_importer(
+            snapshot,
+            verified_sources,
+        )
+        sys.modules.pop(module_name, None)
+        sys.path[:] = [str(snapshot), *original_sys_path]
+        sys.path_importer_cache.pop(str(snapshot), None)
+        imported = importlib.import_module(module_name)
+        assert imported.VALUE == "trusted"
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.path[:] = original_sys_path
+        sys.path_hooks[:] = original_path_hooks
+        sys.path_importer_cache.clear()
+        sys.path_importer_cache.update(original_importer_cache)
+
+
+def test_repository_entrypoint_executes_verified_archive_bytes(tmp_path: Path):
+    from scripts import run_isolated_venv_python as isolated_bootstrap
+
+    snapshot = tmp_path / "repo"
+    snapshot.mkdir()
+    marker = tmp_path / "entrypoint.marker"
+    entry = snapshot / "entry.py"
+    entry.write_text(
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('hostile')\n",
+        encoding="utf-8",
+    )
+    trusted = (
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('trusted')\n"
+    ).encode("utf-8")
+
+    old_argv = list(sys.argv)
+    try:
+        isolated_bootstrap._run_script(
+            snapshot,
+            {"entry.py": trusted},
+            "entry.py",
+            [],
+        )
+    finally:
+        sys.argv[:] = old_argv
+
+    assert marker.read_text(encoding="utf-8") == "trusted"
+
+
+def test_native_payload_is_loaded_from_sealed_verified_bytes(tmp_path: Path):
+    from scripts import run_isolated_venv_python as isolated_bootstrap
+
+    spec = importlib.util.find_spec("_testcapi")
+    if spec is None or not spec.origin or not any(
+        spec.origin.endswith(suffix)
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES
+    ):
+        pytest.skip("dynamic _testcapi extension is unavailable")
+
+    trusted = Path(spec.origin).read_bytes()
+    candidate = tmp_path / Path(spec.origin).name
+    candidate.write_bytes(trusted)
+    root = tmp_path
+    rel = candidate.relative_to(root).as_posix()
+    verified_hashes = {rel: hashlib.sha256(trusted).hexdigest()}
+
+    sealed_spec = isolated_bootstrap._sealed_verified_native_spec(
+        "_testcapi",
+        candidate,
+        root,
+        verified_hashes,
+        is_package=False,
+    )
+    assert sealed_spec is not None
+    candidate.write_bytes(b"hostile replacement")
+
+    previous = sys.modules.pop("_testcapi", None)
+    try:
+        module = importlib.util.module_from_spec(sealed_spec)
+        sealed_spec.loader.exec_module(module)
+        assert module.__name__ == "_testcapi"
+        assert str(module.__file__).startswith("/proc/self/fd/")
+        assert candidate.read_bytes() == b"hostile replacement"
+    finally:
+        sys.modules.pop("_testcapi", None)
+        if previous is not None:
+            sys.modules["_testcapi"] = previous
