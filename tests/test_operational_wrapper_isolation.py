@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import importlib
 import os
 from pathlib import Path
 import shutil
@@ -357,3 +360,42 @@ def test_venv_site_packages_must_match_running_python_minor(tmp_path: Path):
 
     assert completed.returncode == 2
     assert "interpreter-matching" in completed.stderr
+
+
+def test_verified_dependency_snapshot_isolated_from_original_mutation(tmp_path: Path):
+    from scripts import run_isolated_venv_python as isolated_bootstrap
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    module_name = "frozen_dependency_fixture"
+    trusted_bytes = b'VALUE = "trusted"\n'
+    module_path = site_packages / f"{module_name}.py"
+    module_path.write_bytes(trusted_bytes)
+
+    encoded = base64.urlsafe_b64encode(
+        hashlib.sha256(trusted_bytes).digest()
+    ).decode("ascii").rstrip("=")
+    dist_info = site_packages / "fixture-1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "RECORD").write_text(
+        f"{module_name}.py,sha256={encoded},{len(trusted_bytes)}\n"
+        "fixture-1.0.dist-info/RECORD,,\n",
+        encoding="utf-8",
+    )
+
+    holder, snapshot, dependency_sha = (
+        isolated_bootstrap._snapshot_verified_site_packages(site_packages)
+    )
+    original_sys_path = list(sys.path)
+    try:
+        module_path.write_text('VALUE = "mutated"\n', encoding="utf-8")
+        sys.modules.pop(module_name, None)
+        sys.path[:] = [str(snapshot), *original_sys_path]
+        imported = importlib.import_module(module_name)
+        assert imported.VALUE == "trusted"
+        assert len(dependency_sha) == 64
+        assert (snapshot / f"{module_name}.py").read_bytes() == trusted_bytes
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.path[:] = original_sys_path
+        holder.cleanup()
