@@ -48,7 +48,11 @@ def run_ibkr_paper_smoke_test(*, timeout: float = 5.0) -> IbkrPaperSmokeTestResu
         )
 
     guard = validate_ibkr_paper_test_order(
-        "AAPL", 1, preflight=preflight, use_gateway=True
+        "AAPL",
+        1,
+        verified_test_quantity=1,
+        preflight=preflight,
+        use_gateway=True,
     )
     if not guard.allowed:
         return IbkrPaperSmokeTestResult(
