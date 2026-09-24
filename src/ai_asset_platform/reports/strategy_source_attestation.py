@@ -24,6 +24,7 @@ STRATEGY_AUDITED_PATHS: tuple[str, ...] = (
     ":(top,glob)*.so",
     ":(top,glob)*.pyd",
     ":(top,glob)*.dylib",
+    ":(top,glob)__pycache__/**",
     ":(top,glob)*/__init__.py",
     ":(top,glob)*/__init__.pyc",
     ":(top,glob)*/__init__.pyo",
