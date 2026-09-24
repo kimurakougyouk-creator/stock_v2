@@ -886,6 +886,18 @@ def _run_script(
     exec(compile(source, str(target), "exec"), namespace, namespace)
 
 
+def _requires_pinned_ibapi(args: list[str]) -> bool:
+    broker_runtime = (
+        len(args) >= 2
+        and args[0] == "-m"
+        and args[1] == "ai_asset_platform.execution.ibkr_verified_paper_runtime"
+    )
+    raw = os.environ.get("AI_ASSET_REQUIRE_PINNED_IBAPI", "0")
+    if raw not in {"0", "1"}:
+        _fail("AI_ASSET_REQUIRE_PINNED_IBAPI must be exactly 0 or 1")
+    return broker_runtime or raw == "1"
+
+
 def main() -> int:
     if not sys.flags.isolated or not sys.flags.no_site:
         _fail("bootstrap must be launched with -I -S")
@@ -916,15 +928,7 @@ def main() -> int:
     if not args:
         _fail("no Python target supplied")
 
-    broker_runtime = (
-        len(args) >= 2
-        and args[0] == "-m"
-        and args[1] == "ai_asset_platform.execution.ibkr_verified_paper_runtime"
-    )
-    raw_require_pinned_ibapi = os.environ.get("AI_ASSET_REQUIRE_PINNED_IBAPI", "0")
-    if raw_require_pinned_ibapi not in {"0", "1"}:
-        _fail("AI_ASSET_REQUIRE_PINNED_IBAPI must be exactly 0 or 1")
-    require_pinned_ibapi = broker_runtime or raw_require_pinned_ibapi == "1"
+    require_pinned_ibapi = _requires_pinned_ibapi(args)
 
     (
         snapshot_holder,

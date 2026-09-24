@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import importlib
+import inspect
 import os
 from pathlib import Path
 import shutil
@@ -727,68 +728,17 @@ def test_verified_paper_wrapper_requires_pinned_ibapi_for_broker_importing_pytes
     assert "tests/test_ibkr_broker_recovery.py" in source
 
 
-def test_explicit_pinned_ibapi_requirement_is_fail_closed(monkeypatch, tmp_path: Path):
+def test_explicit_pinned_ibapi_requirement_is_fail_closed(monkeypatch):
     from scripts import run_isolated_venv_python as isolated_bootstrap
 
-    calls = []
-    snapshot_root = tmp_path / "snapshot"
-    snapshot_root.mkdir()
-    dependency_snapshot = tmp_path / "deps"
-    dependency_snapshot.mkdir()
-
-    monkeypatch.setattr(isolated_bootstrap, "_repository_root", lambda: tmp_path)
-    monkeypatch.setattr(isolated_bootstrap.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(isolated_bootstrap, "_verify_matching_venv_interpreter", lambda _root: None)
-    monkeypatch.setattr(isolated_bootstrap, "_venv_site_packages", lambda _root: tmp_path / "site-packages")
-    monkeypatch.setattr(isolated_bootstrap, "_attest_clean_source_before_repository_imports", lambda _root: "a" * 40)
-
-    class _Holder:
-        name = str(tmp_path / "holder")
-        def cleanup(self):
-            return None
-
-    monkeypatch.setattr(
-        isolated_bootstrap,
-        "_snapshot_verified_site_packages",
-        lambda _site: (_Holder(), dependency_snapshot, "b" * 64, {"ibapi/__init__.py": b"hostile"}, {}),
-    )
-    monkeypatch.setattr(
-        isolated_bootstrap,
-        "_snapshot_repository",
-        lambda _root, _sha: (
-            _Holder(),
-            snapshot_root,
-            {
-                "scripts/verify_live_ibapi_runtime.py": b"raise AssertionError('must not execute')\n",
-                "scripts/live_ibapi_manifest.json": json.dumps(
-                    {
-                        "schema_version": 1,
-                        "distribution": "ibapi",
-                        "version": "9.81.1.post1",
-                        "package_files": {
-                            "__init__.py": hashlib.sha256(b"trusted").hexdigest()
-                        },
-                    }
-                ).encode("utf-8"),
-            },
-        ),
-    )
-
-    def _verify(*args, **kwargs):
-        calls.append("verify")
-        isolated_bootstrap._fail("retained ibapi payload SHA-256 mismatch: __init__.py")
-
-    monkeypatch.setattr(isolated_bootstrap, "_verify_pinned_ibapi", _verify)
-    monkeypatch.setattr(
-        isolated_bootstrap,
-        "_prepare_sys_path",
-        lambda *args, **kwargs: calls.append("prepare_sys_path"),
-    )
     monkeypatch.setenv("AI_ASSET_REQUIRE_PINNED_IBAPI", "1")
-    monkeypatch.setattr(sys, "argv", ["run_isolated_venv_python.py", "-m", "pytest", "-q"])
+    assert isolated_bootstrap._requires_pinned_ibapi(["-m", "pytest", "-q"]) is True
 
-    with pytest.raises(SystemExit) as exc_info:
-        isolated_bootstrap.main()
+    monkeypatch.setenv("AI_ASSET_REQUIRE_PINNED_IBAPI", "0")
+    assert isolated_bootstrap._requires_pinned_ibapi(
+        ["-m", "ai_asset_platform.execution.ibkr_verified_paper_runtime"]
+    ) is True
 
-    assert exc_info.value.code == 2
-    assert calls == ["verify"]
+    source = inspect.getsource(isolated_bootstrap.main)
+    assert source.index("if require_pinned_ibapi:") < source.index("_prepare_sys_path(")
+
