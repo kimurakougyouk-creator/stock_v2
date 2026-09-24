@@ -364,12 +364,16 @@ class _VerifiedDependencyPathFinder(importlib.abc.PathEntryFinder):
         package_init = self._entry / leaf / "__init__.py"
         loader = self._verified_loader(fullname, package_init)
         if loader is not None:
-            return importlib.util.spec_from_loader(
+            spec = importlib.util.spec_from_loader(
                 fullname,
                 loader,
                 origin=str(package_init),
                 is_package=True,
             )
+            if spec is None:
+                return None
+            spec.submodule_search_locations = [str(package_init.parent.resolve())]
+            return spec
 
         module_file = self._entry / f"{leaf}.py"
         loader = self._verified_loader(fullname, module_file)
