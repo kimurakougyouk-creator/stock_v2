@@ -30,3 +30,17 @@ def test_literal_credential_remains_detectable() -> None:
 def test_mixed_shell_text_is_not_treated_as_pure_runtime_reference() -> None:
     mixed_reference = "prefix-" + "${APP_PASSWORD}"
     assert not _is_ignored_assignment(_assignment("APP_PASSWORD", mixed_reference))
+
+
+def test_parameter_expansion_literal_operands_are_not_runtime_references() -> None:
+    for operator in (":-", ":=", ":+", ":?"):
+        literal_operand = "${APP_PASSWORD" + operator + "literal-secret-value}"
+        assert not _is_ignored_assignment(
+            _assignment("APP_PASSWORD", literal_operand)
+        )
+
+
+def test_empty_parameter_expansion_operands_remain_runtime_references() -> None:
+    for operator in (":-", ":=", ":+", ":?"):
+        runtime_only = "${APP_PASSWORD" + operator + "}"
+        assert _is_ignored_assignment(_assignment("APP_PASSWORD", runtime_only))
