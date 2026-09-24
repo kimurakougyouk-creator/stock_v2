@@ -157,3 +157,16 @@
 
 ### 前回からの変化点
 PR #316が安全監査・明示的merge許可を経てmainへ統合され、バージョン管理された戦略昇格ポリシーの実装基盤は入った。ただし既定policyは意図的にdisabled/unapprovedで、独立broker provenanceと明示的threshold承認・passing evidenceは未達。したがって通常Live戦略昇格は引き続きfail-closed。Live/Paper/broker操作の許可も一切増えていない。
+
+---
+
+## 2026-09-25 (JST)
+- 分析: 完成 — 変化なし。PR #319/#321はいずれもPaper no-transmit smokeとテスト隔離に関する限定修正で、指標計算ロジックへの変更なし。
+- シグナル: 完成 — 変化なし。PR #321は `tests/conftest.py` のみの変更で、productionのsignal判定ロジックは不変。
+- バックテスト: 完成 — 変化なし。今回の変更対象外。
+- 資産推移: 完成 — 変化なし。今回の変更対象外。
+- リスク管理: 完成(Paper運用範囲) — PR #319で既存AAPL 1株Paper smokeのguard呼び出しに `verified_test_quantity=1` を明示し、no-transmit接続確認まで到達できるよう修正。PR #321で、broker実行をmockする3つのsignal-runnerテスト群だけにテスト用process-start SHAを注入し、caller worktree状態への不要な依存を除去。production source-attestation/runtimeは変更なし。
+- 実運用: 一部実装 — 現在の `main` は `7e044066f58c768b8836bbc840a6797a4906140a` (PR #321 merge commit)。merge後GitHub Actions pytest #2810はSUCCESS。Chromebook上で最新mainを取得後、`bash scripts/audit_paper_foundation.sh` が完走し、Secret Scan PASS、pytest 2266 passed、Paper smokeは `PREFLIGHT STATUS=READY_TO_CONNECT` / `GUARD STATUS=READY` / `CONNECTED=True` / `NEXT ORDER ID=8` / `ORDER SENT=False` を確認。IBKR Paper API handshakeは成功したが注文送信は0件。これはPaper基盤の接続確認であり、Issue #255に残る実行日Live read-only account/session/source/funding/permission gateを満たすものではない。Live実行は引き続きNO-GO、strategy promotion policyもdisabled/unapprovedのまま。
+
+### 前回からの変化点
+PR #319とPR #321が安全監査・明示的merge許可を経てmainへ統合され、Paper no-transmit smokeのguard誤停止と、ローカルworktree状態に依存していたmocked order-pathテストの不安定性を解消。Chromebook実機でPaper API handshake成功とORDER SENT=Falseまで確認できたため、Paper foundationの接続不確実性は解消した。一方、Live read-only最終ゲートは別途未実施であり、資金・権限・JASDEC/登録・Live endpoint/account/session等の外部前提もfresh evidenceで未確認。したがってLive/Paper注文・broker mutationの権限は増えておらず、Liveは引き続きNO-GO。
