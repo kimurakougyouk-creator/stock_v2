@@ -18,7 +18,7 @@ CREDENTIAL_ASSIGNMENT = re.compile(
     r'(?i)\b(?:password|passwd|api[_-]?key|token|app_password)\b\s*=\s*[\"\']([^\"\'\n]{8,})[\"\']'
 )
 SHELL_PARAMETER_REFERENCE = re.compile(
-    r'^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*(?::?[-+?=][^}]*)?\})$'
+    r'^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*(?::?[-+?=])?\})$'
 )
 
 
