@@ -400,6 +400,7 @@ def test_verified_dependency_snapshot_isolated_from_original_mutation(tmp_path: 
         isolated_bootstrap._install_verified_dependency_importer(
             snapshot,
             verified_sources,
+            verified_hashes,
         )
         sys.modules.pop(module_name, None)
         sys.path[:] = [str(snapshot), *original_sys_path]
