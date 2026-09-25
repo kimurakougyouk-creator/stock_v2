@@ -232,6 +232,8 @@ def test_direct_launch_blocks_hostile_bash_env_and_path_before_repo_checks(tmp_p
     hostile_git.chmod(0o755)
 
     env = dict(os.environ)
+    env.pop("LD_PRELOAD", None)
+    env.pop("LD_LIBRARY_PATH", None)
     env.update(
         {
             "HOME": str(home),
