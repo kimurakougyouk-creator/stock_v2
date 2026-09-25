@@ -106,7 +106,12 @@ def _get_json(
     url = f"{BASE_URL}{path}" + (f"?{query}" if query else "")
     request = urllib.request.Request(
         url,
-        headers={"Accept": "application/json", "User-Agent": "ai-asset-live-readonly"},
+        headers={
+            "Host": "api.ibkr.com",
+            "Accept": "application/json",
+            "Connection": "keep-alive",
+            "User-Agent": "ai-asset-live-readonly",
+        },
         method="GET",
     )
     try:
