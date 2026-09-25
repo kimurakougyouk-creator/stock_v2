@@ -1684,7 +1684,7 @@ def test_all_self_updating_wrappers_bind_exact_checkout_before_first_use():
 
 # The unattended autopilot moved off the legacy
 # activate -> unset -> exact-checkout-helper pattern in the 2026-09-25
-# Issue #285 hardening slice. It now has a dedicated isolated-runtime test
+# Issue #285 hardening slice. It now has a dedicated safe-path runtime test
 # above and is no longer part of this legacy-wrapper gate inventory.
 _INSTALLER_GATED_EXEMPT: set[str] = set()
 
@@ -1730,7 +1730,7 @@ def test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_f
         failures.extend(_check_exact_checkout_binding(path.name, lines))
 
     # Several wrappers, including the unattended autopilot, now use dedicated
-    # sanitized/isolated launch paths instead of this legacy
+    # sanitized/safe-path launch paths instead of this legacy
     # activate -> unset -> helper pattern. Keep this sanity floor aligned with
     # the remaining legacy-pattern wrappers; isolated paths have dedicated
     # regression coverage.
