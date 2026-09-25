@@ -2,7 +2,7 @@
 # Enter a minimal environment before Bash can evaluate BASH_ENV, inherited
 # functions, a hostile PATH, or Python startup-path variables. The systemd
 # service and direct/manual execution both pass through this trampoline.
-if [ "${IBKR_AUTOPILOT_SANITIZED:-0}" != "1" ]; then
+if [ -z "${BASH_VERSION:-}" ] || ! (set -o pipefail) 2>/dev/null; then
   if [ -z "${HOME:-}" ]; then
     echo "BLOCKED: HOME is unavailable. No order was sent." >&2
     exit 2
@@ -18,7 +18,6 @@ if [ "${IBKR_AUTOPILOT_SANITIZED:-0}" != "1" ]; then
     LOGNAME="${LOGNAME:-}" \
     LANG="${LANG:-C.UTF-8}" \
     PATH=/usr/local/bin:/usr/bin:/bin \
-    IBKR_AUTOPILOT_SANITIZED=1 \
     IBKR_REPO_DIR="${IBKR_REPO_DIR:-$HOME/stock_v2_latest}" \
     IBKR_AUTOPILOT_INTERVAL_SECONDS="${IBKR_AUTOPILOT_INTERVAL_SECONDS:-300}" \
     IBKR_AUTOPILOT_MAX_LOG_BYTES="${IBKR_AUTOPILOT_MAX_LOG_BYTES:-5242880}" \
