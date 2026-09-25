@@ -147,6 +147,7 @@ def test_direct_launch_blocks_hostile_bash_env_and_path_before_repo_checks(tmp_p
             "IBKR_REPO_DIR": str(repo),
             "BASH_ENV": str(bash_env),
             "ENV": str(bash_env),
+            "BASH_VERSION": "spoofed-parent-value",
             "PATH": str(hostile_bin),
             "PYTHONPATH": str(tmp_path / "hostile-python"),
             "PYTHONHOME": str(tmp_path / "hostile-python-home"),
