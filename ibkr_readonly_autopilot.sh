@@ -7,7 +7,11 @@ if [ "${IBKR_AUTOPILOT_SANITIZED:-0}" != "1" ]; then
     echo "BLOCKED: HOME is unavailable. No order was sent." >&2
     exit 2
   fi
-  SCRIPT_PATH="$(/usr/bin/readlink -f -- "$0")"
+  SCRIPT_PATH="$0"
+  # Clear dynamic-loader/shell/Python startup controls with shell builtins
+  # before executing any helper binary. The systemd unit also removes these
+  # variables before /bin/sh itself starts.
+  unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP LD_PRELOAD LD_LIBRARY_PATH
   exec /usr/bin/env -i \
     HOME="$HOME" \
     USER="${USER:-}" \
