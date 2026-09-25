@@ -70,19 +70,27 @@ def test_readonly_autopilot_enters_minimal_environment_before_bash():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
 
     assert script.startswith("#!/bin/sh\n")
+    unset_line = (
+        "unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP "
+        "LD_PRELOAD LD_LIBRARY_PATH"
+    )
+    assert unset_line in script
     assert "/usr/bin/env -i" in script
+    assert script.index(unset_line) < script.index("/usr/bin/env -i")
     assert "/bin/bash --noprofile --norc" in script
     assert "IBKR_AUTOPILOT_SANITIZED=1" in script
     assert "PATH=/usr/local/bin:/usr/bin:/bin" in script
 
-    # These Python/shell startup controls are deliberately absent from the
-    # whitelist created by env -i.
+    # env -i rebuilds the child environment from the explicit whitelist;
+    # none of these startup controls is re-added as a NAME=value entry.
     for inherited_name in (
         "PYTHONPATH=",
         "PYTHONHOME=",
         "PYTHONSTARTUP=",
         "BASH_ENV=",
         "ENV=",
+        "LD_PRELOAD=",
+        "LD_LIBRARY_PATH=",
     ):
         assert inherited_name not in script
 
@@ -232,6 +240,10 @@ def test_installer_runs_only_readonly_autopilot_service():
     assert 'chmod 600 "$pin_tmp"' in script
     assert "ExecStart=/bin/sh $REPO_DIR/ibkr_readonly_autopilot.sh" in script
     assert "ExecStart=/usr/bin/env bash" not in script
+    assert (
+        "UnsetEnvironment=BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME "
+        "PYTHONSTARTUP LD_PRELOAD LD_LIBRARY_PATH"
+    ) in script
     assert "systemctl --user enable ibkr-readonly-autopilot.service" in script
     assert "systemctl --user restart ibkr-readonly-autopilot.service" in script
     assert "systemctl --user enable --now ibkr-readonly-autopilot.service" not in script
