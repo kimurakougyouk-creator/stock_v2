@@ -154,6 +154,21 @@ def _settled_cash(summary: dict) -> dict[str, float]:
     return dict(sorted(result.items()))
 
 
+def _position_evidence(row: dict) -> dict:
+    """Keep only position fields that cannot expose the raw account id."""
+    return {
+        "conid": row.get("conid"),
+        "symbol": str(
+            row.get("ticker", row.get("contractDesc", row.get("symbol", ""))) or ""
+        ).strip().upper(),
+        "asset_class": str(row.get("assetClass", "") or "").strip().upper(),
+        "currency": str(row.get("currency", "") or "").strip().upper(),
+        "position": _finite(row.get("position")),
+        "avg_cost": _finite(row.get("avgCost")),
+        "market_value": _finite(row.get("mktValue", row.get("marketValue"))),
+    }
+
+
 def _order_evidence(row: dict) -> dict:
     order_id = row.get("orderId", row.get("order_id"))
     try:
@@ -287,6 +302,9 @@ def collect_client_portal_live_readonly_evidence(
         )
         if not isinstance(positions, list):
             raise ClientPortalReadOnlyError("Live positions snapshot is unavailable")
+        if not all(isinstance(row, dict) for row in positions):
+            raise ClientPortalReadOnlyError("Live position row is malformed")
+        sanitized_positions = [_position_evidence(row) for row in positions]
 
         net_liquidation = _finite(summary.get("netLiquidationValue"))
         available_funds = _finite(summary.get("availableFunds"))
@@ -312,7 +330,7 @@ def collect_client_portal_live_readonly_evidence(
             "gross_position_value": gross_position_value,
             "total_cash_value": total_cash_value,
             "settled_cash_by_currency": settled,
-            "positions": positions,
+            "positions": sanitized_positions,
             "raw_account_id_persisted": False,
             "connection_mode": CONNECTION_MODE,
             "broker_connection_used": True,
