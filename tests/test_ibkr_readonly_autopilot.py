@@ -78,7 +78,11 @@ def test_readonly_autopilot_enters_minimal_environment_before_bash():
     assert "/usr/bin/env -i" in script
     assert script.index(unset_line) < script.index("/usr/bin/env -i")
     assert "/bin/bash --noprofile --norc" in script
-    assert "IBKR_AUTOPILOT_SANITIZED=1" in script
+    assert (
+        'if [ -z "${BASH_VERSION:-}" ] || ! (set -o pipefail) 2>/dev/null; then'
+        in script
+    )
+    assert "IBKR_AUTOPILOT_SANITIZED" not in script
     assert "PATH=/usr/local/bin:/usr/bin:/bin" in script
 
     # env -i rebuilds the child environment from the explicit whitelist;
