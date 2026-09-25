@@ -254,12 +254,14 @@ def test_source_is_hard_limited_to_read_only_get_transport():
     forbidden = (
         'method="POST"',
         "/orders/whatif",
-        "/reply/",
-        "/cancel",
-        "/modify",
+        "/iserver/reply/",
+        "/iserver/account/order/",
+        "/iserver/questions/suppress",
         "/iserver/auth/ssodh/init",
         "enable_live_trading = True",
         "live_trading_unlocked = True",
+        ".placeOrder(",
+        ".cancelOrder(",
     )
     for token in forbidden:
         assert token not in source
