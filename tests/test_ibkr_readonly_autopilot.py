@@ -57,6 +57,10 @@ def test_readonly_autopilot_uses_lightweight_safe_path_and_pinned_ibapi():
     assert "scripts/verify_strategy_source_clean.sh" in script
     assert "scripts/verify_live_ibapi_runtime.py" in script
     assert "scripts/live_ibapi_manifest.json" in script
+    assert 'resolved_candidate="$(/usr/bin/readlink -f -- "$candidate"' in script
+    assert '"$VENV_SITE_PACKAGES" != "$resolved_candidate"' in script
+    assert "_BOOTSTRAP_BLOCKED_EXIT = 70" in script
+    assert '[[ "$monitor_status" -eq 70 ]]' in script
     assert f'"{STRICT_MONITOR_MODULE}"' in script
     assert "scripts/run_isolated_venv_python.py" not in script
 
@@ -151,9 +155,26 @@ def test_lightweight_bootstrap_fails_closed_on_dependency_shadow_of_legacy_modul
         timeout=30,
     )
 
-    assert completed.returncode != 0
+    assert completed.returncode == 70
     assert "legacy runtime module config is shadowed" in (completed.stdout + completed.stderr)
     assert not monitor_marker.exists()
+
+
+def test_site_packages_candidate_dedup_accepts_lib64_symlink_alias(tmp_path):
+    canonical = tmp_path / "lib" / "python3.13" / "site-packages"
+    canonical.mkdir(parents=True)
+    lib64 = tmp_path / "lib64"
+    lib64.symlink_to(tmp_path / "lib", target_is_directory=True)
+    alias = lib64 / "python3.13" / "site-packages"
+
+    resolved = []
+    for candidate in (canonical, alias):
+        assert candidate.is_dir()
+        value = candidate.resolve()
+        if value not in resolved:
+            resolved.append(value)
+
+    assert resolved == [canonical.resolve()]
 
 
 def test_readonly_autopilot_enters_minimal_environment_before_bash():
