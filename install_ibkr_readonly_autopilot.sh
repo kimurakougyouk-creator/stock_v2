@@ -63,7 +63,7 @@ After=default.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO_DIR
-ExecStart=/usr/bin/env bash $REPO_DIR/ibkr_readonly_autopilot.sh
+ExecStart=/bin/sh $REPO_DIR/ibkr_readonly_autopilot.sh
 Restart=always
 RestartSec=15
 UMask=0077
