@@ -1,4 +1,32 @@
-#!/usr/bin/env bash
+#!/bin/sh
+# Enter a minimal environment before Bash can evaluate BASH_ENV, inherited
+# functions, a hostile PATH, or Python startup-path variables. The systemd
+# service and direct/manual execution both pass through this trampoline.
+if [ "${IBKR_AUTOPILOT_SANITIZED:-0}" != "1" ]; then
+  if [ -z "${HOME:-}" ]; then
+    echo "BLOCKED: HOME is unavailable. No order was sent." >&2
+    exit 2
+  fi
+  SCRIPT_PATH="$(/usr/bin/readlink -f -- "$0")"
+  exec /usr/bin/env -i \
+    HOME="$HOME" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-}" \
+    LANG="${LANG:-C.UTF-8}" \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    IBKR_AUTOPILOT_SANITIZED=1 \
+    IBKR_REPO_DIR="${IBKR_REPO_DIR:-$HOME/stock_v2_latest}" \
+    IBKR_AUTOPILOT_INTERVAL_SECONDS="${IBKR_AUTOPILOT_INTERVAL_SECONDS:-300}" \
+    IBKR_AUTOPILOT_MAX_LOG_BYTES="${IBKR_AUTOPILOT_MAX_LOG_BYTES:-5242880}" \
+    IBKR_AUTOPILOT_PIN_FILE="${IBKR_AUTOPILOT_PIN_FILE:-$HOME/.config/ai-asset-platform/ibkr-readonly-autopilot-pinned-head}" \
+    IBKR_AUTOPILOT_PINNED_HEAD="${IBKR_AUTOPILOT_PINNED_HEAD:-}" \
+    IBKR_PAPER_MONITOR_MAX_RUNTIME_AGE_HOURS="${IBKR_PAPER_MONITOR_MAX_RUNTIME_AGE_HOURS:-96}" \
+    IBKR_PAPER_MONITOR_MAX_HISTORY_BYTES="${IBKR_PAPER_MONITOR_MAX_HISTORY_BYTES:-10485760}" \
+    IBKR_PAPER_MONITOR_EMAIL_ALERTS="${IBKR_PAPER_MONITOR_EMAIL_ALERTS:-auto}" \
+    IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS="${IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS:-12}" \
+    /bin/bash --noprofile --norc "$SCRIPT_PATH" "$@"
+fi
+
 set -euo pipefail
 
 REPO_DIR="${IBKR_REPO_DIR:-$HOME/stock_v2_latest}"
@@ -85,37 +113,34 @@ while true; do
       echo "AUTOPILOT SOURCE BLOCKED: local HEAD $current_head differs from pinned audited HEAD $PINNED_HEAD. Rerun the tested installer after review."
     elif ! tracked_source_is_clean; then
       echo "AUTOPILOT SOURCE BLOCKED: tracked source differs from pinned HEAD outside runtime output directories. Monitoring code was not executed."
-    elif [[ -f .venv/bin/activate ]]; then
-      source .venv/bin/activate
-      unset PYTHONPATH
-      # Install-time migration/verification (install_ibkr_readonly_autopilot.sh)
-      # is not enough on its own for a daemon that loops indefinitely: .venv's
-      # binding could change between cycles without a restart, and each cycle
-      # spawns a fresh monitor subprocess that would pick up whatever is
-      # there *then*. Re-verify every cycle, immediately before the monitor
-      # -- read-only, no migration attempt (this daemon never touches pip or
-      # git) -- and skip the monitor entirely on failure.
-      if ! python scripts/verify_exact_checkout_import.py; then
-        echo "AUTOPILOT SOURCE BLOCKED: exact checkout runtime binding failed this cycle. Monitoring code was not executed."
-      else
-        set +e
-        # Strict unattended policy: run only the IBKR-scoped read-only monitor.
-        # Legacy local PAPER simulation rows are excluded from live Paper-account
-        # risk state, while a complete broker snapshot is checked for every actual
-        # non-zero position. No order API request is used by this path.
-        python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict \
-          2>&1 | tee "$MONITOR_LOG"
-        monitor_status=${PIPESTATUS[0]}
-        set -e
-        if [[ "$monitor_status" -eq 2 ]]; then
-          echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
-        elif [[ "$monitor_status" -eq 1 ]]; then
-          echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
-        fi
-        echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
+    elif [[ -x .venv/bin/python ]]; then
+      set +e
+      # Strict unattended policy: execute the IBKR-scoped read-only monitor
+      # only through the already-audited isolated bootstrap. This path:
+      # - never sources .venv/bin/activate;
+      # - runs trusted /usr/bin/python3 with -I -S;
+      # - attests the exact Git source before repository imports;
+      # - snapshots and verifies venv dependencies;
+      # - requires the pinned ibapi manifest because the monitor reaches
+      #   read-only IBKR account/execution/open-order APIs.
+      # The shell environment was already reduced to an explicit whitelist by
+      # the POSIX trampoline above, while the four monitor policy variables are
+      # intentionally preserved.
+      AI_ASSET_PLATFORM_ROOT="$REPO_DIR" \
+      AI_ASSET_REQUIRE_PINNED_IBAPI=1 \
+      /usr/bin/python3 -I -S "$REPO_DIR/scripts/run_isolated_venv_python.py" \
+        -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict \
+        2>&1 | tee "$MONITOR_LOG"
+      monitor_status=${PIPESTATUS[0]}
+      set -e
+      if [[ "$monitor_status" -eq 2 ]]; then
+        echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
+      elif [[ "$monitor_status" -eq 1 ]]; then
+        echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
       fi
+      echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
     else
-      echo "SKIP: .venv/bin/activate not found. No order was sent."
+      echo "SKIP: .venv/bin/python not found. No order was sent."
     fi
     echo "PINNED AUDITED HEAD: $PINNED_HEAD"
     echo "ORDER API REQUEST SENT: False"
