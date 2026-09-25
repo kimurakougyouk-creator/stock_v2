@@ -43,7 +43,18 @@ def _live_responses(*, login_type: int = 1, is_paper: bool = False, orders=None)
                 },
             ],
         },
-        f"/portfolio2/{RAW_ACCOUNT}/positions": [],
+        f"/portfolio2/{RAW_ACCOUNT}/positions": [
+            {
+                "acctId": RAW_ACCOUNT,
+                "conid": 265598,
+                "contractDesc": "AAPL",
+                "assetClass": "STK",
+                "currency": "USD",
+                "position": 0,
+                "avgCost": 0,
+                "mktValue": 0,
+            }
+        ],
         "/iserver/account/orders": {"orders": orders, "snapshot": True},
         "/iserver/exchangerate": {"rate": 150.0},
     }
@@ -119,6 +130,17 @@ def test_verified_live_session_builds_read_only_reports_without_raw_account_id()
     }
     assert len(account["account_fingerprint"]) == 64
     assert account["raw_account_id_persisted"] is False
+    assert account["positions"] == [
+        {
+            "conid": 265598,
+            "symbol": "AAPL",
+            "asset_class": "STK",
+            "currency": "USD",
+            "position": 0.0,
+            "avg_cost": 0.0,
+            "market_value": 0.0,
+        }
+    ]
 
     assert orders["open_order_count"] == 0
     assert orders["orders"] == []
