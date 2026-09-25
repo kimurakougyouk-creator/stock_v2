@@ -50,33 +50,124 @@ def test_readonly_autopilot_only_invokes_strict_readonly_monitor():
     assert 'echo "ORDER API REQUEST SENT: False"' in script
 
 
-def test_readonly_autopilot_uses_existing_isolated_runner_and_pinned_ibapi():
+def test_readonly_autopilot_uses_lightweight_safe_path_and_pinned_ibapi():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
 
-    assert "/usr/bin/python3 -I -S" in script
-    assert "$REPO_DIR/scripts/run_isolated_venv_python.py" in script
-    assert f"-m {STRICT_MONITOR_MODULE}" in script
-    assert "AI_ASSET_PLATFORM_ROOT=\"$REPO_DIR\"" in script
-    assert "AI_ASSET_REQUIRE_PINNED_IBAPI=1" in script
+    assert "/usr/bin/python3 -I -P -S" in script
+    assert "scripts/verify_strategy_source_clean.sh" in script
+    assert "scripts/verify_live_ibapi_runtime.py" in script
+    assert "scripts/live_ibapi_manifest.json" in script
+    assert f'"{STRICT_MONITOR_MODULE}"' in script
+    assert "scripts/run_isolated_venv_python.py" not in script
 
-    # The daemon no longer executes mutable venv activation code or a plain
-    # cwd-derived Python import path before the strict monitor.
+    # The unattended daemon no longer executes mutable venv activation code or
+    # a plain cwd-derived Python import path before the strict monitor.
     assert "source .venv/bin/activate" not in script
     assert "python scripts/verify_exact_checkout_import.py" not in script
     assert "\n        python -m " not in script
+    assert "sitecustomize" in script
+    assert "sys.path.extend([str(site_packages), str(src), str(root)])" in script
+
+
+def _monitor_bootstrap_source() -> str:
+    script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
+    marker = "<<'PY' | tee"
+    marker_at = script.index(marker)
+    start = script.index("\n", marker_at) + 1
+    end = script.index("\nPY\n", start)
+    return script[start:end]
+
+
+def _write_fake_monitor_runtime(root: Path, site_packages: Path, *, marker: Path) -> None:
+    brokers = root / "src" / "ai_asset_platform" / "brokers"
+    brokers.mkdir(parents=True)
+    (root / "src" / "ai_asset_platform" / "__init__.py").write_text("", encoding="utf-8")
+    (brokers / "__init__.py").write_text("", encoding="utf-8")
+    (brokers / "ibkr_paper_operations_monitor_strict.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    for name in ("config", "paper_trading_runner", "signal_runner"):
+        (root / f"{name}.py").write_text("VALUE = 1\n", encoding="utf-8")
+    site_packages.mkdir(parents=True)
+
+
+def test_lightweight_bootstrap_blocks_startup_hooks_and_cwd_stdlib_shadows(tmp_path):
+    root = tmp_path / "repo"
+    site_packages = tmp_path / "venv-site"
+    monitor_marker = tmp_path / "monitor-ran"
+    sitecustomize_marker = tmp_path / "sitecustomize-ran"
+    pth_marker = tmp_path / "pth-ran"
+    keyword_marker = tmp_path / "keyword-ran"
+    _write_fake_monitor_runtime(root, site_packages, marker=monitor_marker)
+
+    (site_packages / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sitecustomize_marker)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+    (site_packages / "hostile.pth").write_text(
+        f"import pathlib; pathlib.Path({str(pth_marker)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+    (root / "keyword.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(keyword_marker)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["/usr/bin/python3", "-I", "-P", "-S", "-", str(root), str(site_packages)],
+        cwd=root,
+        input=_monitor_bootstrap_source(),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert monitor_marker.read_text(encoding="utf-8") == "ran"
+    assert not sitecustomize_marker.exists()
+    assert not pth_marker.exists()
+    assert not keyword_marker.exists()
+
+
+def test_lightweight_bootstrap_fails_closed_on_dependency_shadow_of_legacy_module(tmp_path):
+    root = tmp_path / "repo"
+    site_packages = tmp_path / "venv-site"
+    monitor_marker = tmp_path / "monitor-ran"
+    _write_fake_monitor_runtime(root, site_packages, marker=monitor_marker)
+    (site_packages / "config.py").write_text("VALUE = 'shadow'\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        ["/usr/bin/python3", "-I", "-P", "-S", "-", str(root), str(site_packages)],
+        cwd=root,
+        input=_monitor_bootstrap_source(),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode != 0
+    assert "legacy runtime module config is shadowed" in (completed.stdout + completed.stderr)
+    assert not monitor_marker.exists()
 
 
 def test_readonly_autopilot_enters_minimal_environment_before_bash():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
 
     assert script.startswith("#!/bin/sh\n")
-    unset_line = (
-        "unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP "
-        "LD_PRELOAD LD_LIBRARY_PATH"
+    loader_guard = (
+        'if [ -n "${LD_PRELOAD:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; then'
     )
+    unset_line = "unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP"
+    assert loader_guard in script
     assert unset_line in script
     assert "/usr/bin/env -i" in script
-    assert script.index(unset_line) < script.index("/usr/bin/env -i")
+    assert script.index(loader_guard) < script.index(unset_line) < script.index("/usr/bin/env -i")
     assert "/bin/bash --noprofile --norc" in script
     assert (
         'if [ -z "${BASH_VERSION:-}" ] || ! (set -o pipefail) 2>/dev/null; then'
@@ -169,6 +260,32 @@ def test_direct_launch_blocks_hostile_bash_env_and_path_before_repo_checks(tmp_p
     assert not hostile_git_marker.exists()
 
 
+def test_direct_launch_with_loader_override_is_rejected_before_repo_commands(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = repo / "ibkr_readonly_autopilot.sh"
+    shutil.copy2("ibkr_readonly_autopilot.sh", script)
+    script.chmod(0o755)
+
+    completed = subprocess.run(
+        [str(script)],
+        cwd=repo,
+        env={
+            "HOME": str(tmp_path),
+            "IBKR_REPO_DIR": str(repo),
+            "LD_LIBRARY_PATH": str(tmp_path / "untrusted-loader-path"),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 2
+    assert "LD_PRELOAD/LD_LIBRARY_PATH is unsupported" in completed.stderr
+    assert "unattended monitor must start" not in completed.stderr
+
+
 def test_readonly_autopilot_keeps_running_when_monitor_is_not_ready():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
     assert "PAPER OPERATIONS CRITICAL" in script
@@ -243,6 +360,9 @@ def test_installer_runs_only_readonly_autopilot_service():
     assert "IBKR_AUTOPILOT_PIN_FILE=" in script
     assert "IBKR_AUTOPILOT_PINNED_HEAD=" in script
     assert 'chmod 600 "$pin_tmp"' in script
+    assert 'TRUSTED_PYTHON_REAL="$(/usr/bin/readlink -f -- /usr/bin/python3' in script
+    assert 'VENV_PYTHON_REAL="$(/usr/bin/readlink -f -- .venv/bin/python' in script
+    assert '"$VENV_PYTHON_REAL" != "$TRUSTED_PYTHON_REAL"' in script
     assert "ExecStart=/bin/sh $REPO_DIR/ibkr_readonly_autopilot.sh" in script
     assert "ExecStart=/usr/bin/env bash" not in script
     assert (
