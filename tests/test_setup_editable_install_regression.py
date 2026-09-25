@@ -399,13 +399,16 @@ other wrapper/script in this repo that activates a venv before using
 
 Follow-up finding (2026-09-25 / Issue #285 bounded autopilot slice):
 `ibkr_readonly_autopilot.sh` is no longer a legacy activate/unset/plain-Python
-wrapper. Its direct/systemd launch now enters a minimal environment before Bash,
-does not source `.venv/bin/activate`, and invokes the strict read-only monitor
-through `run_isolated_venv_python.py` with trusted `/usr/bin/python3 -I -S`
-and pinned-ibapi verification. The older dedicated test that required
-activate -> unset -> verify_exact_checkout_import -> monitor has therefore been
-replaced with a test for the new isolated launch contract. This bounded slice
-does not claim to close all of Issue #285.
+wrapper. The installed systemd path removes loader/shell/Python startup
+overrides before `/bin/sh`; the daemon does not source
+`.venv/bin/activate`. Each eligible cycle uses a lightweight
+`/usr/bin/python3 -I -P -S` bootstrap: repository importables are attested,
+the pinned ibapi package is verified, site-packages is appended without
+processing .pth/sitecustomize, and application paths are appended only after
+stdlib/dependencies. This supersedes both the old plain-Python verifier wiring
+and an intermediate full-venv snapshot design that was rejected as too costly
+for the constrained Chromebook target. This bounded slice does not claim to
+close all of Issue #285.
 """
 import os
 import re
@@ -798,38 +801,40 @@ def test_setup_sh_unsets_pythonpath_before_editable_install_and_verify():
 _AUTOPILOT_LOOP_PATH = ROOT_DIR / "ibkr_readonly_autopilot.sh"
 
 
-def test_ibkr_readonly_autopilot_uses_isolated_attested_runtime_each_cycle():
+def test_ibkr_readonly_autopilot_uses_lightweight_attested_runtime_each_cycle():
     """Issue #285 2026-09-25 hardening: the unattended monitor no longer
     relies on mutable venv activation plus a plain cwd-derived Python import
-    path. Every eligible cycle launches the strict read-only monitor through
-    the existing isolated bootstrap using trusted system Python.
+    path, and it does not rebuild a full dependency snapshot every cycle.
 
-    The isolated bootstrap re-attests exact committed source before repository
-    imports, verifies/snapshots venv dependencies, and (for this monitor)
-    requires the pinned ibapi manifest. This supersedes the older
-    activate -> unset PYTHONPATH -> verify_exact_checkout_import -> monitor
-    wiring that this test previously required.
+    Each eligible cycle verifies source/startup paths and pinned ibapi, then
+    launches the strict read-only monitor with trusted system Python under
+    -I -P -S. The bootstrap appends dependency/application paths only after
+    the stdlib and does not invoke site processing.
     """
     assert _AUTOPILOT_LOOP_PATH.is_file(), f"missing {_AUTOPILOT_LOOP_PATH}"
     source = _AUTOPILOT_LOOP_PATH.read_text(encoding="utf-8")
 
     assert "source .venv/bin/activate" not in source
     assert "python scripts/verify_exact_checkout_import.py" not in source
-    assert "/usr/bin/python3 -I -S" in source
-    assert "scripts/run_isolated_venv_python.py" in source
-    assert "AI_ASSET_PLATFORM_ROOT=\"$REPO_DIR\"" in source
-    assert "AI_ASSET_REQUIRE_PINNED_IBAPI=1" in source
+    assert "scripts/run_isolated_venv_python.py" not in source
+    assert "scripts/verify_strategy_source_clean.sh" in source
+    assert "scripts/verify_live_ibapi_runtime.py" in source
+    assert "/usr/bin/python3 -I -P -S" in source
+    assert "sys.path.extend([str(site_packages), str(src), str(root)])" in source
+    assert "sitecustomize" in source
     assert (
-        "-m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"
+        "ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"
         in source
     )
 
     venv_gate_at = source.index('elif [[ -x .venv/bin/python ]]; then')
-    isolated_at = source.index("/usr/bin/python3 -I -S")
+    source_gate_at = source.index("scripts/verify_strategy_source_clean.sh")
+    ibapi_gate_at = source.index("scripts/verify_live_ibapi_runtime.py")
+    safe_python_at = source.index("/usr/bin/python3 -I -P -S - ")
     monitor_at = source.index(
-        "-m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"
+        '"ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"'
     )
-    assert venv_gate_at < isolated_at < monitor_at
+    assert venv_gate_at < source_gate_at < ibapi_gate_at < safe_python_at < monitor_at
 
 
 def test_ibkr_readonly_soak_clears_pythonpath_before_first_use():
