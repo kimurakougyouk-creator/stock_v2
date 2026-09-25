@@ -145,11 +145,17 @@ while true; do
           "$REPO_DIR/.venv/lib64/$PY_MINOR/site-packages"
         do
           if [[ -d "$candidate" ]]; then
-            if [[ -n "$VENV_SITE_PACKAGES" ]]; then
+            resolved_candidate="$(/usr/bin/readlink -f -- "$candidate" 2>/dev/null || true)"
+            if [[ -z "$resolved_candidate" ]]; then
               VENV_SITE_PACKAGES="AMBIGUOUS"
               break
             fi
-            VENV_SITE_PACKAGES="$candidate"
+            if [[ -z "$VENV_SITE_PACKAGES" ]]; then
+              VENV_SITE_PACKAGES="$resolved_candidate"
+            elif [[ "$VENV_SITE_PACKAGES" != "$resolved_candidate" ]]; then
+              VENV_SITE_PACKAGES="AMBIGUOUS"
+              break
+            fi
           fi
         done
 
@@ -171,12 +177,21 @@ from pathlib import Path
 import runpy
 import sys
 
+
+_BOOTSTRAP_BLOCKED_EXIT = 70
+
+
+def _block(message: str) -> None:
+    print(f"BLOCKED: {message}", file=sys.stderr)
+    raise SystemExit(_BOOTSTRAP_BLOCKED_EXIT)
+
+
 root = Path(sys.argv[1]).resolve()
 site_packages = Path(sys.argv[2]).resolve()
 src = (root / "src").resolve()
 
 if not root.is_dir() or not src.is_dir() or not site_packages.is_dir():
-    raise SystemExit("BLOCKED: Paper monitor runtime paths are unavailable")
+    _block("Paper monitor runtime paths are unavailable")
 
 # -I -P -S leaves cwd/repository/site-packages out of startup sys.path.
 # Add dependencies first, then application source/legacy root, all after the
@@ -185,15 +200,13 @@ if not root.is_dir() or not src.is_dir() or not site_packages.is_dir():
 # adding site-packages directly does not process .pth files or sitecustomize.
 for entry in tuple(sys.path):
     if not entry:
-        raise SystemExit("BLOCKED: unsafe empty startup sys.path entry")
+        _block("unsafe empty startup sys.path entry")
     try:
         resolved = Path(entry).resolve()
     except OSError:
         continue
     if resolved in {root, src, site_packages}:
-        raise SystemExit(
-            "BLOCKED: repository/dependency path entered sys.path before bootstrap"
-        )
+        _block("repository/dependency path entered sys.path before bootstrap")
 
 sys.path.extend([str(site_packages), str(src), str(root)])
 
@@ -201,33 +214,27 @@ sys.path.extend([str(site_packages), str(src), str(root)])
 def _origin(name: str) -> Path:
     spec = importlib.util.find_spec(name)
     if spec is None or spec.origin in {None, "built-in", "frozen"}:
-        raise SystemExit(f"BLOCKED: import origin is unavailable for {name}")
+        _block(f"import origin is unavailable for {name}")
     return Path(spec.origin).resolve()
 
 
 expected_package = (src / "ai_asset_platform" / "__init__.py").resolve()
 if _origin("ai_asset_platform") != expected_package:
-    raise SystemExit(
-        "BLOCKED: ai_asset_platform does not resolve to the audited checkout"
-    )
+    _block("ai_asset_platform does not resolve to the audited checkout")
 
 # These legacy root modules are reached transitively by the strict monitor.
 # Fail closed if an installed dependency shadows any of them.
 for module_name in ("config", "paper_trading_runner", "signal_runner"):
     expected = (root / f"{module_name}.py").resolve()
     if _origin(module_name) != expected:
-        raise SystemExit(
-            f"BLOCKED: legacy runtime module {module_name} is shadowed"
-        )
+        _block(f"legacy runtime module {module_name} is shadowed")
 
 # Re-check representative stdlib modules involved in the original Issue #285
 # shadow demonstrations after all paths are appended.
 for protected in ("keyword", "dataclasses", "json"):
     spec = importlib.util.find_spec(protected)
     if spec is None:
-        raise SystemExit(
-            f"BLOCKED: protected stdlib module {protected} is unavailable"
-        )
+        _block(f"protected stdlib module {protected} is unavailable")
     if spec.origin not in {None, "built-in", "frozen"}:
         resolved = Path(spec.origin).resolve()
         if (
@@ -236,22 +243,31 @@ for protected in ("keyword", "dataclasses", "json"):
             or resolved == site_packages
             or site_packages in resolved.parents
         ):
-            raise SystemExit(
-                f"BLOCKED: protected stdlib module {protected} is shadowed"
-            )
+            _block(f"protected stdlib module {protected} is shadowed")
 
-runpy.run_module(
-    "ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict",
-    run_name="__main__",
-    alter_sys=True,
-)
+try:
+    runpy.run_module(
+        "ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict",
+        run_name="__main__",
+        alter_sys=True,
+    )
+except SystemExit as exc:
+    if type(exc.code) is int and exc.code in {0, 1, 2}:
+        raise
+    _block(f"strict monitor exited without a classified 0/1/2 status: {exc.code!r}")
+except BaseException as exc:
+    _block(f"strict monitor failed before a classified result: {type(exc).__name__}: {exc}")
 PY
           monitor_status=${PIPESTATUS[0]}
           set -e
-          if [[ "$monitor_status" -eq 2 ]]; then
+          if [[ "$monitor_status" -eq 70 ]]; then
+            echo "PAPER OPERATIONS CRITICAL: runtime bootstrap failed; no fresh monitor health result was produced and no order was changed, cancelled, or retried."
+          elif [[ "$monitor_status" -eq 2 ]]; then
             echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
           elif [[ "$monitor_status" -eq 1 ]]; then
             echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
+          elif [[ "$monitor_status" -ne 0 ]]; then
+            echo "PAPER OPERATIONS CRITICAL: unexpected monitor exit status $monitor_status; no fresh classified health result was produced and no order was changed, cancelled, or retried."
           fi
           echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
         fi
