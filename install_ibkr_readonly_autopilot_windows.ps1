@@ -117,11 +117,18 @@ $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powe
 if (-not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) {
     throw "BLOCKED: Windows PowerShell executable not found. No task was staged."
 }
+$ConsoleHostExe = Join-Path $env:SystemRoot "System32\conhost.exe"
+if (-not (Test-Path -LiteralPath $ConsoleHostExe -PathType Leaf)) {
+    throw "BLOCKED: Windows console host executable not found. No task was staged."
+}
 
+# Run under a headless console host. A plain interactive console is handed off
+# to Windows Terminal when it is the default terminal, and Windows Terminal
+# closing that window ends the monitor with 0xC000013A (CTRL_CLOSE).
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction `
-    -Execute $PowerShellExe `
-    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$AutopilotScript`"" `
+    -Execute $ConsoleHostExe `
+    -Argument "--headless `"$PowerShellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$AutopilotScript`"" `
     -WorkingDirectory $RepoDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 $principal = New-ScheduledTaskPrincipal `

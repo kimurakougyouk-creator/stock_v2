@@ -119,6 +119,21 @@ def test_windows_installer_stages_disabled_after_revision_pin():
     assert 'Write-Host "MONITOR STARTED: False"' in script
 
 
+def test_windows_installer_task_runs_under_headless_console_host():
+    script = _text(INSTALLER)
+    action_at = script.index("$action = New-ScheduledTaskAction")
+    trigger_at = script.index("$trigger = New-ScheduledTaskTrigger")
+    action = script[action_at:trigger_at]
+    assert 'Join-Path $env:SystemRoot "System32\\conhost.exe"' in script
+    assert "-Execute $ConsoleHostExe" in action
+    assert "-Execute $PowerShellExe" not in action
+    assert (
+        '--headless `"$PowerShellExe`" -NoProfile -NonInteractive '
+        '-ExecutionPolicy Bypass -File `"$AutopilotScript`"'
+    ) in action
+    assert "-LogonType Interactive" in script
+
+
 def test_windows_autopilot_marks_all_order_paths_false_even_after_error():
     script = _text(AUTOPILOT)
     assert script.count('"ORDER API REQUEST SENT: False"') >= 2
