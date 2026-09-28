@@ -118,10 +118,22 @@ if (-not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) {
     throw "BLOCKED: Windows PowerShell executable not found. No task was staged."
 }
 
+# Pass -WindowStyle Hidden directly to powershell.exe rather than routing the
+# task through a wrapper such as conhost.exe --headless. A plain interactive
+# console can be handed off to Windows Terminal when it is the default
+# terminal, and Windows Terminal closing that handed-off window ends the
+# monitor with 0xC000013A (CTRL_CLOSE); -WindowStyle Hidden was verified on
+# this host (repeated launches, survived >90s, no console handoff) not to
+# trigger that handoff. Keeping Execute as powershell.exe itself (instead of
+# a wrapper such as conhost.exe --headless, which was verified on this host
+# to always report exit code 0 regardless of the child's actual exit code,
+# including a forced external kill) preserves the real PowerShell exit code
+# as LastTaskResult, so RestartOnFailure below still has a real failure
+# signal to act on.
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction `
     -Execute $PowerShellExe `
-    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$AutopilotScript`"" `
+    -Argument "-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$AutopilotScript`"" `
     -WorkingDirectory $RepoDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 $principal = New-ScheduledTaskPrincipal `
