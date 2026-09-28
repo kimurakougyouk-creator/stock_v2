@@ -1,4 +1,42 @@
-#!/usr/bin/env bash
+#!/bin/sh
+# The installed systemd unit is the trusted unattended entrypoint. It removes
+# dynamic-loader/shell/Python startup overrides before /bin/sh is created.
+# A direct manual launch cannot undo LD_PRELOAD/LD_LIBRARY_PATH after the
+# dynamic loader has already started this shell, so refuse that unsupported
+# case before any repository command or monitor code runs.
+if [ -n "${LD_PRELOAD:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  echo "BLOCKED: direct launch with LD_PRELOAD/LD_LIBRARY_PATH is unsupported. Use the installed systemd service. No order was sent." >&2
+  exit 2
+fi
+
+# For normal direct launches, clear shell/Python startup controls and rebuild
+# a minimal environment before Bash can evaluate BASH_ENV, inherited functions,
+# a hostile PATH, or Python startup-path variables.
+if [ -z "${BASH_VERSION:-}" ] || ! (set -o pipefail) 2>/dev/null; then
+  if [ -z "${HOME:-}" ]; then
+    echo "BLOCKED: HOME is unavailable. No order was sent." >&2
+    exit 2
+  fi
+  SCRIPT_PATH="$0"
+  unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP
+  exec /usr/bin/env -i \
+    HOME="$HOME" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-}" \
+    LANG="${LANG:-C.UTF-8}" \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    IBKR_REPO_DIR="${IBKR_REPO_DIR:-$HOME/stock_v2_latest}" \
+    IBKR_AUTOPILOT_INTERVAL_SECONDS="${IBKR_AUTOPILOT_INTERVAL_SECONDS:-300}" \
+    IBKR_AUTOPILOT_MAX_LOG_BYTES="${IBKR_AUTOPILOT_MAX_LOG_BYTES:-5242880}" \
+    IBKR_AUTOPILOT_PIN_FILE="${IBKR_AUTOPILOT_PIN_FILE:-$HOME/.config/ai-asset-platform/ibkr-readonly-autopilot-pinned-head}" \
+    IBKR_AUTOPILOT_PINNED_HEAD="${IBKR_AUTOPILOT_PINNED_HEAD:-}" \
+    IBKR_PAPER_MONITOR_MAX_RUNTIME_AGE_HOURS="${IBKR_PAPER_MONITOR_MAX_RUNTIME_AGE_HOURS:-96}" \
+    IBKR_PAPER_MONITOR_MAX_HISTORY_BYTES="${IBKR_PAPER_MONITOR_MAX_HISTORY_BYTES:-10485760}" \
+    IBKR_PAPER_MONITOR_EMAIL_ALERTS="${IBKR_PAPER_MONITOR_EMAIL_ALERTS:-auto}" \
+    IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS="${IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS:-12}" \
+    /bin/bash --noprofile --norc "$SCRIPT_PATH" "$@"
+fi
+
 set -euo pipefail
 
 REPO_DIR="${IBKR_REPO_DIR:-$HOME/stock_v2_latest}"
@@ -85,37 +123,157 @@ while true; do
       echo "AUTOPILOT SOURCE BLOCKED: local HEAD $current_head differs from pinned audited HEAD $PINNED_HEAD. Rerun the tested installer after review."
     elif ! tracked_source_is_clean; then
       echo "AUTOPILOT SOURCE BLOCKED: tracked source differs from pinned HEAD outside runtime output directories. Monitoring code was not executed."
-    elif [[ -f .venv/bin/activate ]]; then
-      source .venv/bin/activate
-      unset PYTHONPATH
-      # Install-time migration/verification (install_ibkr_readonly_autopilot.sh)
-      # is not enough on its own for a daemon that loops indefinitely: .venv's
-      # binding could change between cycles without a restart, and each cycle
-      # spawns a fresh monitor subprocess that would pick up whatever is
-      # there *then*. Re-verify every cycle, immediately before the monitor
-      # -- read-only, no migration attempt (this daemon never touches pip or
-      # git) -- and skip the monitor entirely on failure.
-      if ! python scripts/verify_exact_checkout_import.py; then
-        echo "AUTOPILOT SOURCE BLOCKED: exact checkout runtime binding failed this cycle. Monitoring code was not executed."
+    elif [[ -x .venv/bin/python ]]; then
+      # Keep this 300-second unattended path lightweight. Do not copy/hash the
+      # entire venv every cycle. Instead:
+      # 1. prove the venv interpreter is the trusted /usr/bin/python3;
+      # 2. prove tracked/untracked importable repository source is clean;
+      # 3. verify the exact pinned ibapi package only;
+      # 4. launch with -I -P -S and append dependency/application paths only
+      #    after the standard library, without processing .pth/sitecustomize.
+      TRUSTED_PYTHON_REAL="$(/usr/bin/readlink -f -- /usr/bin/python3 2>/dev/null || true)"
+      VENV_PYTHON_REAL="$(/usr/bin/readlink -f -- .venv/bin/python 2>/dev/null || true)"
+      if [[ -z "$TRUSTED_PYTHON_REAL" || "$VENV_PYTHON_REAL" != "$TRUSTED_PYTHON_REAL" ]]; then
+        echo "AUTOPILOT SOURCE BLOCKED: .venv interpreter does not match trusted /usr/bin/python3. Monitoring code was not executed."
+      elif ! /bin/bash --noprofile --norc scripts/verify_strategy_source_clean.sh >/dev/null; then
+        echo "AUTOPILOT SOURCE BLOCKED: source/startup-path attestation failed this cycle. Monitoring code was not executed."
       else
-        set +e
-        # Strict unattended policy: run only the IBKR-scoped read-only monitor.
-        # Legacy local PAPER simulation rows are excluded from live Paper-account
-        # risk state, while a complete broker snapshot is checked for every actual
-        # non-zero position. No order API request is used by this path.
-        python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict \
-          2>&1 | tee "$MONITOR_LOG"
-        monitor_status=${PIPESTATUS[0]}
-        set -e
-        if [[ "$monitor_status" -eq 2 ]]; then
-          echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
-        elif [[ "$monitor_status" -eq 1 ]]; then
-          echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
+        PY_MINOR="$(/usr/bin/python3 -I -P -S -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')"
+        VENV_SITE_PACKAGES=""
+        for candidate in \
+          "$REPO_DIR/.venv/lib/$PY_MINOR/site-packages" \
+          "$REPO_DIR/.venv/lib64/$PY_MINOR/site-packages"
+        do
+          if [[ -d "$candidate" ]]; then
+            resolved_candidate="$(/usr/bin/readlink -f -- "$candidate" 2>/dev/null || true)"
+            if [[ -z "$resolved_candidate" ]]; then
+              VENV_SITE_PACKAGES="AMBIGUOUS"
+              break
+            fi
+            if [[ -z "$VENV_SITE_PACKAGES" ]]; then
+              VENV_SITE_PACKAGES="$resolved_candidate"
+            elif [[ "$VENV_SITE_PACKAGES" != "$resolved_candidate" ]]; then
+              VENV_SITE_PACKAGES="AMBIGUOUS"
+              break
+            fi
+          fi
+        done
+
+        if [[ -z "$VENV_SITE_PACKAGES" || "$VENV_SITE_PACKAGES" == "AMBIGUOUS" ]]; then
+          echo "AUTOPILOT SOURCE BLOCKED: exactly one interpreter-matching venv site-packages directory is required. Monitoring code was not executed."
+        elif ! /usr/bin/python3 -I -P -S "$REPO_DIR/scripts/verify_live_ibapi_runtime.py" \
+          --site-packages "$VENV_SITE_PACKAGES" \
+          --manifest "$REPO_DIR/scripts/live_ibapi_manifest.json" >/dev/null
+        then
+          echo "AUTOPILOT SOURCE BLOCKED: pinned ibapi verification failed this cycle. Monitoring code was not executed."
+        else
+          set +e
+          /usr/bin/python3 -I -P -S - "$REPO_DIR" "$VENV_SITE_PACKAGES" \
+            2>&1 <<'PY' | tee "$MONITOR_LOG"
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import runpy
+import sys
+
+
+_BOOTSTRAP_BLOCKED_EXIT = 70
+
+
+def _block(message: str) -> None:
+    print(f"BLOCKED: {message}", file=sys.stderr)
+    raise SystemExit(_BOOTSTRAP_BLOCKED_EXIT)
+
+
+root = Path(sys.argv[1]).resolve()
+site_packages = Path(sys.argv[2]).resolve()
+src = (root / "src").resolve()
+
+if not root.is_dir() or not src.is_dir() or not site_packages.is_dir():
+    _block("Paper monitor runtime paths are unavailable")
+
+# -I -P -S leaves cwd/repository/site-packages out of startup sys.path.
+# Add dependencies first, then application source/legacy root, all after the
+# already-established stdlib entries. This prevents repository files from
+# shadowing stdlib or installed third-party packages. Because site is disabled,
+# adding site-packages directly does not process .pth files or sitecustomize.
+for entry in tuple(sys.path):
+    if not entry:
+        _block("unsafe empty startup sys.path entry")
+    try:
+        resolved = Path(entry).resolve()
+    except OSError:
+        continue
+    if resolved in {root, src, site_packages}:
+        _block("repository/dependency path entered sys.path before bootstrap")
+
+sys.path.extend([str(site_packages), str(src), str(root)])
+
+
+def _origin(name: str) -> Path:
+    spec = importlib.util.find_spec(name)
+    if spec is None or spec.origin in {None, "built-in", "frozen"}:
+        _block(f"import origin is unavailable for {name}")
+    return Path(spec.origin).resolve()
+
+
+expected_package = (src / "ai_asset_platform" / "__init__.py").resolve()
+if _origin("ai_asset_platform") != expected_package:
+    _block("ai_asset_platform does not resolve to the audited checkout")
+
+# These legacy root modules are reached transitively by the strict monitor.
+# Fail closed if an installed dependency shadows any of them.
+for module_name in ("config", "paper_trading_runner", "signal_runner"):
+    expected = (root / f"{module_name}.py").resolve()
+    if _origin(module_name) != expected:
+        _block(f"legacy runtime module {module_name} is shadowed")
+
+# Re-check representative stdlib modules involved in the original Issue #285
+# shadow demonstrations after all paths are appended.
+for protected in ("keyword", "dataclasses", "json"):
+    spec = importlib.util.find_spec(protected)
+    if spec is None:
+        _block(f"protected stdlib module {protected} is unavailable")
+    if spec.origin not in {None, "built-in", "frozen"}:
+        resolved = Path(spec.origin).resolve()
+        if (
+            resolved == root
+            or root in resolved.parents
+            or resolved == site_packages
+            or site_packages in resolved.parents
+        ):
+            _block(f"protected stdlib module {protected} is shadowed")
+
+try:
+    runpy.run_module(
+        "ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict",
+        run_name="__main__",
+        alter_sys=True,
+    )
+except SystemExit as exc:
+    if type(exc.code) is int and exc.code in {0, 1, 2}:
+        raise
+    _block(f"strict monitor exited without a classified 0/1/2 status: {exc.code!r}")
+except BaseException as exc:
+    _block(f"strict monitor failed before a classified result: {type(exc).__name__}: {exc}")
+PY
+          monitor_status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$monitor_status" -eq 70 ]]; then
+            echo "PAPER OPERATIONS CRITICAL: runtime bootstrap failed; no fresh monitor health result was produced and no order was changed, cancelled, or retried."
+          elif [[ "$monitor_status" -eq 2 ]]; then
+            echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
+          elif [[ "$monitor_status" -eq 1 ]]; then
+            echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
+          elif [[ "$monitor_status" -ne 0 ]]; then
+            echo "PAPER OPERATIONS CRITICAL: unexpected monitor exit status $monitor_status; no fresh classified health result was produced and no order was changed, cancelled, or retried."
+          fi
+          echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
         fi
-        echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
       fi
     else
-      echo "SKIP: .venv/bin/activate not found. No order was sent."
+      echo "SKIP: .venv/bin/python not found. No order was sent."
     fi
     echo "PINNED AUDITED HEAD: $PINNED_HEAD"
     echo "ORDER API REQUEST SENT: False"
