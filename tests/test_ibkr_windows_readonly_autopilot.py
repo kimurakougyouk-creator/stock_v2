@@ -119,19 +119,35 @@ def test_windows_installer_stages_disabled_after_revision_pin():
     assert 'Write-Host "MONITOR STARTED: False"' in script
 
 
-def test_windows_installer_task_runs_under_headless_console_host():
+def test_windows_installer_task_runs_hidden_without_console_handoff():
     script = _text(INSTALLER)
     action_at = script.index("$action = New-ScheduledTaskAction")
     trigger_at = script.index("$trigger = New-ScheduledTaskTrigger")
     action = script[action_at:trigger_at]
-    assert 'Join-Path $env:SystemRoot "System32\\conhost.exe"' in script
-    assert "-Execute $ConsoleHostExe" in action
-    assert "-Execute $PowerShellExe" not in action
+    assert "-Execute $PowerShellExe" in action
     assert (
-        '--headless `"$PowerShellExe`" -NoProfile -NonInteractive '
+        '-WindowStyle Hidden -NoProfile -NonInteractive '
         '-ExecutionPolicy Bypass -File `"$AutopilotScript`"'
     ) in action
     assert "-LogonType Interactive" in script
+
+
+def test_windows_installer_launcher_does_not_swallow_child_exit_code():
+    # The task must not be routed through a wrapper (such as
+    # `conhost.exe --headless`) whose own reported exit code does not
+    # reflect the launched PowerShell process's actual exit code: that
+    # would make Task Scheduler treat every run -- including a crashed or
+    # externally killed monitor -- as successful, so RestartOnFailure would
+    # never fire. Execute must be powershell.exe itself, so LastTaskResult
+    # is the real exit code of the monitor process.
+    script = _text(INSTALLER)
+    action_at = script.index("$action = New-ScheduledTaskAction")
+    trigger_at = script.index("$trigger = New-ScheduledTaskTrigger")
+    action = script[action_at:trigger_at]
+    lower_action = action.lower()
+    assert "conhost.exe" not in lower_action
+    assert "--headless" not in lower_action
+    assert "-Execute $PowerShellExe" in action
 
 
 def test_windows_autopilot_marks_all_order_paths_false_even_after_error():
