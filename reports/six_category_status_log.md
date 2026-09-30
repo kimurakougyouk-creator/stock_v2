@@ -170,3 +170,18 @@ PR #316が安全監査・明示的merge許可を経てmainへ統合され、バ�
 
 ### 前回からの変化点
 PR #319とPR #321が安全監査・明示的merge許可を経てmainへ統合され、Paper no-transmit smokeのguard誤停止と、ローカルworktree状態に依存していたmocked order-pathテストの不安定性を解消。Chromebook実機でPaper API handshake成功とORDER SENT=Falseまで確認できたため、Paper foundationの接続不確実性は解消した。一方、Live read-only最終ゲートは別途未実施であり、資金・権限・JASDEC/登録・Live endpoint/account/session等の外部前提もfresh evidenceで未確認。したがってLive/Paper注文・broker mutationの権限は増えておらず、Liveは引き続きNO-GO。
+
+---
+
+## 2026-09-30 (JST)
+- 分析: 完成 — 変化なし。`git diff --stat 7e044066..e12bc0c`(main上の前回ログ記録コミット以降)を確認したが `indicators.py`/`src/ai_asset_platform/strategies/indicators.py` は対象外。ルート `indicators.py` は引き続き `from ai_asset_platform.strategies.indicators import add_indicators` のみの互換シムであることをファイル内容で直接確認。
+- シグナル: 完成 — 変化なし。同diffstatに `signal_engine.py`/`src/ai_asset_platform/strategies/signal_engine.py`/`decision*` 系は含まれず。ルート `signal_engine.py` は引き続き `determine_signal` の互換シムのみ。
+- バックテスト: 完成 — 変化なし。`backtest.py`(5219バイト)および `src/ai_asset_platform/reports/backtest_*.py` は同diffstat対象外。
+- 資産推移: 完成 — 変化なし。`equity_chart.py`/`equity_history.py`/`performance*.py`/`dashboard_core.py` は同diffstat対象外。
+- リスク管理: 完成(Paper運用範囲) — 変化なし。ルート `risk_manager.py` は引き続き `calculate_open_position_risk`/`calculate_position_size` の互換シムのみ、`execution/shared_risk_gate.py`/`legacy_risk_gate.py`/`risk/market_sizing.py` は同diffstat対象外。
+- 実運用: 一部実装 — 現在の `main` はPR #328のマージコミット `e12bc0cb3f2998c3ea9c18d793f138a661b177d2`。前回main記録(`7e044066`, 2026-09-25)以降の実コード変更はPR #322(本ログの2026-09-25分記録、ドキュメントのみ)とPR #328のみ。PR #328は `install_ibkr_readonly_autopilot_windows.ps1` のWindowsスケジュールタスク起動方式を `conhost.exe --headless` ラッパーから `powershell.exe -WindowStyle Hidden` 直接起動へ変更し、対応テスト `tests/test_ibkr_windows_readonly_autopilot.py` を追加/拡張した差分(diffstat上は2ファイル+31行)で、コンソールハンドオフによる誤終了(0xC000013A)とラッパーが子プロセスの実終了コードを握りつぶす問題への対処。読み取り専用autopilotの運用起動スクリプトのみでLive送信ロジック(`live_pilot_*`/`execution/`/`brokers/ibkr_live_*`)は不変。GitHub Actions `pytest`(run #2878)・`windows-readonly-autopilot`(run #22)はこの `main` HEADでgreen(success)。`scripts/live_pilot_release_gate.py:64` の `LIVE_EXECUTION_VALUE = "NO-GO"` 固定、`config/strategy_promotion_policy.json` の `enabled: false`/`status: BLOCKED_PENDING_EXPLICIT_THRESHOLDS` をファイル内容で直接再確認 — 変更なし。Issue #255本文(`updated_at` 2026-09-25T09:42:55Z)のチェックリストを直接取得し確認したところ引き続き**9/10**(残る唯一の未達項目は「Full CI + fresh execution-day Live read-only preflight」)。オープン中の未マージコードPRは #323(Client Portal Gateway Live read-only evidence prototype)・#324/#325(Paper read-only autopilotランタイム隔離hardening、いずれもdraft)——mainには未反映。外部運用前提(JPY入金決済、日本株取引許可、JASDEC登録、Live読み取り専用API疎通)も引き続きUNVERIFIED。CLAUDE.md/HANDOFF_MASTER.mdの安全不変条件どおり、現時点でも **NO-GO(実弾`placeOrder`不可)**。
+
+### 前回からの変化点
+分析・シグナル・バックテスト・資産推移・リスク管理の5項目はコード変更なしのため判定・根拠とも前回(2026-09-25、main記録時点)から変化なし。実運用カテゴリはPR #328(Windows read-only autopilotのコンソールハンドオフ/終了コード誤判定修正)がマージされ、`main` HEADが `7e044066` → `e12bc0c` に前進、CI green。トレーディング実行ロジック自体への変更はなし。Issue #255のチェックリストは本ログの前回main記録(2026-09-25時点では3/10)以降、本エージェントが未確認だった期間に9/10まで進んでいたことを本日確認したが、本日時点での追加進展はなく9/10のまま——残る唯一の未達項目(execution-day fresh Live read-only evidence)も変化なし。`LIVE_EXECUTION_VALUE="NO-GO"` 固定・strategy promotion policy disabled/unapprovedは維持。
+
+**【運用上の注記:本ログの継続性ギャップ】** リポジトリのbranch protectionによりmainへの直接pushが拒否される(`GH013`: PR必須+必須ステータスチェック)ため、本タスクの直近4回分の実行(2026-09-26/27/28/29)はPR #326/#327/#329/#330として作成されたが、いずれもユーザーによる明示的マージが行われておらず**main未反映のまま**になっている(main上のログは2026-09-25分の次が本エントリという状態で、26〜29日分の記録はPRの中にのみ存在)。本エントリも同じ制約に従いPRとして作成しており、mainへの直接コミットは行っていない(CLAUDE.mdのGitHub書き込み境界により、マージには別途ユーザーの明示的authorizationが必要なため)。6項目の判定自体はmain上の実コードを独立に確認して算出しており内容に影響はないが、ユーザーには未マージのdocsのみPR(#326、#327、#329、#330、本PR)をまとめてマージすることを推奨する。
