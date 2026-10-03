@@ -32,6 +32,12 @@ A reviewer or Claude GO/NO-GO verdict is advisory evidence, not merge permission
 
 GitHub read access also grants no broker-write or Live-trading authority.
 
+### Standing autonomous-mode authorization (2026-10-03, user-confirmed)
+
+The user has given standing (not per-instance) authorization for Claude Code to run, without stopping to ask first: read-only repo/GitHub/canonical-doc investigation; Phase/critical-path checks; A/B/C classification; A-blocker root-cause analysis; the smallest fix on a feature branch; running relevant tests; `git push` of follow-up commits to that same feature branch (never `main`); opening the one PR for that fix and pushing further commits to it in response to review feedback (never changing that PR's base branch, reviewers, or other metadata, and never opening or mutating any other PR or Issue); monitoring CI; requesting Codex's independent review on the exact PR HEAD; and, if Codex finds a genuine A blocker, fixing it and repeating this same test/push/CI/review cycle.
+
+This standing authorization never extends to: merge/rebase/squash/auto-merge; Live orders; Paper orders; any other broker write; cancel/modify/retry/flatten/close; removal of broker Read-Only; deposits or withdrawals; FX conversion; credential or security-setting changes; Trading Permission changes; paid market-data subscriptions; dangerous TWS/Gateway configuration changes, restarts, or logouts; relaxing any risk limit or safety gate; or adding/changing any completion condition, Phase, or critical-path item. Every one of those still requires a fresh, per-action explicit user authorization, exactly as before this note was added.
+
 ## Independent audit minimum evidence
 
 Before any GO/NO-GO or acceptance decision, independently verify the current `main`, exact proposed HEAD, relevant diff, current exact-head CI, unresolved non-outdated review threads, governing Issue/checklist, and safety invariants. Do not treat an agent's self-report as proof. If the current session cannot directly access a required source, mark that evidence `UNVERIFIED` and state the limitation.
