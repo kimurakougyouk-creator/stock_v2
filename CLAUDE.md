@@ -47,6 +47,10 @@ A Claude GO/NO-GO verdict is an **independent audit opinion only**. It is never 
 
 Read access to GitHub never implies permission for Live trading, broker mutation, order placement, cancel/modify/retry/flatten/close, or removal of broker Read-Only.
 
+### Standing autonomous-mode authorization (2026-10-03, user-confirmed)
+
+Within the existing boundaries above, the user has given standing (not per-instance) authorization for Claude Code to run the following loop without stopping to ask first: read-only repo/GitHub/canonical-doc investigation; Phase/critical-path check; A/B/C classification; root-causing an A blocker; the smallest fix on a feature branch; running relevant tests; `git push` to that feature branch (never `main`); opening/updating a PR for that fix; monitoring CI; requesting Codex's independent review on the exact PR HEAD. Merge and every other item in the prohibited list above remain unchanged and still require a fresh, per-action explicit authorization — this standing authorization does not extend to them. This note does not add, remove, or relax any completion condition, Phase, or critical-path item.
+
 ## Independent audit evidence rule
 
 Before issuing GO/NO-GO on a PR or safety-critical change, do not rely on another agent's summary or on stale chat memory. Independently verify, where technically available:
