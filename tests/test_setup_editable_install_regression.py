@@ -396,6 +396,19 @@ PYTHONPATH pointed, not necessarily this checkout. Fixed by adding `unset
 PYTHONPATH` immediately after `source .venv/bin/activate`, matching every
 other wrapper/script in this repo that activates a venv before using
 `ai_asset_platform`.
+
+Follow-up finding (2026-09-25 / Issue #285 bounded autopilot slice):
+`ibkr_readonly_autopilot.sh` is no longer a legacy activate/unset/plain-Python
+wrapper. The installed systemd path removes loader/shell/Python startup
+overrides before `/bin/sh`; the daemon does not source
+`.venv/bin/activate`. Each eligible cycle uses a lightweight
+`/usr/bin/python3 -I -P -S` bootstrap: repository importables are attested,
+the pinned ibapi package is verified, site-packages is appended without
+processing .pth/sitecustomize, and application paths are appended only after
+stdlib/dependencies. This supersedes both the old plain-Python verifier wiring
+and an intermediate full-venv snapshot design that was rejected as too costly
+for the constrained Chromebook target. This bounded slice does not claim to
+close all of Issue #285.
 """
 import os
 import re
@@ -786,86 +799,42 @@ def test_setup_sh_unsets_pythonpath_before_editable_install_and_verify():
 
 
 _AUTOPILOT_LOOP_PATH = ROOT_DIR / "ibkr_readonly_autopilot.sh"
-_AUTOPILOT_VERIFY_IF_RE = re.compile(
-    r"^if\s*!\s*python\s+scripts/verify_exact_checkout_import\.py\s*;\s*then\s*$"
-)
 
 
-def test_ibkr_readonly_autopilot_verifies_exact_checkout_each_cycle():
-    """Codex PR #287 P1, `ibkr_readonly_autopilot.sh`: install-time
-    migration/verification (`install_ibkr_readonly_autopilot.sh`, proven by
-    `test_install_autopilot_migrates_and_verifies_before_restart`) is not
-    enough on its own for a daemon that loops indefinitely under `while
-    true`. `.venv`'s binding could change between cycles without a
-    restart, and each cycle spawns a fresh `python -m ai_asset_platform...`
-    subprocess that would pick up whatever is there *then* -- so this must
-    re-verify fresh every cycle, immediately before the monitor
-    invocation, and the monitor must be reachable only on the
-    verify-success path (never attempting migration itself: this daemon
-    never touches pip or git, staying in `_INSTALLER_GATED_EXEMPT`).
+def test_ibkr_readonly_autopilot_uses_lightweight_attested_runtime_each_cycle():
+    """Issue #285 2026-09-25 hardening: the unattended monitor no longer
+    relies on mutable venv activation plus a plain cwd-derived Python import
+    path, and it does not rebuild a full dependency snapshot every cycle.
 
-    The verifier's own PASS/FAIL/shadow/offline behavior is already
-    proven in isolation by `test_verify_exact_checkout_import_script_is_fail_closed`
-    and `test_verify_exact_checkout_import_resolves_origin_before_executing_package`;
-    this proves it is wired into the cycle body correctly: activate <
-    unset < verify < monitor, with the monitor strictly inside the
-    verify-negated-if's `else` branch (reached only when verification
-    succeeds), not merely textually after the verify call where it could
-    run regardless of the outcome.
+    Each eligible cycle verifies source/startup paths and pinned ibapi, then
+    launches the strict read-only monitor with trusted system Python under
+    -I -P -S. The bootstrap appends dependency/application paths only after
+    the stdlib and does not invoke site processing.
     """
     assert _AUTOPILOT_LOOP_PATH.is_file(), f"missing {_AUTOPILOT_LOOP_PATH}"
-    lines = _AUTOPILOT_LOOP_PATH.read_text(encoding="utf-8").splitlines()
-    depths = _bash_conditional_depths(lines)
+    source = _AUTOPILOT_LOOP_PATH.read_text(encoding="utf-8")
 
-    activate_idx = next((i for i, l in enumerate(lines) if _ACTIVATE_RE.match(l)), None)
-    unset_idx = next((i for i, l in enumerate(lines) if _UNSET_PYTHONPATH_RE.match(l)), None)
-    verify_idx = next((i for i, l in enumerate(lines) if _VERIFY_SCRIPT_CALL_RE.search(l)), None)
-    first_use_idx = _find_first_ai_asset_platform_invocation(lines)
-
-    assert activate_idx is not None, "must source .venv/bin/activate"
-    assert unset_idx is not None, "must unset inherited PYTHONPATH"
-    assert verify_idx is not None, (
-        "must call scripts/verify_exact_checkout_import.py every cycle, before the monitor"
-    )
-    assert first_use_idx is not None, "must invoke the read-only monitor module"
-
-    assert activate_idx < unset_idx < verify_idx < first_use_idx, (
-        "expected activate -> unset PYTHONPATH -> verify -> monitor invocation, "
-        f"in that order; got activate={activate_idx} unset={unset_idx} "
-        f"verify={verify_idx} first_use={first_use_idx}"
+    assert "source .venv/bin/activate" not in source
+    assert "python scripts/verify_exact_checkout_import.py" not in source
+    assert "scripts/run_isolated_venv_python.py" not in source
+    assert "scripts/verify_strategy_source_clean.sh" in source
+    assert "scripts/verify_live_ibapi_runtime.py" in source
+    assert "/usr/bin/python3 -I -P -S" in source
+    assert "sys.path.extend([str(site_packages), str(src), str(root)])" in source
+    assert "sitecustomize" in source
+    assert (
+        "ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"
+        in source
     )
 
-    verify_line = lines[verify_idx].strip()
-    assert _AUTOPILOT_VERIFY_IF_RE.match(verify_line), (
-        f"expected the verify call to be the condition of a negated if; got: {verify_line!r}"
+    venv_gate_at = source.index('elif [[ -x .venv/bin/python ]]; then')
+    source_gate_at = source.index("scripts/verify_strategy_source_clean.sh")
+    ibapi_gate_at = source.index("scripts/verify_live_ibapi_runtime.py")
+    safe_python_at = source.index("/usr/bin/python3 -I -P -S - ")
+    monitor_at = source.index(
+        '"ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"'
     )
-
-    block_end = _block_end_index(lines, verify_idx, depths)
-    assert block_end is not None, "could not find the matching fi for the verify if-block"
-
-    body_depth = depths[verify_idx] + 1
-    else_idx = next(
-        (
-            i
-            for i in range(verify_idx + 1, block_end)
-            if depths[i] == body_depth and lines[i].strip() == "else"
-        ),
-        None,
-    )
-    assert else_idx is not None, (
-        "expected an else branch (reached only when verification succeeds) "
-        "containing the monitor invocation"
-    )
-    assert else_idx < first_use_idx < block_end, (
-        "expected the monitor invocation strictly inside the verify if's else branch "
-        f"(reachable only on verify success); got else={else_idx} "
-        f"first_use={first_use_idx} block_end={block_end}"
-    )
-    assert depths[first_use_idx] == body_depth, (
-        f"expected the monitor invocation at the else-branch's own depth ({body_depth}), "
-        f"got depth {depths[first_use_idx]} -- it may be further nested and skippable "
-        "independently of the verify outcome"
-    )
+    assert venv_gate_at < source_gate_at < ibapi_gate_at < safe_python_at < monitor_at
 
 
 def test_ibkr_readonly_soak_clears_pythonpath_before_first_use():
@@ -1713,18 +1682,11 @@ def test_all_self_updating_wrappers_bind_exact_checkout_before_first_use():
     )
 
 
-# `ibkr_readonly_autopilot.sh` never fetches/pulls/switches/executes newly
-# downloaded code by design (verified: zero mutating git commands) -- its
-# own `.venv` binding is guaranteed correct not by anything in this file,
-# but because `install_ibkr_readonly_autopilot.sh` already runs the same
-# migrate-then-verify gate before every `systemctl --user restart` that
-# (re)starts this service (see
-# `test_install_autopilot_migrates_and_verifies_before_restart`). Adding
-# a redundant in-process gate here would not be wrong, but it would also
-# not be needed, and the "never auto-updates" design of this specific file
-# is deliberately left untouched (Codex PR #287 P1, `live_cash_readiness_once.sh`
-# review) rather than changed without a safety need.
-_INSTALLER_GATED_EXEMPT = {"ibkr_readonly_autopilot.sh"}
+# The unattended autopilot moved off the legacy
+# activate -> unset -> exact-checkout-helper pattern in the 2026-09-25
+# Issue #285 hardening slice. It now has a dedicated safe-path runtime test
+# above and is no longer part of this legacy-wrapper gate inventory.
+_INSTALLER_GATED_EXEMPT: set[str] = set()
 
 
 def test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_first_use():
@@ -1753,13 +1715,9 @@ def test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_f
     self_updating = set(_discover_self_updating_wrappers())
     non_self_updating = sorted(operational - self_updating, key=lambda p: p.name)
 
-    assert len(non_self_updating) >= 7, (
-        f"expected at least 7 non-self-updating operational wrappers, found "
+    assert len(non_self_updating) >= 6, (
+        f"expected at least 6 legacy-pattern non-self-updating operational wrappers, found "
         f"{len(non_self_updating)}: {[w.name for w in non_self_updating]}"
-    )
-    assert any(w.name in _INSTALLER_GATED_EXEMPT for w in non_self_updating), (
-        "expected ibkr_readonly_autopilot.sh among the non-self-updating "
-        "operational wrappers (installer-gated exemption would otherwise be dead code)"
     )
 
     failures = []
@@ -1771,11 +1729,11 @@ def test_all_non_self_updating_operational_wrappers_bind_exact_checkout_before_f
         lines = path.read_text(encoding="utf-8").splitlines()
         failures.extend(_check_exact_checkout_binding(path.name, lines))
 
-    # Three strategy-promotion/Paper wrappers now invoke their venv Python
-    # through an explicit env -i boundary instead of the legacy
-    # activate -> unset -> helper pattern counted by this checker. Keep this
-    # sanity floor aligned with the remaining legacy-pattern wrappers; the
-    # sanitized wrappers have dedicated source-gate regression coverage.
+    # Several wrappers, including the unattended autopilot, now use dedicated
+    # sanitized/safe-path launch paths instead of this legacy
+    # activate -> unset -> helper pattern. Keep this sanity floor aligned with
+    # the remaining legacy-pattern wrappers; isolated paths have dedicated
+    # regression coverage.
     assert checked >= 6, (
         f"expected at least 6 legacy-pattern non-self-updating wrappers to "
         f"require the gate (all but the installer-gated exemption), found {checked}"

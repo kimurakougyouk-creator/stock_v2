@@ -8,8 +8,15 @@ PIN_DIR="$HOME/.config/ai-asset-platform"
 PIN_FILE="$PIN_DIR/ibkr-readonly-autopilot-pinned-head"
 
 cd "$REPO_DIR"
-if [[ ! -f .venv/bin/activate ]]; then
-  echo "BLOCKED: .venv/bin/activate not found. No order was sent."
+if [[ ! -x .venv/bin/python || ! -f .venv/bin/activate ]]; then
+  echo "BLOCKED: .venv Python/activate is unavailable. No order was sent."
+  exit 2
+fi
+
+TRUSTED_PYTHON_REAL="$(/usr/bin/readlink -f -- /usr/bin/python3 2>/dev/null || true)"
+VENV_PYTHON_REAL="$(/usr/bin/readlink -f -- .venv/bin/python 2>/dev/null || true)"
+if [[ -z "$TRUSTED_PYTHON_REAL" || "$VENV_PYTHON_REAL" != "$TRUSTED_PYTHON_REAL" ]]; then
+  echo "BLOCKED: existing .venv was not created with trusted /usr/bin/python3. Recreate it before installing the autopilot. No order was sent." >&2
   exit 2
 fi
 if [[ "$(git branch --show-current 2>/dev/null || true)" != "main" ]]; then
@@ -30,6 +37,7 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 unset PYTHONPATH
+unset PYTHONHOME PYTHONSTARTUP
 
 # Migrate any pre-existing .venv (created before editable install was
 # required) to the current checkout, and fail closed if ai_asset_platform
@@ -63,10 +71,11 @@ After=default.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO_DIR
-ExecStart=/usr/bin/env bash $REPO_DIR/ibkr_readonly_autopilot.sh
+ExecStart=/bin/sh $REPO_DIR/ibkr_readonly_autopilot.sh
 Restart=always
 RestartSec=15
 UMask=0077
+UnsetEnvironment=BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP LD_PRELOAD LD_LIBRARY_PATH
 Environment=IBKR_REPO_DIR=$REPO_DIR
 Environment=IBKR_AUTOPILOT_INTERVAL_SECONDS=300
 Environment=IBKR_AUTOPILOT_PIN_FILE=$PIN_FILE
