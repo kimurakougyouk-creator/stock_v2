@@ -32,6 +32,10 @@ A reviewer or Claude GO/NO-GO verdict is advisory evidence, not merge permission
 
 GitHub read access also grants no broker-write or Live-trading authority.
 
+### Standing autonomous-mode authorization (2026-10-03, user-confirmed)
+
+The user has given standing (not per-instance) authorization for Claude Code to run, without stopping to ask first: read-only repo/GitHub/canonical-doc investigation; Phase/critical-path checks; A/B/C classification; A-blocker root-cause analysis; the smallest fix on a feature branch; running relevant tests; `git push` to that feature branch (never `main`); opening/updating a PR for that fix; monitoring CI; requesting Codex's independent review on the exact PR HEAD; and, if Codex finds a genuine A blocker, fixing it and repeating the test/push/CI/review cycle. Merge and every other action in the GitHub write-authority list above (and the broker/funds/credential/risk-gate list elsewhere in this document) remain excluded from this standing authorization and still require a fresh, per-action explicit user authorization. This note adds no new completion condition, Phase, or critical-path item.
+
 ## Independent audit minimum evidence
 
 Before any GO/NO-GO or acceptance decision, independently verify the current `main`, exact proposed HEAD, relevant diff, current exact-head CI, unresolved non-outdated review threads, governing Issue/checklist, and safety invariants. Do not treat an agent's self-report as proof. If the current session cannot directly access a required source, mark that evidence `UNVERIFIED` and state the limitation.
