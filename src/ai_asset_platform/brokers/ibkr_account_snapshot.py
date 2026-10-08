@@ -115,13 +115,24 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         if normalized_key == "accountReady":
             self.account_ready = str(val).strip().lower() not in {"false", "0", "no"}
             return
+        update_key = (normalized_key, normalized_currency)
         parsed = _finite_float(val)
         if parsed is not None:
-            self.account_values[(normalized_key, normalized_currency)] = parsed
+            self.account_values[update_key] = parsed
+            # A later numeric update supersedes any earlier non-numeric one for
+            # the same (key, currency); never let a stale text observation
+            # coexist with a newer numeric value.
+            self.account_text_values.pop(update_key, None)
             return
         text = str(val).strip()
         if text:
-            self.account_text_values[(normalized_key, normalized_currency)] = text
+            self.account_text_values[update_key] = text
+            # Symmetric with the above: a later non-numeric update (for
+            # example a value becoming invalid/unavailable mid-subscription)
+            # must retire any earlier numeric value for the same key so a
+            # stale numeric balance can never outlive the update that
+            # invalidated it.
+            self.account_values.pop(update_key, None)
 
     def updatePortfolio(  # noqa: N802
         self,
@@ -164,10 +175,12 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         parsed = _finite_float(value)
         if parsed is not None:
             self.summary_values[key] = parsed
+            self.summary_text_values.pop(key, None)
             return
         text = str(value).strip()
         if text:
             self.summary_text_values[key] = text
+            self.summary_values.pop(key, None)
 
     def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
         self.summary_ready.set()
