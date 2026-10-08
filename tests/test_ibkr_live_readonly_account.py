@@ -82,6 +82,71 @@ def test_conflicting_prefixed_and_legacy_settled_cash_fails_closed_for_currency(
     assert module._settled_cash_by_currency(probe) == {"USD": 125.5}
 
 
+def test_confirmed_cash_account_backfills_settled_cash_from_total_cash_value():
+    probe = SimpleNamespace(
+        account_values={
+            ("TotalCashValue", "JPY"): 20000.0,
+            ("AvailableFunds", "JPY"): 20000.0,
+        },
+        summary_text_values={("TradingType-S", ""): "STKCASH"},
+    )
+    assert module._settled_cash_by_currency(probe) == {"JPY": 20000.0}
+
+
+def test_margin_account_never_backfills_settled_cash_from_total_cash_value():
+    probe = SimpleNamespace(
+        account_values={("TotalCashValue", "JPY"): 20000.0},
+        summary_text_values={("TradingType-S", ""): "STKMRGN"},
+    )
+    assert module._settled_cash_by_currency(probe) == {}
+
+
+def test_unknown_trading_type_never_backfills_settled_cash():
+    probe = SimpleNamespace(
+        account_values={("TotalCashValue", "JPY"): 20000.0},
+        summary_text_values={},
+    )
+    assert module._settled_cash_by_currency(probe) == {}
+
+
+def test_cash_account_backfill_never_overrides_a_real_settled_cash_value():
+    probe = SimpleNamespace(
+        account_values={
+            ("SettledCash", "JPY"): 5000.0,
+            ("TotalCashValue", "JPY"): 20000.0,
+        },
+        summary_text_values={("TradingType-S", ""): "STKCASH"},
+    )
+    assert module._settled_cash_by_currency(probe) == {"JPY": 5000.0}
+
+
+def test_cash_account_backfill_fails_closed_on_conflicting_total_cash_value():
+    probe = SimpleNamespace(
+        account_values={
+            ("TotalCashValue", "JPY"): 20000.0,
+            ("$LEDGER-TotalCashBalance", "JPY"): 19999.0,
+        },
+        summary_text_values={("TradingType-S", ""): "STKCASH"},
+    )
+    assert module._settled_cash_by_currency(probe) == {}
+
+
+def test_segment_trading_type_is_read_fresh_and_not_inferred():
+    assert module._segment_trading_type(SimpleNamespace()) is None
+    assert (
+        module._segment_trading_type(
+            SimpleNamespace(summary_text_values={("TradingType-S", ""): "stkcash"})
+        )
+        == "STKCASH"
+    )
+    assert (
+        module._segment_trading_type(
+            SimpleNamespace(summary_text_values={("TradingType-S", ""): ""})
+        )
+        is None
+    )
+
+
 def test_nonfinite_settled_cash_is_never_accepted():
     probe = SimpleNamespace(
         account_values={

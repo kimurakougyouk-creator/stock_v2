@@ -96,6 +96,7 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         self.account_ready = True
         self.account_values: dict[tuple[str, str], float] = {}
         self.summary_values: dict[tuple[str, str], float] = {}
+        self.summary_text_values: dict[tuple[str, str], str] = {}
         self.portfolio: list[IbkrBrokerPosition] = []
         self.errors: list[str] = []
         self.fatal_error: str | None = None
@@ -154,10 +155,14 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         self.download_ready.set()
 
     def accountSummary(self, reqId, account, tag, value, currency):  # noqa: N802
+        key = (str(tag).strip(), str(currency).strip().upper())
         parsed = _finite_float(value)
-        if parsed is None:
+        if parsed is not None:
+            self.summary_values[key] = parsed
             return
-        self.summary_values[(str(tag).strip(), str(currency).strip().upper())] = parsed
+        text = str(value).strip()
+        if text:
+            self.summary_text_values[key] = text
 
     def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
         self.summary_ready.set()
