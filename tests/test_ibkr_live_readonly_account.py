@@ -170,6 +170,27 @@ def test_cash_account_backfill_never_resurrects_a_conflicting_settled_cash_curre
     assert module._settled_cash_by_currency(probe) == {}
 
 
+def test_cash_account_backfill_never_resurrects_an_invalid_nonnumeric_settled_cash():
+    probe = SimpleNamespace(
+        account_values={
+            ("TotalCashValue-S", "JPY"): 20000.0,
+            ("EquityWithLoanValue-S", "JPY"): 20000.0,
+        },
+        account_text_values={("SettledCash", "JPY"): "-"},
+        summary_text_values={("TradingType-S", ""): "STKCASH"},
+        portfolio=[],
+    )
+    assert module._settled_cash_by_currency(probe) == {}
+
+
+def test_currencies_observed_under_keys_includes_nonnumeric_observations():
+    probe = SimpleNamespace(
+        account_values={},
+        account_text_values={("SettledCash", "JPY"): "nan"},
+    )
+    assert module._currencies_observed_under_keys(probe, module._SETTLED_CASH_KEYS) == {"JPY"}
+
+
 def test_segment_trading_type_is_read_fresh_and_not_inferred():
     assert module._segment_trading_type(SimpleNamespace()) is None
     assert (

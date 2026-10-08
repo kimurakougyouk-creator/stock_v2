@@ -165,6 +165,34 @@ def _unambiguous_values_by_currency(
     return balances, set(observations.keys())
 
 
+def _currencies_observed_under_keys(probe: object, keys: set[str]) -> set[str]:
+    """Return every currency with ANY observation under ``keys``, valid or not.
+
+    Scans both the numeric ``account_values`` and the non-numeric
+    ``account_text_values`` (an invalid/placeholder SettledCash value such as
+    ``"-"`` or a literal ``"nan"`` string lands in the latter, never the
+    former). This lets a caller treat "observed but invalid" the same as
+    "observed but conflicting" -- never backfill-eligible -- instead of only
+    catching currencies that happened to parse as a finite number.
+    """
+    observed: set[str] = set()
+    for attr in ("account_values", "account_text_values"):
+        source = getattr(probe, attr, None)
+        if not isinstance(source, dict):
+            continue
+        for (key, currency), _value in source.items():
+            if key not in keys:
+                continue
+            normalized_currency = str(currency or "").strip().upper()
+            if (
+                len(normalized_currency) == 3
+                and normalized_currency.isalpha()
+                and normalized_currency != "BASE"
+            ):
+                observed.add(normalized_currency)
+    return observed
+
+
 def _segment_trading_type(probe: object) -> str | None:
     """Return the official, per-run ``TradingType-S`` value, if observed.
 
@@ -204,17 +232,17 @@ def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
 
     If the account's official, same-run ``TradingType-S`` tag confirms a Cash
     account (exact value ``STKCASH``) and the account currently holds zero open
-    positions, a currency that was never observed under a SettledCash key (not
-    even a conflicting observation) is additionally backfilled from the
-    securities-segment-scoped ``TotalCashValue-S``/``EquityWithLoanValue-S``
-    equivalent -- IBKR's own documentation defines these as identical to
-    settled cash for a Cash account, so this is not a fallback/substitute
-    value. A currency with any real SettledCash observation, including one
-    excluded for conflicting, is never touched by this backfill.
+    positions, a currency that was never observed under a SettledCash key at
+    all -- not a conflicting observation, and not an invalid/non-numeric one
+    either -- is additionally backfilled from the securities-segment-scoped
+    ``TotalCashValue-S``/``EquityWithLoanValue-S`` equivalent -- IBKR's own
+    documentation defines these as identical to settled cash for a Cash
+    account, so this is not a fallback/substitute value. A currency with any
+    real SettledCash observation, including one excluded for conflicting or
+    for being non-numeric, is never touched by this backfill.
     """
-    balances, observed_settled_currencies = _unambiguous_values_by_currency(
-        probe.account_values, _SETTLED_CASH_KEYS
-    )
+    balances, _ = _unambiguous_values_by_currency(probe.account_values, _SETTLED_CASH_KEYS)
+    observed_settled_currencies = _currencies_observed_under_keys(probe, _SETTLED_CASH_KEYS)
     has_open_positions = bool(getattr(probe, "portfolio", None))
     if (
         not has_open_positions
