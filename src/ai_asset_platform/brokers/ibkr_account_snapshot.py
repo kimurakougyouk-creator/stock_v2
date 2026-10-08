@@ -124,15 +124,15 @@ class _AccountSnapshotProbe(EWrapper, EClient):
             # coexist with a newer numeric value.
             self.account_text_values.pop(update_key, None)
             return
-        text = str(val).strip()
-        if text:
-            self.account_text_values[update_key] = text
-            # Symmetric with the above: a later non-numeric update (for
-            # example a value becoming invalid/unavailable mid-subscription)
-            # must retire any earlier numeric value for the same key so a
-            # stale numeric balance can never outlive the update that
-            # invalidated it.
-            self.account_values.pop(update_key, None)
+        # Record every non-numeric update, including a blank/whitespace-only
+        # value -- IBKR uses that to mean "no longer known" -- so this (key,
+        # currency) is still on record as observed this run (needed so a
+        # caller can refuse to backfill a currency IBKR just told us is
+        # unavailable) and, symmetrically with the numeric branch above, so a
+        # stale numeric value can never outlive the update that invalidated
+        # it just because the new value happened to be blank.
+        self.account_text_values[update_key] = str(val).strip()
+        self.account_values.pop(update_key, None)
 
     def updatePortfolio(  # noqa: N802
         self,
@@ -177,10 +177,10 @@ class _AccountSnapshotProbe(EWrapper, EClient):
             self.summary_values[key] = parsed
             self.summary_text_values.pop(key, None)
             return
-        text = str(value).strip()
-        if text:
-            self.summary_text_values[key] = text
-            self.summary_values.pop(key, None)
+        # Same reasoning as updateAccountValue above: record every non-numeric
+        # update, blank or not, and retire any stale numeric value for this key.
+        self.summary_text_values[key] = str(value).strip()
+        self.summary_values.pop(key, None)
 
     def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
         self.summary_ready.set()
