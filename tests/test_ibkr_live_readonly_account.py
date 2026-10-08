@@ -82,6 +82,42 @@ def test_conflicting_prefixed_and_legacy_settled_cash_fails_closed_for_currency(
     assert module._settled_cash_by_currency(probe) == {"USD": 125.5}
 
 
+def test_backfill_requires_both_equivalent_keys_not_just_one():
+    probe = SimpleNamespace(
+        account_values={("TotalCashValue-S", "JPY"): 20000.0},
+        summary_text_values={("TradingType-S", ""): "STKCASH"},
+        portfolio=[],
+    )
+    assert module._settled_cash_by_currency(probe) == {}
+
+
+def test_agreeing_values_present_for_every_key_rejects_a_single_key():
+    assert module._agreeing_values_present_for_every_key(
+        {("TotalCashValue-S", "JPY"): 20000.0},
+        {"TotalCashValue-S", "EquityWithLoanValue-S"},
+    ) == {}
+
+
+def test_agreeing_values_present_for_every_key_accepts_both_agreeing():
+    assert module._agreeing_values_present_for_every_key(
+        {
+            ("TotalCashValue-S", "JPY"): 20000.0,
+            ("EquityWithLoanValue-S", "JPY"): 20000.0,
+        },
+        {"TotalCashValue-S", "EquityWithLoanValue-S"},
+    ) == {"JPY": 20000.0}
+
+
+def test_agreeing_values_present_for_every_key_rejects_disagreement():
+    assert module._agreeing_values_present_for_every_key(
+        {
+            ("TotalCashValue-S", "JPY"): 20000.0,
+            ("EquityWithLoanValue-S", "JPY"): 19999.0,
+        },
+        {"TotalCashValue-S", "EquityWithLoanValue-S"},
+    ) == {}
+
+
 def test_confirmed_cash_account_backfills_settled_cash_from_segment_scoped_equivalent():
     probe = SimpleNamespace(
         account_values={

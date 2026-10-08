@@ -193,6 +193,49 @@ def _currencies_observed_under_keys(probe: object, keys: set[str]) -> set[str]:
     return observed
 
 
+def _agreeing_values_present_for_every_key(
+    account_values: dict[tuple[str, str], float], keys: set[str]
+) -> dict[str, float]:
+    """Return per-currency values observed under EVERY key in ``keys``, agreeing.
+
+    Unlike ``_unambiguous_values_by_currency`` (where any one of several
+    alternate names for the same field, such as ``SettledCash``/
+    ``$LEDGER-SettledCash``, is sufficient), this requires an independent
+    observation under each distinct key before accepting a currency -- a
+    currency with only one of the keys present is excluded, not trivially
+    accepted, because an ``all()`` over a single-element (or empty) remainder
+    is vacuously true and would otherwise skip the cross-check entirely.
+    """
+    per_key_values: dict[str, dict[str, float]] = {}
+    for (key, currency), value in account_values.items():
+        if key not in keys:
+            continue
+        normalized_currency = str(currency or "").strip().upper()
+        if (
+            len(normalized_currency) != 3
+            or not normalized_currency.isalpha()
+            or normalized_currency == "BASE"
+        ):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(parsed):
+            continue
+        per_key_values.setdefault(normalized_currency, {})[key] = parsed
+
+    balances: dict[str, float] = {}
+    for currency, by_key in per_key_values.items():
+        if set(by_key.keys()) != keys:
+            continue
+        values = list(by_key.values())
+        first = values[0]
+        if all(math.isclose(item, first, rel_tol=1e-12, abs_tol=1e-9) for item in values[1:]):
+            balances[currency] = first
+    return balances
+
+
 def _segment_trading_type(probe: object) -> str | None:
     """Return the official, per-run ``TradingType-S`` value, if observed.
 
@@ -237,7 +280,9 @@ def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
     either -- is additionally backfilled from the securities-segment-scoped
     ``TotalCashValue-S``/``EquityWithLoanValue-S`` equivalent -- IBKR's own
     documentation defines these as identical to settled cash for a Cash
-    account, so this is not a fallback/substitute value. A currency with any
+    account, so this is not a fallback/substitute value. Both of those keys
+    must be independently observed and agree; a currency with only one of
+    them present is excluded, not trivially accepted. A currency with any
     real SettledCash observation, including one excluded for conflicting or
     for being non-numeric, is never touched by this backfill.
     """
@@ -248,7 +293,7 @@ def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
         not has_open_positions
         and _segment_trading_type(probe) in _CASH_ACCOUNT_TRADING_TYPES
     ):
-        equivalent, _ = _unambiguous_values_by_currency(
+        equivalent = _agreeing_values_present_for_every_key(
             probe.account_values, _CASH_ACCOUNT_SETTLED_CASH_EQUIVALENT_KEYS
         )
         for currency, value in equivalent.items():
