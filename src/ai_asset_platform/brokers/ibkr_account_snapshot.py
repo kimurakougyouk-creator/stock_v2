@@ -95,6 +95,7 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         self.accounts: list[str] = []
         self.account_ready = True
         self.account_values: dict[tuple[str, str], float] = {}
+        self.account_text_values: dict[tuple[str, str], str] = {}
         self.summary_values: dict[tuple[str, str], float] = {}
         self.summary_text_values: dict[tuple[str, str], str] = {}
         self.portfolio: list[IbkrBrokerPosition] = []
@@ -117,6 +118,10 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         parsed = _finite_float(val)
         if parsed is not None:
             self.account_values[(normalized_key, normalized_currency)] = parsed
+            return
+        text = str(val).strip()
+        if text:
+            self.account_text_values[(normalized_key, normalized_currency)] = text
 
     def updatePortfolio(  # noqa: N802
         self,

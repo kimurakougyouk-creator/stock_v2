@@ -22,14 +22,28 @@ omitted so the downstream cash gate fails closed rather than choosing one value.
 
 Some IBKR accounts never emit a ``SettledCash``/``$LEDGER-SettledCash`` value at
 all. IBKR's own ``AccountSummaryTags``/``Account Value Keys`` references state
-that, for a Cash account, SettledCash is defined to equal TotalCashValue. This
-module confirms the account is a Cash account from the official, per-run,
-read-only ``TradingType-S`` tag (exact value ``STKCASH``) before treating
-TotalCashValue as settled cash for a currency that has no distinct SettledCash
-value of its own. This is additive only: it never overrides a currency that
-already has a real SettledCash/$LEDGER-SettledCash value, and it is inert
-(behaves exactly as before) whenever TradingType-S is missing, ambiguous, or
-anything other than the exact confirmed Cash-account value.
+that, for a Cash account, SettledCash is defined to equal TotalCashValue (and
+that EquityWithLoanValue-S is itself defined as Settled Cash for a Cash
+account). This module confirms the account is a Cash account from the
+official, per-run, read-only ``TradingType-S`` tag (exact value ``STKCASH``,
+captured from both ``updateAccountValue`` and ``accountSummary`` -- IBKR
+documents it under the former but this account's API answers it under both --
+so the check is not dependent on either single delivery path) before treating
+the securities-segment settled-cash equivalent as settled cash for a currency
+that has no distinct SettledCash value of its own. The equivalent is read only
+from the securities-segment-scoped tags (``TotalCashValue-S`` and
+``EquityWithLoanValue-S``), never the unsuffixed/blended totals, because
+TradingType-S only certifies the securities segment and a universal account
+could hold a separate commodities segment. The backfill is further restricted
+to a run with zero open positions, so there is no in-flight trade whose
+proceeds could appear in total cash before they are actually settled.
+
+This is additive only: it never overrides a currency that already has a real
+SettledCash/$LEDGER-SettledCash observation -- even one later excluded as
+conflicting, which remains excluded rather than silently backfilled -- and it
+is inert (behaves exactly as before) whenever TradingType-S is missing,
+ambiguous, anything other than the exact confirmed Cash-account value, or the
+account holds any open position.
 """
 from __future__ import annotations
 
@@ -60,7 +74,12 @@ LIVE_GATEWAY_PORT = 4001
 LIVE_TWS_PORT = 7496
 REPORT_SCHEMA_VERSION = 3
 _SETTLED_CASH_KEYS = {"SettledCash", "$LEDGER-SettledCash"}
-_TOTAL_CASH_VALUE_KEYS = {"TotalCashValue", "$LEDGER-TotalCashBalance"}
+# Securities-segment-scoped only (never the unsuffixed/blended totals): IBKR
+# documents EquityWithLoanValue-S as literally "Settled Cash" for a Cash
+# account, and TotalCashValue-S as that segment's cash. Cross-checking both
+# keeps the same fail-closed-on-conflict behavior as the SettledCash keys
+# above instead of trusting a single field.
+_CASH_ACCOUNT_SETTLED_CASH_EQUIVALENT_KEYS = {"TotalCashValue-S", "EquityWithLoanValue-S"}
 _SEGMENT_TRADING_TYPE_TAG = "TradingType-S"
 _CASH_ACCOUNT_TRADING_TYPES = {"STKCASH"}
 
@@ -110,12 +129,14 @@ def _account_fingerprint(account_id: str) -> str:
 
 def _unambiguous_values_by_currency(
     account_values: dict[tuple[str, str], float], keys: set[str]
-) -> dict[str, float]:
-    """Return finite per-currency values observed under any of ``keys``.
+) -> tuple[dict[str, float], set[str]]:
+    """Return (unambiguous finite per-currency values, currencies observed at all).
 
     If more than one key in ``keys`` reports a value for the same currency and
-    those values disagree, that currency is excluded so a caller cannot treat
-    conflicting evidence as a single authoritative number.
+    those values disagree, that currency is left out of the returned mapping --
+    but it is still included in the returned set, so a caller can tell "never
+    observed" apart from "observed but invalid/conflicting" instead of silently
+    treating both the same way.
     """
     observations: dict[str, list[float]] = {}
     for (key, currency), value in account_values.items():
@@ -141,24 +162,35 @@ def _unambiguous_values_by_currency(
         first = values[0]
         if all(math.isclose(item, first, rel_tol=1e-12, abs_tol=1e-9) for item in values[1:]):
             balances[currency] = first
-    return balances
+    return balances, set(observations.keys())
 
 
 def _segment_trading_type(probe: object) -> str | None:
     """Return the official, per-run ``TradingType-S`` value, if observed.
 
     This is the IBKR-documented securities-segment account type (for example
-    ``STKCASH`` for a Cash account). It is read fresh on every call; nothing is
-    cached, hardcoded, or inferred from a prior manual confirmation.
+    ``STKCASH`` for a Cash account). IBKR documents this tag under
+    ``updateAccountValue``, but this account's API has also answered it under
+    ``accountSummary``; both delivery paths are checked so the result does not
+    depend on either one alone. It is read fresh on every call; nothing is
+    cached, hardcoded, or inferred from a prior manual confirmation. If the two
+    paths disagree, the value is treated as unconfirmed (``None``) rather than
+    picking one.
     """
-    text_values = getattr(probe, "summary_text_values", None)
-    if not isinstance(text_values, dict):
-        return None
-    value = text_values.get((_SEGMENT_TRADING_TYPE_TAG, ""))
-    if value is None:
-        return None
-    normalized = str(value).strip().upper()
-    return normalized or None
+    observed: set[str] = set()
+    for attr in ("summary_text_values", "account_text_values"):
+        text_values = getattr(probe, attr, None)
+        if not isinstance(text_values, dict):
+            continue
+        value = text_values.get((_SEGMENT_TRADING_TYPE_TAG, ""))
+        if value is None:
+            continue
+        normalized = str(value).strip().upper()
+        if normalized:
+            observed.add(normalized)
+    if len(observed) == 1:
+        return next(iter(observed))
+    return None
 
 
 def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
@@ -171,21 +203,29 @@ def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
     spendable settled cash.
 
     If the account's official, same-run ``TradingType-S`` tag confirms a Cash
-    account (exact value ``STKCASH``), a currency that has no SettledCash value
-    of its own is additionally backfilled from TotalCashValue/
-    ``$LEDGER-TotalCashBalance`` -- IBKR's own documentation defines SettledCash
-    as identical to TotalCashValue for Cash accounts, so this is not a
-    fallback/substitute value. It never overrides a currency that already has a
-    real SettledCash observation, and it has no effect at all unless
-    TradingType-S is present and exactly equal to a confirmed Cash-account
-    value.
+    account (exact value ``STKCASH``) and the account currently holds zero open
+    positions, a currency that was never observed under a SettledCash key (not
+    even a conflicting observation) is additionally backfilled from the
+    securities-segment-scoped ``TotalCashValue-S``/``EquityWithLoanValue-S``
+    equivalent -- IBKR's own documentation defines these as identical to
+    settled cash for a Cash account, so this is not a fallback/substitute
+    value. A currency with any real SettledCash observation, including one
+    excluded for conflicting, is never touched by this backfill.
     """
-    balances = _unambiguous_values_by_currency(probe.account_values, _SETTLED_CASH_KEYS)
-    if _segment_trading_type(probe) in _CASH_ACCOUNT_TRADING_TYPES:
-        total_cash = _unambiguous_values_by_currency(
-            probe.account_values, _TOTAL_CASH_VALUE_KEYS
+    balances, observed_settled_currencies = _unambiguous_values_by_currency(
+        probe.account_values, _SETTLED_CASH_KEYS
+    )
+    has_open_positions = bool(getattr(probe, "portfolio", None))
+    if (
+        not has_open_positions
+        and _segment_trading_type(probe) in _CASH_ACCOUNT_TRADING_TYPES
+    ):
+        equivalent, _ = _unambiguous_values_by_currency(
+            probe.account_values, _CASH_ACCOUNT_SETTLED_CASH_EQUIVALENT_KEYS
         )
-        for currency, value in total_cash.items():
+        for currency, value in equivalent.items():
+            if currency in observed_settled_currencies:
+                continue
             balances.setdefault(currency, value)
     return dict(sorted(balances.items()))
 
@@ -267,7 +307,9 @@ def preview_ibkr_live_readonly_account_snapshot(
                 1991,
                 "All",
                 "NetLiquidation,AvailableFunds,GrossPositionValue,TotalCashValue,"
-                + _SEGMENT_TRADING_TYPE_TAG,
+                + _SEGMENT_TRADING_TYPE_TAG
+                + ","
+                + ",".join(sorted(_CASH_ACCOUNT_SETTLED_CASH_EQUIVALENT_KEYS)),
             )
             download_complete = probe.download_ready.wait(timeout)
             summary_complete = probe.summary_ready.wait(timeout)
