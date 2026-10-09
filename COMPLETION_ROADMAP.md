@@ -292,36 +292,25 @@ Before V1 acceptance, documented and tested procedures must exist for:
 
 Every expansion — new ticker quantity, market, broker, derivative, crypto, wider notional, unattended Live write capability — is a new promotion decision with its own evidence. V1 completion cannot silently widen scope.
 
-## E. Windows runtime proof (added 2026-10-09, post-incident)
+---
 
-### What happened
-On 2026-10-09, immediately before what was intended to be the first Live pilot execution window, running the already-"ready" operational entrypoint on the operator's real Windows machine failed at the first line: `ModuleNotFoundError: fcntl` / `pwd`. These are POSIX-only modules unconditionally imported at module load time by `live_pilot_completion.py` and `live_pilot_send_journal.py`. The entire Live Pilot production chain had never actually been run, or even imported, on Windows before that moment — not by CI, not by any prior preparation step.
+# Incident record and recommended practices (non-binding)
 
-### Root cause (verified from the exact CI configuration, not inferred)
-- `pytest.yml` — the required check gating every merge to `main` — runs `pytest -q` only on `runs-on: ubuntu-latest`. It has always passed, because `fcntl`/`pwd` import fine on Linux.
-- A second workflow, `windows-readonly-autopilot.yml`, does run on `runs-on: windows-latest`, but its `paths:` trigger filter is scoped only to the Paper-monitor read-only autopilot script/tests. It has never once executed anything under `src/ai_asset_platform/execution/live_pilot_*` or `tests/test_live_pilot_*`.
-- Net effect: a Windows-only import failure in the exact production entrypoint the operator must run could ship through an arbitrary number of merged PRs, each fully green, with nobody — AI or human — ever having exercised that code path on the operator's actual platform.
+The two items below are **not** cross-cutting gates A–D and are **not** required for `V1_PRODUCTION_COMPLETE`. They are a dated record of a real incident and recommended follow-on hardening, kept here so the lesson is not lost — but they do not gate merge, Phase advancement, or any existing completion condition unless and until the user explicitly promotes a specific item to a required gate. (A 2026-10-09 review found that an earlier revision of this section incorrectly added these as permanent gates on par with A–D without that explicit promotion; this is the corrected form — see PR #339/#338 history.)
 
-### Gate (permanent, applies to every future Live Pilot execution-chain change)
-Before any change under `src/ai_asset_platform/execution/live_pilot_*.py` (or any module it imports at module scope) is treated as execution-ready:
-1. CI must include a `windows-latest` job that actually imports and runs the test suite for every module in the real Live Pilot operational chain (`live_pilot_single_send.py`, `live_pilot_completion.py`, `live_pilot_send_journal.py`, `live_pilot_one_shot_authorization.py`, `live_pilot_operational_entrypoint.py`), not just the Paper-monitor autopilot script.
-2. That Windows job must be a required status check on `main` for changes touching those paths, equivalent in force to `pytest`/`release-integrity-gate` — advisory-only CI does not satisfy this gate, because an advisory check is exactly what let this incident through undetected.
-3. "Prepared exact execution-day commands" (Phase 1) are never declared ready based on code review or Linux CI alone. They must have been actually executed (import + dry run, not live transmission) on a real instance of the operator's target OS at least once since the last change to that code path.
-4. Any platform-conditional code path (anything branching on `sys.platform`) touching a durability, locking, or exactly-once primitive requires the same empirical-verification discipline used for the fcntl/pwd fix itself: do not reason from documentation or prior assumption about a Win32 API's behavior (ERRORS, required access rights, required privileges) — call it, observe the actual return value and `GetLastError()`, and only encode behavior the process has actually observed. (The first fix attempt for this exact incident shipped a judgment call — "best-effort, ignore `FlushFileBuffers` failure" — based on an incorrect privilege-requirement assumption; Codex's independent review caught it, and empirical re-testing showed the real defect was a wrong access mask, not a missing privilege. The lesson generalizes beyond this one call site.)
+## Incident: Windows runtime never exercised before pilot day (2026-10-09)
 
-### Exit criterion for this gate
-`windows-readonly-autopilot.yml` (or an equivalent new required workflow) covers the full Live Pilot execution chain and is a required check on `main`. Tracked as a direct follow-on to the fcntl/pwd fix (PR #337); to be opened once #337 is merged, since the expanded Windows job would otherwise fail against pre-fix `main`.
+On 2026-10-09, immediately before what was intended to be the first Live pilot execution window, running the already-"ready" operational entrypoint on the operator's real Windows machine failed at the first line: `ModuleNotFoundError: fcntl` / `pwd`. These are POSIX-only modules unconditionally imported at module load time by `live_pilot_completion.py` and `live_pilot_send_journal.py`. The entire Live Pilot production chain had never actually been run, or even imported, on Windows before that moment — not by CI, not by any prior preparation step. This was a genuine A blocker (it broke the existing Phase 1/3 requirement that execution-day commands actually run) and was fixed in PR #337 with empirical, re-tested evidence; that fix itself is binding, this record of the incident is not.
 
-## F. Operator capability rehearsal (added 2026-10-09, post-incident)
+Root cause, verified from the exact CI configuration: `pytest.yml` (the required merge check) runs only on `ubuntu-latest`; a separate `windows-readonly-autopilot.yml` runs on `windows-latest` but its `paths:` trigger never covered `src/ai_asset_platform/execution/live_pilot_*` or its tests. A Windows-only failure in the exact production entrypoint could therefore ship through any number of merged, fully-green PRs undetected.
 
-### What happened
-Separately from the Windows CI gap, the same incident window exposed that every "unavoidable operator action" the roadmap assumes (broker-side Read-Only removal, TWS GUI order entry, GitHub PR merge) was being asked of the operator for the first time under live, consequential, time-pressured conditions — with no prior confirmation the operator could actually perform the mechanical steps involved (the operator could not locate/operate the TWS order screen; separately, the browser session used to view the merge button was not authenticated to GitHub, which was only discovered when the click did nothing).
+**Recommended (not required) follow-on**: expand Windows CI to cover the full Live Pilot execution chain, and promote it to a required check for changes under that path — but only if and when the user decides this is worth the added CI/process weight. Until then, Phase 1's existing requirement to actually prepare and verify exact execution-day commands remains the binding obligation; this incident is evidence of what "verify" must mean in practice, not a new obligation on top of it.
 
-### Gate (permanent)
-Before any phase asks the operator for a consequential one-time action for the first time (broker Read-Only removal, exact Live send approval, a `main`-merge click, broker MFA, etc.), the exact mechanical steps must already have been rehearsed once, in a context with zero consequence if done wrong or abandoned partway (e.g., opening the relevant screen without submitting anything, confirming login state, confirming the right button is visible and labeled as expected). Discovering a login/navigation/capability gap is acceptable during rehearsal; it is not acceptable to discover it for the first time during the bounded pilot window itself, where it costs real market-hours and adds pressure to an already consequential decision.
+## Recommendation: operator capability rehearsal
 
-### Exit criterion for this gate
-Before the next Phase 2 fresh GO/NO-GO evaluation, confirm in a zero-consequence rehearsal: (a) the operator's regular browser is authenticated to GitHub and the merge button is reachable, (b) the operator can locate IB Key / TWS's order-entry screen without assistance, (c) any other first-time manual step that specific pilot day's runbook will require.
+The same incident window separately surfaced that operator-facing manual steps (GitHub PR merge, TWS GUI order entry) were being asked of the operator for the first time under live, time-pressured conditions, with no prior confirmation the operator could mechanically perform them (the browser used to view a merge button was not authenticated to GitHub, discovered only when the click did nothing).
+
+**Recommended (not required) practice**: before any phase asks the operator for a consequential first-time action, rehearse the mechanical steps once in a zero-consequence context. This is good practice, consistent with Phase 1's existing "no hidden operator dependency" requirement, but is not itself elevated to a separate formal gate here.
 
 ---
 
@@ -338,20 +327,20 @@ Before the next Phase 2 fresh GO/NO-GO evaluation, confirm in a zero-consequence
 - Active `protect-main` repository ruleset requiring PR + strict `pytest` and `release-integrity-gate` checks on the default branch.
 - Cash-account-gated SettledCash backfill from `TotalCashValue-S`/`EquityWithLoanValue-S`, confirmed only when `TradingType-S=STKCASH` and zero open positions (PR #336). Independently corroborated 2026-10-09 by IBKR API Team support reply: SettledCash is sent only for cash accounts; `TotalCashValue` is IBKR's own suggested fallback, with `$LEDGER:ALL` as the recommended way to confirm which cash tags an account actually returns (not yet used by current code — tracked as a minor follow-up, not a blocker).
 - Standing autonomous-mode authorization formalized into `CLAUDE.md`/`AGENTS.md` (PR #334): bounded read-only investigation → A-blocker root-cause → feature-branch fix → test → push → PR → CI → Codex exact-head review loop, without per-step confirmation; merge and all broker-write/Live/Paper/Read-Only/funds/FX/risk-gate actions remain excluded and require fresh explicit authorization every time.
-- Windows fcntl/pwd A-blocker fix (PR #337, pending merge as of this writing): the full Live Pilot operational entrypoint chain now imports and runs on Windows; includes a Codex-caught-and-fixed P1 (directory-flush handle opened with insufficient access rights, silently discarding a failed flush — see Gate E below for the generalized lesson).
-- This document's own two new cross-cutting gates (E, F) exist because this incident surfaced that neither the CI platform matrix nor the operator-rehearsal step existed before today; both are now permanent requirements, not one-off fixes.
+- Windows fcntl/pwd A-blocker fix (PR #337, pending merge as of this writing): the full Live Pilot operational entrypoint chain now imports and runs on Windows; includes a Codex-caught-and-fixed P1 (directory-flush handle opened with insufficient access rights, silently discarding a failed flush — see the incident record near the end of this document for the generalized lesson).
+- ChatGPT changed from mandatory PM/acceptance role to optional advisory role across all four canonical docs (PR #339, user-confirmed 2026-10-09); Claude Code is now the default day-to-day progress/critical-path owner, with the user retaining final merge/acceptance authority and Codex's independent-review role unchanged.
 
 ## TODO before first Live send
 1. Merge PR #337 (explicit user action; CI green, Codex review clean as of HEAD `49c9110`).
-2. Open and merge the Gate E follow-on: expand Windows CI to cover the full Live Pilot execution chain as a required check (deferred until after #337 merges, so the new job runs against post-fix `main`).
-3. Complete the Gate F operator rehearsal (GitHub auth/merge-button reachability now actually confirmed broken once already today — re-verify it is fixed; confirm TWS order-screen navigation) before the next Phase 2 evaluation.
+2. Merge PR #339 (ChatGPT role change) and this PR (incident record), both documentation-only.
+3. (Recommended, not required) Expand Windows CI over the full Live Pilot execution chain, and rehearse operator-facing manual steps once in a zero-consequence context — see the incident record near the end of this document. Neither blocks Phase 2/3.
 4. Collect fresh execution-day exact-source/runtime evidence and fresh Live **read-only** broker evidence only.
 5. Prove the correct Live account fingerprint/session/endpoint, settled/available funds and currency, intended-market permission/registration where applicable, target position, zero unexpected open orders, quote/FX, market/session, emergency-stop state, evidence freshness/skew, and exact notional cap.
 6. Any stale/missing/contradictory evidence or timeout/UNKNOWN remains NO-GO; do not send/retry/cancel/modify/flatten/close.
 7. Only after every read-only gate is GREEN may the user be asked for a separate explicit one-shot Live-pilot authorization.
 
 ## Market calendar note (verified 2026-10-09)
-2026-10-10 (Sat) / 10-11 (Sun) / 10-12 (Mon, national holiday — Sports Day) are non-trading days for the TSE; `9432.T` is not executable until 2026-10-13 (Tue). This does not block merge, CI, Gate E/F follow-on work, or any read-only preparation — only the bounded Live send itself.
+2026-10-10 (Sat) / 10-11 (Sun) / 10-12 (Mon, national holiday — Sports Day) are non-trading days for the TSE; `9432.T` is not executable until 2026-10-13 (Tue). This does not block merge, CI, or any read-only preparation — only the bounded Live send itself.
 
 ## TODO after first pilot but before normal Live strategy deployment
 1. Reconcile the one-time pilot to a durable terminal broker-truth outcome.
