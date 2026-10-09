@@ -136,36 +136,31 @@ def _global_attempt_path(directory: Path) -> Path:
 
 
 def _win32_fsync_directory(directory: Path) -> None:
-    """Best-effort directory-metadata flush on Windows.
+    """Fail-closed directory-metadata flush on Windows.
 
     ``os.open`` cannot open a directory on Windows (no ``O_DIRECTORY``, and
     the CRT rejects it with ``PermissionError``), so there is no direct
     Windows equivalent of ``os.fsync(os.open(dir, os.O_RDONLY))``. The
     documented Win32 technique is ``CreateFileW`` with
     ``FILE_FLAG_BACKUP_SEMANTICS`` (the flag that lets ``CreateFileW`` target
-    a directory at all) plus ``FlushFileBuffers`` on the resulting handle --
-    but ``FlushFileBuffers`` on a *directory* handle requires the calling
-    process to hold the ``SeBackupPrivilege`` token privilege; verified
-    empirically on this machine, it otherwise fails with
-    ``ERROR_ACCESS_DENIED`` (Win32 error 5) for an ordinary, unprivileged
-    process, including an Administrator account that has not explicitly
-    enabled that privilege. Requesting that privilege here would be a far
-    larger, separately-reviewable change than this fix's scope, and is not
-    reliably grantable to every operator account regardless.
+    a directory at all) plus ``FlushFileBuffers`` on the resulting handle.
 
-    NTFS is a journaling filesystem: every metadata operation, including a
-    directory-entry create, is itself write-ahead logged to the volume's
-    ``$LogFile`` as part of the operation -- a crash/power-loss is replayed
-    from that journal on remount, independent of any additional flush call
-    from this process. This is the filesystem-level durability property the
-    POSIX branch's directory fsync exists to approximate on filesystems that
-    do not guarantee it the same way. If ``CreateFileW`` itself fails (a
-    genuine access/path problem, not this known privilege limitation), that
-    is still raised.
+    The handle must be opened with ``GENERIC_WRITE`` (Microsoft documents
+    ``FlushFileBuffers`` as requiring write access). Verified empirically on
+    this machine: a ``GENERIC_READ``-only handle makes ``FlushFileBuffers``
+    fail with ``ERROR_ACCESS_DENIED`` (Win32 error 5) every time, while
+    ``GENERIC_READ | GENERIC_WRITE`` makes it succeed. An earlier version of
+    this function opened the handle with ``GENERIC_READ`` only and then
+    ignored ``FlushFileBuffers``'s return value, which meant the flush
+    silently never happened and a crash right after creating the global
+    send-attempt marker (or any other durability-critical path) could lose
+    that marker, permitting a second Live transmission after restart. Both
+    the access rights and the fail-closed check below are required: like the
+    POSIX branch's ``os.fsync``, a failed flush here must raise.
     """
     handle = ctypes.windll.kernel32.CreateFileW(  # type: ignore[attr-defined]
         str(directory),
-        0x80000000,  # GENERIC_READ
+        0x80000000 | 0x40000000,  # GENERIC_READ | GENERIC_WRITE
         0x00000001 | 0x00000002 | 0x00000004,  # FILE_SHARE_READ/WRITE/DELETE
         None,
         3,  # OPEN_EXISTING
@@ -175,10 +170,12 @@ def _win32_fsync_directory(directory: Path) -> None:
     if handle in (0, -1, wintypes.HANDLE(-1).value):
         raise OSError(f"CreateFileW failed to open directory for flush: {directory}")
     try:
-        ctypes.windll.kernel32.FlushFileBuffers(handle)  # type: ignore[attr-defined]
-        # Deliberately not checked for success: see the ERROR_ACCESS_DENIED /
-        # SeBackupPrivilege rationale above. NTFS's own journal already
-        # durably records the directory-entry change this call would flush.
+        if not ctypes.windll.kernel32.FlushFileBuffers(handle):  # type: ignore[attr-defined]
+            error_code = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
+            raise OSError(
+                f"FlushFileBuffers failed for directory {directory} "
+                f"(GetLastError={error_code})"
+            )
     finally:
         ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
 

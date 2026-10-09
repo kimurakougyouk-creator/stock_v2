@@ -869,19 +869,18 @@ def _write_full(descriptor: int, data: bytes) -> None:
 
 
 def _win32_fsync_directory(directory: Path) -> None:
-    """Best-effort directory-metadata flush on Windows.
+    """Fail-closed directory-metadata flush on Windows.
 
     See the identical helper in ``live_pilot_send_journal.py`` for the full
-    rationale, including the empirically-confirmed ``ERROR_ACCESS_DENIED``
-    (Win32 error 5) that ``FlushFileBuffers`` raises on a directory handle
-    without the ``SeBackupPrivilege`` token privilege, and why this relies on
-    NTFS's own journal for that durability property instead of requesting
-    that privilege. A ``CreateFileW`` failure (a genuine access/path problem)
-    is still raised.
+    rationale: the handle must be opened with ``GENERIC_WRITE`` (not just
+    ``GENERIC_READ``) for ``FlushFileBuffers`` to succeed instead of failing
+    with ``ERROR_ACCESS_DENIED``, and a failed flush must raise, the same as
+    a failed POSIX ``os.fsync``. A ``CreateFileW`` failure (a genuine
+    access/path problem) is also raised.
     """
     handle = ctypes.windll.kernel32.CreateFileW(  # type: ignore[attr-defined]
         str(directory),
-        0x80000000,  # GENERIC_READ
+        0x80000000 | 0x40000000,  # GENERIC_READ | GENERIC_WRITE
         0x00000001 | 0x00000002 | 0x00000004,  # FILE_SHARE_READ/WRITE/DELETE
         None,
         3,  # OPEN_EXISTING
@@ -891,7 +890,12 @@ def _win32_fsync_directory(directory: Path) -> None:
     if handle in (0, -1, wintypes.HANDLE(-1).value):
         raise OSError(f"CreateFileW failed to open directory for flush: {directory}")
     try:
-        ctypes.windll.kernel32.FlushFileBuffers(handle)  # type: ignore[attr-defined]
+        if not ctypes.windll.kernel32.FlushFileBuffers(handle):  # type: ignore[attr-defined]
+            error_code = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
+            raise OSError(
+                f"FlushFileBuffers failed for directory {directory} "
+                f"(GetLastError={error_code})"
+            )
     finally:
         ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
 
