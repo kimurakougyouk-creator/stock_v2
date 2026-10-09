@@ -16,11 +16,18 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, DecimalException
-import fcntl
 import json
 import math
 import os
 from pathlib import Path
+import sys
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+else:
+    import fcntl
 
 from ai_asset_platform.brokers.ibkr_live_all_open_orders import (
     DEFAULT_REPORT_PATH as DEFAULT_LIVE_OPEN_ORDERS_REPORT,
@@ -861,7 +868,38 @@ def _write_full(descriptor: int, data: bytes) -> None:
         written += count
 
 
+def _win32_fsync_directory(directory: Path) -> None:
+    """Best-effort directory-metadata flush on Windows.
+
+    See the identical helper in ``live_pilot_send_journal.py`` for the full
+    rationale, including the empirically-confirmed ``ERROR_ACCESS_DENIED``
+    (Win32 error 5) that ``FlushFileBuffers`` raises on a directory handle
+    without the ``SeBackupPrivilege`` token privilege, and why this relies on
+    NTFS's own journal for that durability property instead of requesting
+    that privilege. A ``CreateFileW`` failure (a genuine access/path problem)
+    is still raised.
+    """
+    handle = ctypes.windll.kernel32.CreateFileW(  # type: ignore[attr-defined]
+        str(directory),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # FILE_SHARE_READ/WRITE/DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS
+        None,
+    )
+    if handle in (0, -1, wintypes.HANDLE(-1).value):
+        raise OSError(f"CreateFileW failed to open directory for flush: {directory}")
+    try:
+        ctypes.windll.kernel32.FlushFileBuffers(handle)  # type: ignore[attr-defined]
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+
+
 def _fsync_parent_dir(path: Path) -> None:
+    if sys.platform == "win32":
+        _win32_fsync_directory(path.parent)
+        return
     directory_fd = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(directory_fd)
@@ -913,6 +951,33 @@ def _durable_write_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
     _fsync_parent_dir(path)
 
+def _lock_exclusive(descriptor: int) -> None:
+    """Take a blocking exclusive lock on ``descriptor``, cross-platform.
+
+    ``fcntl.flock`` always locks an entire file. ``msvcrt.locking`` locks a
+    byte range instead, so the Windows branch first guarantees the file is at
+    least one byte long (a brand-new lock-marker file is empty) and locks
+    that one byte -- sufficient for this file's only purpose, mutual
+    exclusion, since nothing ever reads its content.
+    """
+    if sys.platform == "win32":
+        if os.fstat(descriptor).st_size < 1:
+            os.write(descriptor, b"\0")
+            os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+
+def _unlock(descriptor: int) -> None:
+    if sys.platform == "win32":
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
 @contextmanager
 def _completion_publication_lock(*, report_path: Path, alert_path: Path):
     """Serialize publication for every directory containing either artifact."""
@@ -929,12 +994,12 @@ def _completion_publication_lock(*, report_path: Path, alert_path: Path):
                 0o600,
             )
             descriptors.append(descriptor)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            _lock_exclusive(descriptor)
         yield
     finally:
         for descriptor in reversed(descriptors):
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                _unlock(descriptor)
             finally:
                 os.close(descriptor)
 

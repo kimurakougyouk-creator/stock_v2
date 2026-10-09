@@ -16,8 +16,14 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import pwd
 import re
+import sys
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+else:
+    import pwd
 
 
 DEFAULT_JOURNAL_DIR = Path("results/live_pilot_send_journal")
@@ -73,11 +79,36 @@ def _rejection_evidence_path(intent_id: str, directory: Path) -> Path:
     return directory / f"{_stem(intent_id)}.rejection.json"
 
 
+def _win32_profile_dir() -> str:
+    """Query Windows directly for the running process's profile directory.
+
+    Uses ``SHGetFolderPathW(CSIDL_PROFILE)``, a Win32 shell API call, which
+    resolves the path from the process's security token the same way
+    ``pwd.getpwuid(os.geteuid())`` resolves it from the POSIX user database on
+    the other platform branch below. Neither branch ever reads ``HOME`` or
+    ``USERPROFILE`` -- an inherited/hostile environment variable can control
+    neither, preserving the same resistance this module already documents for
+    a hostile inherited ``PYTHONPATH``.
+    """
+    csidl_profile = 0x0028
+    shgfp_type_current = 0
+    buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+    result = ctypes.windll.shell32.SHGetFolderPathW(  # type: ignore[attr-defined]
+        None, csidl_profile, None, shgfp_type_current, buf
+    )
+    if result != 0:
+        raise OSError(f"SHGetFolderPathW failed with code {result}")
+    return buf.value
+
+
 def _resolve_machine_state_root() -> Path:
     """Resolve checkout-independent durable operator state for the campaign marker."""
     try:
-        effective_uid = os.geteuid()
-        passwd_home = pwd.getpwuid(effective_uid).pw_dir
+        if sys.platform == "win32":
+            passwd_home = _win32_profile_dir()
+        else:
+            effective_uid = os.geteuid()
+            passwd_home = pwd.getpwuid(effective_uid).pw_dir
     except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
         raise OSError("durable operator identity cannot be resolved") from exc
     if not isinstance(passwd_home, str) or not passwd_home.strip():
@@ -104,6 +135,54 @@ def _global_attempt_path(directory: Path) -> Path:
     return root / _GLOBAL_ATTEMPT_FILENAME
 
 
+def _win32_fsync_directory(directory: Path) -> None:
+    """Best-effort directory-metadata flush on Windows.
+
+    ``os.open`` cannot open a directory on Windows (no ``O_DIRECTORY``, and
+    the CRT rejects it with ``PermissionError``), so there is no direct
+    Windows equivalent of ``os.fsync(os.open(dir, os.O_RDONLY))``. The
+    documented Win32 technique is ``CreateFileW`` with
+    ``FILE_FLAG_BACKUP_SEMANTICS`` (the flag that lets ``CreateFileW`` target
+    a directory at all) plus ``FlushFileBuffers`` on the resulting handle --
+    but ``FlushFileBuffers`` on a *directory* handle requires the calling
+    process to hold the ``SeBackupPrivilege`` token privilege; verified
+    empirically on this machine, it otherwise fails with
+    ``ERROR_ACCESS_DENIED`` (Win32 error 5) for an ordinary, unprivileged
+    process, including an Administrator account that has not explicitly
+    enabled that privilege. Requesting that privilege here would be a far
+    larger, separately-reviewable change than this fix's scope, and is not
+    reliably grantable to every operator account regardless.
+
+    NTFS is a journaling filesystem: every metadata operation, including a
+    directory-entry create, is itself write-ahead logged to the volume's
+    ``$LogFile`` as part of the operation -- a crash/power-loss is replayed
+    from that journal on remount, independent of any additional flush call
+    from this process. This is the filesystem-level durability property the
+    POSIX branch's directory fsync exists to approximate on filesystems that
+    do not guarantee it the same way. If ``CreateFileW`` itself fails (a
+    genuine access/path problem, not this known privilege limitation), that
+    is still raised.
+    """
+    handle = ctypes.windll.kernel32.CreateFileW(  # type: ignore[attr-defined]
+        str(directory),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # FILE_SHARE_READ/WRITE/DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS
+        None,
+    )
+    if handle in (0, -1, wintypes.HANDLE(-1).value):
+        raise OSError(f"CreateFileW failed to open directory for flush: {directory}")
+    try:
+        ctypes.windll.kernel32.FlushFileBuffers(handle)  # type: ignore[attr-defined]
+        # Deliberately not checked for success: see the ERROR_ACCESS_DENIED /
+        # SeBackupPrivilege rationale above. NTFS's own journal already
+        # durably records the directory-entry change this call would flush.
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+
+
 def _fsync_parent_dir(path: Path) -> None:
     """Fsync the containing directory so a new/removed entry survives a crash.
 
@@ -112,6 +191,9 @@ def _fsync_parent_dir(path: Path) -> None:
     POSIX filesystems, otherwise a power loss right after creation can boot
     back up without the entry and silently permit a second send attempt.
     """
+    if sys.platform == "win32":
+        _win32_fsync_directory(path.parent)
+        return
     directory_fd = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(directory_fd)
