@@ -19,6 +19,31 @@ IBKR can prefix per-currency account-value keys with ``$LEDGER-``. Both the
 legacy ``SettledCash`` key and ``$LEDGER-SettledCash`` are accepted. If both
 forms are observed for one currency with conflicting values, that currency is
 omitted so the downstream cash gate fails closed rather than choosing one value.
+
+Some IBKR accounts never emit a ``SettledCash``/``$LEDGER-SettledCash`` value at
+all. IBKR's own ``AccountSummaryTags``/``Account Value Keys`` references state
+that, for a Cash account, SettledCash is defined to equal TotalCashValue (and
+that EquityWithLoanValue-S is itself defined as Settled Cash for a Cash
+account). This module confirms the account is a Cash account from the
+official, per-run, read-only ``TradingType-S`` tag (exact value ``STKCASH``,
+captured from both ``updateAccountValue`` and ``accountSummary`` -- IBKR
+documents it under the former but this account's API answers it under both --
+so the check is not dependent on either single delivery path) before treating
+the securities-segment settled-cash equivalent as settled cash for a currency
+that has no distinct SettledCash value of its own. The equivalent is read only
+from the securities-segment-scoped tags (``TotalCashValue-S`` and
+``EquityWithLoanValue-S``), never the unsuffixed/blended totals, because
+TradingType-S only certifies the securities segment and a universal account
+could hold a separate commodities segment. The backfill is further restricted
+to a run with zero open positions, so there is no in-flight trade whose
+proceeds could appear in total cash before they are actually settled.
+
+This is additive only: it never overrides a currency that already has a real
+SettledCash/$LEDGER-SettledCash observation -- even one later excluded as
+conflicting, which remains excluded rather than silently backfilled -- and it
+is inert (behaves exactly as before) whenever TradingType-S is missing,
+ambiguous, anything other than the exact confirmed Cash-account value, or the
+account holds any open position.
 """
 from __future__ import annotations
 
@@ -49,6 +74,14 @@ LIVE_GATEWAY_PORT = 4001
 LIVE_TWS_PORT = 7496
 REPORT_SCHEMA_VERSION = 3
 _SETTLED_CASH_KEYS = {"SettledCash", "$LEDGER-SettledCash"}
+# Securities-segment-scoped only (never the unsuffixed/blended totals): IBKR
+# documents EquityWithLoanValue-S as literally "Settled Cash" for a Cash
+# account, and TotalCashValue-S as that segment's cash. Cross-checking both
+# keeps the same fail-closed-on-conflict behavior as the SettledCash keys
+# above instead of trusting a single field.
+_CASH_ACCOUNT_SETTLED_CASH_EQUIVALENT_KEYS = {"TotalCashValue-S", "EquityWithLoanValue-S"}
+_SEGMENT_TRADING_TYPE_TAG = "TradingType-S"
+_CASH_ACCOUNT_TRADING_TYPES = {"STKCASH"}
 
 
 @dataclass(frozen=True)
@@ -63,6 +96,7 @@ class IbkrLiveReadOnlyAccountSnapshot:
     available_funds: float | None
     gross_position_value: float | None
     total_cash_value: float | None
+    segment_trading_type: str | None = None
     settled_cash_by_currency: dict[str, float] = field(default_factory=dict)
     positions: tuple[IbkrBrokerPosition, ...] = ()
     blocked_reason: str | None = None
@@ -93,19 +127,21 @@ def _account_fingerprint(account_id: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
-    """Return unambiguous finite per-currency SettledCash evidence.
+def _unambiguous_values_by_currency(
+    account_values: dict[tuple[str, str], float], keys: set[str]
+) -> tuple[dict[str, float], set[str]]:
+    """Return (unambiguous finite per-currency values, currencies observed at all).
 
-    Current IBKR sessions may emit per-currency keys either as ``SettledCash``
-    or as ``$LEDGER-SettledCash`` depending on the TWS/API setting. If both key
-    forms are present for the same currency, they must agree; otherwise that
-    currency is excluded so the pilot cannot treat conflicting cash evidence as
-    spendable settled cash.
+    If more than one key in ``keys`` reports a value for the same currency and
+    those values disagree, that currency is left out of the returned mapping --
+    but it is still included in the returned set, so a caller can tell "never
+    observed" apart from "observed but invalid/conflicting" instead of silently
+    treating both the same way.
     """
     observations: dict[str, list[float]] = {}
-    for (key, currency), value in probe.account_values.items():
+    for (key, currency), value in account_values.items():
         normalized_currency = str(currency or "").strip().upper()
-        if key not in _SETTLED_CASH_KEYS:
+        if key not in keys:
             continue
         if (
             len(normalized_currency) != 3
@@ -126,6 +162,144 @@ def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
         first = values[0]
         if all(math.isclose(item, first, rel_tol=1e-12, abs_tol=1e-9) for item in values[1:]):
             balances[currency] = first
+    return balances, set(observations.keys())
+
+
+def _currencies_observed_under_keys(probe: object, keys: set[str]) -> set[str]:
+    """Return every currency with ANY observation under ``keys``, valid or not.
+
+    Scans both the numeric ``account_values`` and the non-numeric
+    ``account_text_values`` (an invalid/placeholder SettledCash value such as
+    ``"-"`` or a literal ``"nan"`` string lands in the latter, never the
+    former). This lets a caller treat "observed but invalid" the same as
+    "observed but conflicting" -- never backfill-eligible -- instead of only
+    catching currencies that happened to parse as a finite number.
+    """
+    observed: set[str] = set()
+    for attr in ("account_values", "account_text_values"):
+        source = getattr(probe, attr, None)
+        if not isinstance(source, dict):
+            continue
+        for (key, currency), _value in source.items():
+            if key not in keys:
+                continue
+            normalized_currency = str(currency or "").strip().upper()
+            if (
+                len(normalized_currency) == 3
+                and normalized_currency.isalpha()
+                and normalized_currency != "BASE"
+            ):
+                observed.add(normalized_currency)
+    return observed
+
+
+def _agreeing_values_present_for_every_key(
+    account_values: dict[tuple[str, str], float], keys: set[str]
+) -> dict[str, float]:
+    """Return per-currency values observed under EVERY key in ``keys``, agreeing.
+
+    Unlike ``_unambiguous_values_by_currency`` (where any one of several
+    alternate names for the same field, such as ``SettledCash``/
+    ``$LEDGER-SettledCash``, is sufficient), this requires an independent
+    observation under each distinct key before accepting a currency -- a
+    currency with only one of the keys present is excluded, not trivially
+    accepted, because an ``all()`` over a single-element (or empty) remainder
+    is vacuously true and would otherwise skip the cross-check entirely.
+    """
+    per_key_values: dict[str, dict[str, float]] = {}
+    for (key, currency), value in account_values.items():
+        if key not in keys:
+            continue
+        normalized_currency = str(currency or "").strip().upper()
+        if (
+            len(normalized_currency) != 3
+            or not normalized_currency.isalpha()
+            or normalized_currency == "BASE"
+        ):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(parsed):
+            continue
+        per_key_values.setdefault(normalized_currency, {})[key] = parsed
+
+    balances: dict[str, float] = {}
+    for currency, by_key in per_key_values.items():
+        if set(by_key.keys()) != keys:
+            continue
+        values = list(by_key.values())
+        first = values[0]
+        if all(math.isclose(item, first, rel_tol=1e-12, abs_tol=1e-9) for item in values[1:]):
+            balances[currency] = first
+    return balances
+
+
+def _segment_trading_type(probe: object) -> str | None:
+    """Return the official, per-run ``TradingType-S`` value, if observed.
+
+    This is the IBKR-documented securities-segment account type (for example
+    ``STKCASH`` for a Cash account). IBKR documents this tag under
+    ``updateAccountValue``, but this account's API has also answered it under
+    ``accountSummary``; both delivery paths are checked so the result does not
+    depend on either one alone. It is read fresh on every call; nothing is
+    cached, hardcoded, or inferred from a prior manual confirmation. If the two
+    paths disagree, the value is treated as unconfirmed (``None``) rather than
+    picking one.
+    """
+    observed: set[str] = set()
+    for attr in ("summary_text_values", "account_text_values"):
+        text_values = getattr(probe, attr, None)
+        if not isinstance(text_values, dict):
+            continue
+        value = text_values.get((_SEGMENT_TRADING_TYPE_TAG, ""))
+        if value is None:
+            continue
+        normalized = str(value).strip().upper()
+        if normalized:
+            observed.add(normalized)
+    if len(observed) == 1:
+        return next(iter(observed))
+    return None
+
+
+def _settled_cash_by_currency(probe: _AccountSnapshotProbe) -> dict[str, float]:
+    """Return unambiguous finite per-currency SettledCash evidence.
+
+    Current IBKR sessions may emit per-currency keys either as ``SettledCash``
+    or as ``$LEDGER-SettledCash`` depending on the TWS/API setting. If both key
+    forms are present for the same currency, they must agree; otherwise that
+    currency is excluded so the pilot cannot treat conflicting cash evidence as
+    spendable settled cash.
+
+    If the account's official, same-run ``TradingType-S`` tag confirms a Cash
+    account (exact value ``STKCASH``) and the account currently holds zero open
+    positions, a currency that was never observed under a SettledCash key at
+    all -- not a conflicting observation, and not an invalid/non-numeric one
+    either -- is additionally backfilled from the securities-segment-scoped
+    ``TotalCashValue-S``/``EquityWithLoanValue-S`` equivalent -- IBKR's own
+    documentation defines these as identical to settled cash for a Cash
+    account, so this is not a fallback/substitute value. Both of those keys
+    must be independently observed and agree; a currency with only one of
+    them present is excluded, not trivially accepted. A currency with any
+    real SettledCash observation, including one excluded for conflicting or
+    for being non-numeric, is never touched by this backfill.
+    """
+    balances, _ = _unambiguous_values_by_currency(probe.account_values, _SETTLED_CASH_KEYS)
+    observed_settled_currencies = _currencies_observed_under_keys(probe, _SETTLED_CASH_KEYS)
+    has_open_positions = bool(getattr(probe, "portfolio", None))
+    if (
+        not has_open_positions
+        and _segment_trading_type(probe) in _CASH_ACCOUNT_TRADING_TYPES
+    ):
+        equivalent = _agreeing_values_present_for_every_key(
+            probe.account_values, _CASH_ACCOUNT_SETTLED_CASH_EQUIVALENT_KEYS
+        )
+        for currency, value in equivalent.items():
+            if currency in observed_settled_currencies:
+                continue
+            balances.setdefault(currency, value)
     return dict(sorted(balances.items()))
 
 
@@ -205,7 +379,10 @@ def preview_ibkr_live_readonly_account_snapshot(
             probe.reqAccountSummary(
                 1991,
                 "All",
-                "NetLiquidation,AvailableFunds,GrossPositionValue,TotalCashValue",
+                "NetLiquidation,AvailableFunds,GrossPositionValue,TotalCashValue,"
+                + _SEGMENT_TRADING_TYPE_TAG
+                + ","
+                + ",".join(sorted(_CASH_ACCOUNT_SETTLED_CASH_EQUIVALENT_KEYS)),
             )
             download_complete = probe.download_ready.wait(timeout)
             summary_complete = probe.summary_ready.wait(timeout)
@@ -241,6 +418,7 @@ def preview_ibkr_live_readonly_account_snapshot(
                     probe, "GrossPositionValue", base_currency
                 ),
                 total_cash_value=_summary_value(probe, "TotalCashValue", base_currency),
+                segment_trading_type=_segment_trading_type(probe),
                 settled_cash_by_currency=_settled_cash_by_currency(probe),
                 positions=tuple(probe.portfolio),
                 blocked_reason=None,

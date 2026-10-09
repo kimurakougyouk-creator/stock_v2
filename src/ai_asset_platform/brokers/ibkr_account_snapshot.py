@@ -95,7 +95,9 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         self.accounts: list[str] = []
         self.account_ready = True
         self.account_values: dict[tuple[str, str], float] = {}
+        self.account_text_values: dict[tuple[str, str], str] = {}
         self.summary_values: dict[tuple[str, str], float] = {}
+        self.summary_text_values: dict[tuple[str, str], str] = {}
         self.portfolio: list[IbkrBrokerPosition] = []
         self.errors: list[str] = []
         self.fatal_error: str | None = None
@@ -113,9 +115,24 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         if normalized_key == "accountReady":
             self.account_ready = str(val).strip().lower() not in {"false", "0", "no"}
             return
+        update_key = (normalized_key, normalized_currency)
         parsed = _finite_float(val)
         if parsed is not None:
-            self.account_values[(normalized_key, normalized_currency)] = parsed
+            self.account_values[update_key] = parsed
+            # A later numeric update supersedes any earlier non-numeric one for
+            # the same (key, currency); never let a stale text observation
+            # coexist with a newer numeric value.
+            self.account_text_values.pop(update_key, None)
+            return
+        # Record every non-numeric update, including a blank/whitespace-only
+        # value -- IBKR uses that to mean "no longer known" -- so this (key,
+        # currency) is still on record as observed this run (needed so a
+        # caller can refuse to backfill a currency IBKR just told us is
+        # unavailable) and, symmetrically with the numeric branch above, so a
+        # stale numeric value can never outlive the update that invalidated
+        # it just because the new value happened to be blank.
+        self.account_text_values[update_key] = str(val).strip()
+        self.account_values.pop(update_key, None)
 
     def updatePortfolio(  # noqa: N802
         self,
@@ -154,10 +171,16 @@ class _AccountSnapshotProbe(EWrapper, EClient):
         self.download_ready.set()
 
     def accountSummary(self, reqId, account, tag, value, currency):  # noqa: N802
+        key = (str(tag).strip(), str(currency).strip().upper())
         parsed = _finite_float(value)
-        if parsed is None:
+        if parsed is not None:
+            self.summary_values[key] = parsed
+            self.summary_text_values.pop(key, None)
             return
-        self.summary_values[(str(tag).strip(), str(currency).strip().upper())] = parsed
+        # Same reasoning as updateAccountValue above: record every non-numeric
+        # update, blank or not, and retire any stale numeric value for this key.
+        self.summary_text_values[key] = str(value).strip()
+        self.summary_values.pop(key, None)
 
     def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
         self.summary_ready.set()

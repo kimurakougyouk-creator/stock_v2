@@ -3,6 +3,60 @@ from types import SimpleNamespace
 import ai_asset_platform.brokers.ibkr_account_snapshot as module
 
 
+def test_update_account_value_retires_stale_numeric_value_on_later_invalidation():
+    probe = module._AccountSnapshotProbe()
+    probe.updateAccountValue("SettledCash", "61000.0", "JPY", "U123")
+    assert probe.account_values[("SettledCash", "JPY")] == 61000.0
+
+    probe.updateAccountValue("SettledCash", "-", "JPY", "U123")
+    assert ("SettledCash", "JPY") not in probe.account_values
+    assert probe.account_text_values[("SettledCash", "JPY")] == "-"
+
+
+def test_update_account_value_retires_stale_text_value_on_later_numeric_update():
+    probe = module._AccountSnapshotProbe()
+    probe.updateAccountValue("SettledCash", "-", "JPY", "U123")
+    assert probe.account_text_values[("SettledCash", "JPY")] == "-"
+
+    probe.updateAccountValue("SettledCash", "61000.0", "JPY", "U123")
+    assert probe.account_values[("SettledCash", "JPY")] == 61000.0
+    assert ("SettledCash", "JPY") not in probe.account_text_values
+
+
+def test_update_account_value_retires_stale_numeric_value_on_blank_invalidation():
+    probe = module._AccountSnapshotProbe()
+    probe.updateAccountValue("SettledCash", "61000.0", "JPY", "U123")
+    assert probe.account_values[("SettledCash", "JPY")] == 61000.0
+
+    probe.updateAccountValue("SettledCash", "", "JPY", "U123")
+    assert ("SettledCash", "JPY") not in probe.account_values
+    assert probe.account_text_values[("SettledCash", "JPY")] == ""
+
+
+def test_update_account_value_records_blank_as_observed_not_missing():
+    probe = module._AccountSnapshotProbe()
+    probe.updateAccountValue("SettledCash", "   ", "JPY", "U123")
+    assert ("SettledCash", "JPY") in probe.account_text_values
+
+
+def test_account_summary_retires_stale_numeric_value_on_later_invalidation():
+    probe = module._AccountSnapshotProbe()
+    probe.accountSummary(1, "U123", "SettledCash", "61000.0", "JPY")
+    assert probe.summary_values[("SettledCash", "JPY")] == 61000.0
+
+    probe.accountSummary(1, "U123", "SettledCash", "-", "JPY")
+    assert ("SettledCash", "JPY") not in probe.summary_values
+    assert probe.summary_text_values[("SettledCash", "JPY")] == "-"
+
+
+def test_account_summary_retires_stale_numeric_value_on_blank_invalidation():
+    probe = module._AccountSnapshotProbe()
+    probe.accountSummary(1, "U123", "SettledCash", "61000.0", "JPY")
+    probe.accountSummary(1, "U123", "SettledCash", "", "JPY")
+    assert ("SettledCash", "JPY") not in probe.summary_values
+    assert probe.summary_text_values[("SettledCash", "JPY")] == ""
+
+
 class _Event:
     def wait(self, timeout):
         return True
