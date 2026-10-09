@@ -47,7 +47,7 @@ def test_windows_entrypoint_blocks_before_required_env_vars_checked():
         assert name in script, f"{name} is no longer checked"
     interpreter_check_at = script.index("Get-AuthenticodeSignature")
     required_vars_at = script.index("$RequiredVars")
-    sha_check_at = script.index("$ActualSha = (& git rev-parse HEAD)")
+    sha_check_at = script.index("$ActualSha = (& $TrustedGit @GitSafeArgs rev-parse HEAD)")
     assert interpreter_check_at < required_vars_at, (
         "trusted-interpreter attestation must run before required-value checks, "
         "matching the bash wrapper's own ordering"
@@ -115,5 +115,85 @@ def test_windows_entrypoint_sets_pythontzpath_only_after_verification():
     script = _text()
     verify_at = script.index("verify_live_tzdata_runtime.py")
     block_at = script.index('Block "venv tzdata dependency does not match the pinned runtime manifest."')
-    set_at = script.index("$env:PYTHONTZPATH = $TzdataZoneinfoDir")
+    set_at = script.index("$env:PYTHONTZPATH = $TzdataVerifiedCopy")
     assert verify_at < block_at < set_at
+
+
+def test_windows_entrypoint_verifies_a_copy_not_the_writable_venv_directory():
+    # Regression guard for the Codex-caught TOCTOU finding: a hostile write
+    # to the still-writable venv tzdata directory after verification but
+    # before use must not be able to change the bytes PYTHONTZPATH serves.
+    # Verification and PYTHONTZPATH must both target the same immutable
+    # process-local copy, not the original source directory.
+    script = _text()
+    copy_at = script.index("Copy-Item -LiteralPath $TzdataSourceDir -Destination $TzdataVerifiedCopy")
+    verify_at = script.index('$TzdataVerifier --zoneinfo-dir $TzdataVerifiedCopy')
+    set_at = script.index("$env:PYTHONTZPATH = $TzdataVerifiedCopy")
+    assert copy_at < verify_at < set_at
+
+
+def test_windows_entrypoint_rejects_tzdata_reparse_points_before_verification():
+    # Regression guard: Python's Path.is_symlink() is not guaranteed to
+    # recognize an NTFS junction, so the PowerShell layer must reject any
+    # reparse point (symlink or junction) before the Python verifier runs.
+    script = _text()
+    reparse_at = script.index("$TzdataReparsePoints")
+    copy_at = script.index("Copy-Item -LiteralPath $TzdataSourceDir")
+    assert reparse_at < copy_at
+
+
+def test_windows_entrypoint_resolves_python_from_hklm_registry_only():
+    # Regression guard for the Codex-caught findings that (a) executing a
+    # bare `py` before attestation lets a hijacked PATH run arbitrary code
+    # first, and (b) an Authenticode signature on python.exe alone does not
+    # attest python313.dll or the standard library on a writable per-user
+    # install. HKLM-only registry resolution plus an admin-only-root
+    # directory check closes both without executing anything first.
+    script = _text()
+    assert "HKLM:\\SOFTWARE\\Python\\PythonCore\\$PinnedPythonVersion\\InstallPath" in script
+    assert "HKCU:\\SOFTWARE\\Python" not in script
+    assert 'py "-$PinnedPythonVersion"' not in script
+
+
+def test_windows_entrypoint_resolves_git_from_admin_only_root_not_path():
+    script = _text()
+    assert "$TrustedGit" in script
+    assert "GitCandidateSuffixes" in script
+    assert "& git rev-parse" not in script
+    assert "& git status" not in script
+    assert "& git ls-files" not in script
+
+
+def test_windows_entrypoint_clears_git_discovery_env_vars():
+    script = _text()
+    for name in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES",
+        "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ):
+        assert name in script
+
+
+def test_tzdata_manifest_matches_pinned_version():
+    import subprocess
+    import sys as _sys
+
+    result = subprocess.run(
+        [
+            _sys.executable, "-I",
+            "scripts/emit_live_tzdata_manifest.py",
+            "--check", "scripts/live_tzdata_manifest.json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_requirements_pins_exact_tzdata_version_matching_manifest():
+    import json
+
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+    manifest = json.loads(Path("scripts/live_tzdata_manifest.json").read_text(encoding="utf-8"))
+    pinned_version = manifest["version"]
+    assert f"tzdata=={pinned_version}" in requirements

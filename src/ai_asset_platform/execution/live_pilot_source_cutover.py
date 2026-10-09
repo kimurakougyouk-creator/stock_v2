@@ -15,9 +15,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 from typing import Callable, Sequence
 
 
@@ -31,6 +33,7 @@ AUDITED_PATHS: tuple[str, ...] = (
     "pytest.ini",
     ".github/workflows/pytest.yml",
     "live_pilot_operational_once.sh",
+    "live_pilot_operational_once.ps1",
 )
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 SAFE_GIT_PREFIX: tuple[str, ...] = (
@@ -40,12 +43,83 @@ SAFE_GIT_PREFIX: tuple[str, ...] = (
     "-c",
     "core.hooksPath=/dev/null",
 )
+# Windows has no equivalent of a root-owned, non-group/world-writable
+# /usr/bin: a bare `git` resolved via PATH could be shadowed by an
+# attacker-controlled executable earlier on PATH. Windows' own default ACLs
+# make %ProgramFiles%/%ProgramFiles(x86)% non-writable by a standard user
+# account (only Administrators/SYSTEM have write access) -- the same
+# property /usr/bin's root ownership provides on POSIX -- so the trusted
+# Git executable is resolved to one of Git for Windows' default
+# Program-Files install locations and verified to actually live under one
+# of those roots (and not be a symlink/junction redirecting elsewhere)
+# before being trusted, rather than searched for via PATH.
+_WINDOWS_GIT_CANDIDATES: tuple[str, ...] = (
+    r"Git\cmd\git.exe",
+    r"Git\bin\git.exe",
+    r"Git\mingw64\bin\git.exe",
+)
+
+
+def _windows_admin_only_roots() -> tuple[Path, ...]:
+    roots = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)"):
+        value = os.environ.get(var)
+        if value:
+            roots.append(Path(value).resolve())
+    if not roots:
+        raise OSError("no Program Files root could be determined from the environment")
+    return tuple(roots)
+
+
+def _resolve_trusted_git_windows() -> str:
+    for root in _windows_admin_only_roots():
+        for suffix in _WINDOWS_GIT_CANDIDATES:
+            candidate = root / suffix
+            if not candidate.is_file():
+                continue
+            if candidate.is_symlink():
+                continue
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if resolved != candidate:
+                continue
+            if not any(_is_relative_to(resolved, r) for r in _windows_admin_only_roots()):
+                continue
+            return str(resolved)
+    raise OSError(
+        "no trusted admin-only-writable Git executable found under "
+        "%ProgramFiles%/%ProgramFiles(x86)%; install Git for Windows to its "
+        "default location"
+    )
+
+
+def _is_relative_to(path: Path, other: Path) -> bool:
+    try:
+        path.relative_to(other)
+    except ValueError:
+        return False
+    return True
+
+
 REPORT_SCHEMA_VERSION = 1
 
 
 def safe_git_command(*args: str) -> list[str]:
     """Build a Git command with repo-configured executable hooks disabled."""
-    return [*SAFE_GIT_PREFIX, *args]
+    if sys.platform == "win32":
+        git_exe = _resolve_trusted_git_windows()
+        prefix: tuple[str, ...] = (
+            git_exe,
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        )
+    else:
+        prefix = SAFE_GIT_PREFIX
+    return [*prefix, *args]
 _IMPORTABLE_IGNORED_SUFFIXES = (".py", ".pyc", ".pyo", ".pyz", ".so", ".pyd", ".dylib")
 
 
@@ -129,6 +203,32 @@ def _utc_now(value: datetime | None) -> datetime:
     return current.astimezone(timezone.utc)
 
 
+_GIT_DISCOVERY_ENV_VARS: tuple[str, ...] = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+def sanitized_git_env() -> dict[str, str]:
+    """A copy of the environment with Git repository-discovery variables removed.
+
+    A hostile GIT_DIR/GIT_WORK_TREE (etc.) could make every check below
+    inspect a different, clean repository while the actual checkout this
+    process later imports source from (``repository_root``/``cwd``) remains
+    whatever an attacker left it as. Discovery must be forced to ``cwd``
+    alone, never influenced by inherited environment.
+    """
+    env = dict(os.environ)
+    for name in _GIT_DISCOVERY_ENV_VARS:
+        env.pop(name, None)
+    return env
+
+
 def _run_git(
     args: Sequence[str],
     *,
@@ -136,11 +236,12 @@ def _run_git(
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> str:
     completed = runner(
-        safe_git_command(*args),
+        safe_git_command("-C", str(cwd), *args),
         cwd=str(cwd),
         check=True,
         capture_output=True,
         text=True,
+        env=sanitized_git_env(),
     )
     return str(completed.stdout or "")
 

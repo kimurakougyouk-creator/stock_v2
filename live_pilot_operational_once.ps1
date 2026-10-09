@@ -30,40 +30,91 @@ Set-Location -LiteralPath $Root
 #
 # The POSIX script resolves .venv/bin/python's symlink target and requires
 # that target to be /usr/bin/python3*, owned by root (uid 0) and not
-# group/world-writable -- i.e. a system interpreter that the account
-# running this script cannot itself overwrite.
+# group/world-writable -- i.e. a system interpreter, and everything it
+# loads (shared libraries, stdlib), that the account running this script
+# cannot itself overwrite.
 #
-# Windows venvs do not use a symlink here (.venv\Scripts\python.exe is a
-# real file), and a common per-user Python install (under
-# %LOCALAPPDATA%\Programs\Python) is fully writable by that same account,
-# so a filesystem-ownership check would not provide the same assurance it
-# does on POSIX. Verified empirically on this machine: the per-user
-# python.exe grants the operator account Full Control. Filesystem
-# ownership is therefore not a usable trust boundary here.
+# An earlier revision of this check resolved Python by executing the `py`
+# launcher and trusted only an Authenticode signature on the resulting
+# python.exe. Codex's review of that revision correctly identified two
+# gaps, both closed below:
+#   1. Executing `py` (PATH/session-resolved, no -I/-P/-S) before any
+#      attestation means an attacker-controlled PATH or shadowing
+#      alias/function could run arbitrary code first and merely print a
+#      genuine interpreter's path afterward to pass the remaining checks.
+#   2. An Authenticode signature on python.exe authenticates only that one
+#      file. The interpreter also loads python313.dll and the standard
+#      library from the same install directory; on a per-user install
+#      (verified empirically on this machine: %LOCALAPPDATA%\Programs\Python
+#      grants the operator account Full Control), that same account can
+#      replace either without invalidating python.exe's own signature.
+#      This is not equivalent to POSIX's root-owned/non-writable runtime.
 #
-# Windows equivalent used instead: resolve the pinned Python version
-# through the official `py` launcher (itself a well-known, independently
-# installed system component, not something inside this repository or
-# venv), then require a valid Authenticode signature on that resolved
-# executable from the Python Software Foundation. This is a stronger
-# property than the POSIX ownership check in one respect (it verifies the
-# exact published binary, not merely "whoever currently owns this file"),
-# and it does not depend on whether this particular machine's Python
-# install happens to be per-user or per-machine.
+# Fix: resolve the interpreter from the Windows Registry's all-users
+# PythonCore registration (HKLM only -- a per-user HKCU registration is
+# deliberately never consulted, since it corresponds to exactly the
+# writable-by-the-operator install this check exists to reject) without
+# executing anything. Windows' own default ACLs make
+# %ProgramFiles%/%ProgramFiles(x86)% -- where an all-users Python install
+# always lives -- non-writable by a standard user account, so requiring
+# the resolved install directory to be under one of those roots closes
+# gap 2 for the whole install directory (DLLs and stdlib included), not
+# only python.exe. Gap 1 is closed because registry lookup and the
+# filesystem checks below execute no code at all; Get-AuthenticodeSignature
+# is kept as an additional, non-primary defense-in-depth check.
 $PinnedPythonVersion = "3.13"
-try {
-    $TrustedPythonReal = & py "-$PinnedPythonVersion" -c "import sys; print(sys.executable)" 2>$null
-} catch {
-    $TrustedPythonReal = $null
+$PythonCoreRegistryPaths = @(
+    "HKLM:\SOFTWARE\Python\PythonCore\$PinnedPythonVersion\InstallPath",
+    "HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore\$PinnedPythonVersion\InstallPath"
+)
+$InstallPath = $null
+foreach ($regPath in $PythonCoreRegistryPaths) {
+    if (Test-Path -LiteralPath $regPath) {
+        $value = (Get-Item -LiteralPath $regPath).GetValue("")
+        if ($value) { $InstallPath = $value; break }
+    }
 }
-if (-not $TrustedPythonReal -or -not (Test-Path -LiteralPath $TrustedPythonReal -PathType Leaf)) {
-    Block "trusted Python $PinnedPythonVersion could not be resolved via the py launcher."
+if (-not $InstallPath) {
+    Block "no all-users (HKLM) Python $PinnedPythonVersion registration found. Install Python $PinnedPythonVersion for all users (admin-only-writable), not a per-user install, before this entrypoint can run."
+}
+$TrustedPythonReal = Join-Path $InstallPath "python.exe"
+if (-not (Test-Path -LiteralPath $TrustedPythonReal -PathType Leaf)) {
+    Block "python.exe not found at the registered all-users install path: $TrustedPythonReal"
+}
+$InstallPathItem = Get-Item -LiteralPath $InstallPath -ErrorAction SilentlyContinue
+if (-not $InstallPathItem -or ($InstallPathItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    Block "registered Python install path is missing or is a symlink/junction."
 }
 $TrustedPythonReal = (Resolve-Path -LiteralPath $TrustedPythonReal).Path
+if ((Get-Item -LiteralPath $TrustedPythonReal).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    Block "resolved python.exe is a symlink/junction."
+}
+$AdminOnlyRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }
+if ($AdminOnlyRoots.Count -eq 0) {
+    Block "no Program Files root could be determined from the environment."
+}
+$UnderAdminOnlyRoot = $false
+foreach ($candidateRoot in $AdminOnlyRoots) {
+    # Deliberately not named $root: PowerShell variable names are
+    # case-insensitive, so a loop variable named $root would silently
+    # clobber $Root (this repository's root, used below for -C and the
+    # Python bootstrap) once this loop runs -- caught only by actually
+    # executing this script end-to-end, not by code review.
+    if ($TrustedPythonReal.StartsWith(($candidateRoot.TrimEnd('\') + '\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        $UnderAdminOnlyRoot = $true
+        break
+    }
+}
+if (-not $UnderAdminOnlyRoot) {
+    Block "registered Python install is not under an admin-only-writable Program Files root: $TrustedPythonReal"
+}
 $VenvRootFull = (Resolve-Path -LiteralPath (Join-Path $Root ".venv")).Path
 if ($TrustedPythonReal.StartsWith($VenvRootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
     Block "resolved trusted Python must not be inside this repository's .venv."
 }
+# Defense-in-depth only (see rationale above): a valid PSF signature on
+# python.exe specifically, in addition to -- never instead of -- the
+# admin-only-root directory check above.
 try {
     $Signature = Get-AuthenticodeSignature -LiteralPath $TrustedPythonReal
 } catch {
@@ -82,6 +133,51 @@ if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
     Block ".venv\Scripts\python.exe must exist."
 }
 
+# --- Trusted Git resolution --------------------------------------------------
+# A bare `git` command below would be resolved via PATH, which could be
+# shadowed by an attacker-controlled executable earlier on PATH (the same
+# concern as the interpreter resolution above). Resolve to one of Git for
+# Windows' default install locations under an admin-only-writable Program
+# Files root instead, mirroring live_pilot_source_cutover.py's
+# _resolve_trusted_git_windows (kept in sync manually since this is a
+# separate process from the Python it later launches).
+$GitCandidateSuffixes = @("Git\cmd\git.exe", "Git\bin\git.exe", "Git\mingw64\bin\git.exe")
+$TrustedGit = $null
+foreach ($candidateRoot in $AdminOnlyRoots) {
+    # Deliberately not named $root: see the identical note on the Python
+    # admin-only-root check above -- it would silently clobber $Root.
+    foreach ($suffix in $GitCandidateSuffixes) {
+        $candidate = Join-Path $candidateRoot $suffix
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -LiteralPath $candidate
+            if (-not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                $TrustedGit = (Resolve-Path -LiteralPath $candidate).Path
+                break
+            }
+        }
+    }
+    if ($TrustedGit) { break }
+}
+if (-not $TrustedGit) {
+    Block "no trusted admin-only-writable Git executable found under Program Files; install Git for Windows to its default location."
+}
+# Clear Git repository-discovery environment variables before any
+# invocation below, so a hostile inherited GIT_DIR/GIT_WORK_TREE etc.
+# cannot make these checks inspect a different repository than $Root.
+foreach ($name in @(
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES",
+    "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+)) {
+    Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+}
+# Not wrapped in a PowerShell function: a user-defined function's @args
+# binds an array argument (e.g. $AuditedPaths below) as one nested element
+# rather than expanding it, unlike PowerShell's native-command argument
+# binding used directly at each call site below, which does expand an
+# array variable into separate arguments the same way the original bare
+# `& git ... $AuditedPaths` calls relied on.
+$GitSafeArgs = @("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", $Root)
+
 # --- Required operator-supplied values -------------------------------------
 # Same required-value contract as the POSIX script; same env var names, so
 # a previously-prepared value set is portable across either entrypoint.
@@ -99,7 +195,7 @@ foreach ($name in $RequiredVars) {
 }
 
 # --- Exact commit SHA pin ----------------------------------------------------
-$ActualSha = (& git rev-parse HEAD).Trim()
+$ActualSha = (& $TrustedGit @GitSafeArgs rev-parse HEAD).Trim()
 if ($ActualSha -ne $env:LIVE_PILOT_EXPECTED_COMMIT_SHA) {
     Block "checkout SHA does not match the explicitly approved SHA."
 }
@@ -110,13 +206,13 @@ $AuditedPaths = @(
     "pytest.ini", ".github/workflows/pytest.yml",
     "live_pilot_operational_once.sh", "live_pilot_operational_once.ps1"
 )
-$SourceDirty = & git status --porcelain=v1 --untracked-files=all -- $AuditedPaths
+$SourceDirty = & $TrustedGit @GitSafeArgs status --porcelain=v1 --untracked-files=all -- $AuditedPaths
 if ($SourceDirty) {
     Block "tracked or untracked audited source changes are present before Python launch."
 }
 
 # --- Hidden index state (assume-unchanged / skip-worktree) ------------------
-$IndexHidden = & git ls-files -v -- $AuditedPaths | Where-Object {
+$IndexHidden = & $TrustedGit @GitSafeArgs ls-files -v -- $AuditedPaths | Where-Object {
     # -cmatch (case-sensitive): PowerShell's default -match is
     # case-insensitive, which would treat the normal "H" (tracked, no
     # special index state) flag as matching the lowercase a-z class below
@@ -135,7 +231,7 @@ if ($IndexHidden) {
 # file, or a directory with __init__.py/.pyc/*.so under it. The Windows
 # native-extension suffix is .pyd (not .so); .dylib is macOS-only and kept
 # here only for parity since it is harmless to also exclude.
-$IgnoredImportable = & git ls-files --others --ignored --exclude-standard -- src tests scripts
+$IgnoredImportable = & $TrustedGit @GitSafeArgs ls-files --others --ignored --exclude-standard -- src tests scripts
 $IgnoredImportableHits = @()
 foreach ($path in $IgnoredImportable) {
     if (-not $path) { continue }
@@ -181,18 +277,35 @@ if ($LASTEXITCODE -ne 0) {
 # where zoneinfo falls back to /usr/share/zoneinfo; verified empirically
 # on this machine (ModuleNotFoundError: tzdata under -S, since -S also
 # hides this venv's tzdata pip package from the trusted interpreter).
-# Point PYTHONTZPATH directly at the already-pinned (requirements.txt)
-# tzdata package's raw zoneinfo/ directory -- the same TZif file format
-# POSIX's /usr/share/zoneinfo uses -- after verifying its exact file
-# hashes, so no unverified site-packages import is ever trusted.
+# Point PYTHONTZPATH at a verified, immutable copy of the already-pinned
+# (requirements.txt) tzdata package's raw zoneinfo/ directory -- the same
+# TZif file format POSIX's /usr/share/zoneinfo uses.
+#
+# Reject any reparse point (symlink or NTFS junction) inside the source
+# directory *before* verification: Python's Path.is_symlink(), used inside
+# verify_live_tzdata_runtime.py, is not guaranteed to recognize an NTFS
+# junction the same way it recognizes a symlink, so that check alone is not
+# sufficient on Windows; the FileAttributes check below is.
+$TzdataSourceDir = Join-Path $VenvSitePackages "tzdata\zoneinfo"
+$TzdataReparsePoints = Get-ChildItem -LiteralPath $TzdataSourceDir -Recurse -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }
+if ($TzdataReparsePoints) {
+    Block "venv tzdata zoneinfo directory contains a symlink or junction."
+}
+
+# Then copy to a fresh, process-local directory and verify *that* copy's
+# hashes, so a TOCTOU write to the still-writable venv directory after
+# this point cannot change the bytes PYTHONTZPATH actually serves:
+# verification and consumption happen against the same immutable copy.
 $TzdataManifest = Join-Path $Root "scripts\live_tzdata_manifest.json"
 $TzdataVerifier = Join-Path $Root "scripts\verify_live_tzdata_runtime.py"
-$TzdataZoneinfoDir = Join-Path $VenvSitePackages "tzdata\zoneinfo"
-& $TrustedPythonReal -I -P -S $TzdataVerifier --zoneinfo-dir $TzdataZoneinfoDir --manifest $TzdataManifest
+$TzdataVerifiedCopy = Join-Path ([System.IO.Path]::GetTempPath()) ("live_pilot_tzdata_" + [System.Guid]::NewGuid().ToString("N"))
+Copy-Item -LiteralPath $TzdataSourceDir -Destination $TzdataVerifiedCopy -Recurse -Force
+& $TrustedPythonReal -I -P -S $TzdataVerifier --zoneinfo-dir $TzdataVerifiedCopy --manifest $TzdataManifest
 if ($LASTEXITCODE -ne 0) {
     Block "venv tzdata dependency does not match the pinned runtime manifest."
 }
-$env:PYTHONTZPATH = $TzdataZoneinfoDir
+$env:PYTHONTZPATH = $TzdataVerifiedCopy
 
 # --- Bootstrap into the operational entrypoint ------------------------------
 $PythonBootstrap = @'
