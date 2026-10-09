@@ -6,9 +6,9 @@ This is the canonical cross-chat handoff entry point. **Do not rely on chat memo
 
 ## Current operating model
 
-- **ChatGPT chat** is the primary project-management, safety-audit, GitHub investigation and GitHub execution environment.
+- **Claude Code** is the default day-to-day implementation, project-management, safety-audit, and GitHub investigation/execution environment. (Changed 2026-10-09, user-confirmed.)
 - **GitHub `main`** is the canonical remote code/evidence source.
-- **Claude Code / local coding agents** are used only when local-filesystem implementation/testing is materially required or clearly faster than remote GitHub work.
+- **ChatGPT chat** is an optional advisory role only, consulted by explicit user request for a specific bounded question. It is not part of the default control loop and must not insert itself into it unasked.
 - **Chromebook + IBKR** is used only when local/broker runtime evidence is genuinely indispensable.
 - **User action is last resort**. Complete all AI/tool work first.
 - When user action is genuinely unavoidable, show `🟢 あなたの出番です` and provide exactly one action with location, operation, expected result, and what not to change.
