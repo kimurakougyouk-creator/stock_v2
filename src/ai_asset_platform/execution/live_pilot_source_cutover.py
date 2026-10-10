@@ -61,13 +61,30 @@ _WINDOWS_GIT_CANDIDATES: tuple[str, ...] = (
 
 
 def _windows_admin_only_roots() -> tuple[Path, ...]:
+    # Codex P1: os.environ["ProgramFiles"] is just an environment variable,
+    # not an OS-owned fact -- a hostile inherited environment could redefine
+    # it to point at any user-writable directory. Read the same value from
+    # its registry source of truth instead (HKLM, admin-only-writable,
+    # cannot be influenced by this process's environment).
+    import winreg
+
     roots = []
-    for var in ("ProgramFiles", "ProgramFiles(x86)"):
-        value = os.environ.get(var)
-        if value:
-            roots.append(Path(value).resolve())
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+        ) as key:
+            for value_name in ("ProgramFilesDir", "ProgramFilesDir (x86)"):
+                try:
+                    value, _ = winreg.QueryValueEx(key, value_name)
+                except FileNotFoundError:
+                    continue
+                if value:
+                    roots.append(Path(value).resolve())
+    except OSError as exc:
+        raise OSError(f"Program Files registry roots could not be read: {exc}") from exc
     if not roots:
-        raise OSError("no Program Files root could be determined from the environment")
+        raise OSError("no Program Files root could be determined from the registry")
     return tuple(roots)
 
 

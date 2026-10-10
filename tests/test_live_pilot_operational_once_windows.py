@@ -197,3 +197,30 @@ def test_requirements_pins_exact_tzdata_version_matching_manifest():
     manifest = json.loads(Path("scripts/live_tzdata_manifest.json").read_text(encoding="utf-8"))
     pinned_version = manifest["version"]
     assert f"tzdata=={pinned_version}" in requirements
+
+
+def test_windows_entrypoint_derives_admin_only_roots_from_registry_not_environment():
+    # Regression guard for the Codex-caught finding (exact HEAD 3825f0b):
+    # $env:ProgramFiles is just an environment variable, which a hostile
+    # inherited environment could redefine to point at a user-writable
+    # directory, defeating the whole admin-only-root check. The registry
+    # value (HKLM, not influenceable by this process's environment) must
+    # be used instead.
+    script = _text()
+    assert "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion" in script
+    assert "ProgramFilesDir" in script
+    assert "$AdminOnlyRoots = @($env:ProgramFiles" not in script
+    assert "${env:ProgramFiles(x86)}) | Where-Object" not in script
+
+
+def test_windows_entrypoint_hardens_tzdata_copy_read_only():
+    # Regression guard for the Codex-caught finding that moving the tzdata
+    # files to a fresh temp directory did not, by itself, close the
+    # check-then-use window, since the copy destination is just as
+    # user-writable as the source. Marking the copy read-only immediately
+    # after copying (before verification) is required.
+    script = _text()
+    copy_at = script.index("Copy-Item -LiteralPath $TzdataSourceDir -Destination $TzdataVerifiedCopy")
+    readonly_at = script.index("IsReadOnly = $true")
+    verify_at = script.index('$TzdataVerifier --zoneinfo-dir $TzdataVerifiedCopy')
+    assert copy_at < readonly_at < verify_at

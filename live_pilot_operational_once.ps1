@@ -89,7 +89,14 @@ $TrustedPythonReal = (Resolve-Path -LiteralPath $TrustedPythonReal).Path
 if ((Get-Item -LiteralPath $TrustedPythonReal).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
     Block "resolved python.exe is a symlink/junction."
 }
-$AdminOnlyRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }
+# Codex P1 (exact HEAD 3825f0b): $env:ProgramFiles is an environment
+# variable, not an OS-owned fact -- a hostile inherited environment could
+# redefine it to point at any user-writable directory and this check
+# would then trust whatever git.exe/python.exe lives there. Read the same
+# value from its registry source of truth instead (HKLM, admin-only-
+# writable, cannot be influenced by this process's environment).
+$ProgramFilesRegistry = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion" -ErrorAction SilentlyContinue
+$AdminOnlyRoots = @($ProgramFilesRegistry.ProgramFilesDir, $ProgramFilesRegistry.'ProgramFilesDir (x86)') | Where-Object { $_ } | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }
 if ($AdminOnlyRoots.Count -eq 0) {
     Block "no Program Files root could be determined from the environment."
 }
@@ -293,14 +300,31 @@ if ($TzdataReparsePoints) {
     Block "venv tzdata zoneinfo directory contains a symlink or junction."
 }
 
-# Then copy to a fresh, process-local directory and verify *that* copy's
-# hashes, so a TOCTOU write to the still-writable venv directory after
-# this point cannot change the bytes PYTHONTZPATH actually serves:
-# verification and consumption happen against the same immutable copy.
+# Then copy to a fresh, process-local directory, mark every copied file
+# read-only immediately (closes the window against accidental or
+# normal-API writes; see the residual-risk note below), and verify *that*
+# copy's hashes, so a TOCTOU write to the still-writable venv directory
+# after this point cannot change the bytes PYTHONTZPATH actually serves.
+#
+# Residual risk (Codex P1, exact HEAD 3825f0b, acknowledged rather than
+# hidden): a read-only file attribute does not withstand a fully capable
+# concurrent process already running as this same OS user -- the owner of
+# a file can always re-grant itself write access to its own object on
+# Windows, the same way a Unix process running as the file's owner can
+# chmod it back. No userspace trick closes that gap; it would require a
+# genuine privilege boundary (a distinct, more restricted account than the
+# interactive operator session) that this project does not currently have
+# and that is out of scope for this Windows-compatibility PR. An attacker
+# with that level of access already has far more direct options against
+# this process (reading its memory, patching the TWS API DLL, etc.), so
+# this mitigation targets the narrower, still-worthwhile threat of
+# accidental or lower-privilege tampering, not a fully capable co-resident
+# attacker.
 $TzdataManifest = Join-Path $Root "scripts\live_tzdata_manifest.json"
 $TzdataVerifier = Join-Path $Root "scripts\verify_live_tzdata_runtime.py"
 $TzdataVerifiedCopy = Join-Path ([System.IO.Path]::GetTempPath()) ("live_pilot_tzdata_" + [System.Guid]::NewGuid().ToString("N"))
 Copy-Item -LiteralPath $TzdataSourceDir -Destination $TzdataVerifiedCopy -Recurse -Force
+Get-ChildItem -LiteralPath $TzdataVerifiedCopy -Recurse -File | ForEach-Object { $_.IsReadOnly = $true }
 & $TrustedPythonReal -I -P -S $TzdataVerifier --zoneinfo-dir $TzdataVerifiedCopy --manifest $TzdataManifest
 if ($LASTEXITCODE -ne 0) {
     Block "venv tzdata dependency does not match the pinned runtime manifest."
