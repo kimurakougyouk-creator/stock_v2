@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import sys
 
 import ai_asset_platform.execution.live_pilot_completion as subject
 
@@ -990,7 +991,10 @@ def test_durable_write_json_fsyncs_file_and_directory(tmp_path: Path, monkeypatc
     """Codex P1 (round 3): both the temp file and the containing directory
 
     must be fsynced, or a crash right after this call can lose the rename or
-    reorder it relative to another durable write.
+    reorder it relative to another durable write. Windows has no os.fsync
+    equivalent for a directory handle (see ``_win32_fsync_directory``), so on
+    that platform the directory-flush step is observed through that helper
+    instead of through ``os.fsync``.
     """
     calls = []
     original_fsync = os.fsync
@@ -1000,11 +1004,26 @@ def test_durable_write_json_fsyncs_file_and_directory(tmp_path: Path, monkeypatc
         return original_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", spy_fsync)
+
+    directory_flush_calls = []
+    if sys.platform == "win32":
+        original_win32_flush = subject._win32_fsync_directory
+
+        def spy_win32_flush(directory):
+            directory_flush_calls.append(directory)
+            return original_win32_flush(directory)
+
+        monkeypatch.setattr(subject, "_win32_fsync_directory", spy_win32_flush)
+
     target = tmp_path / "durable.json"
     subject._durable_write_json(target, {"a": 1})
 
     assert target.exists()
-    assert len(calls) >= 2
+    if sys.platform == "win32":
+        assert len(calls) >= 1
+        assert len(directory_flush_calls) >= 1
+    else:
+        assert len(calls) >= 2
 
 
 def test_write_full_loops_over_short_writes_and_rejects_no_progress(tmp_path: Path, monkeypatch):

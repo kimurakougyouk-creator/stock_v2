@@ -17,6 +17,11 @@ import math
 import os
 from pathlib import Path
 import secrets
+import sys
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
 
 
 OPERATOR_CONFIRMATION_VALUE = "AUTHORIZE_ONE_LIVE_PILOT_ONLY"
@@ -82,6 +87,38 @@ def _consumed_path(directory: Path, nonce: str) -> Path:
     return _authorization_path(directory, nonce).with_suffix(".consumed.json")
 
 
+def _win32_fsync_directory(directory: Path) -> None:
+    """Fail-closed directory-metadata flush on Windows.
+
+    See the identical helper in ``live_pilot_send_journal.py`` for the full
+    rationale: the handle must be opened with ``GENERIC_WRITE`` (not just
+    ``GENERIC_READ``) for ``FlushFileBuffers`` to succeed instead of failing
+    with ``ERROR_ACCESS_DENIED``, and a failed flush must raise, the same as
+    a failed POSIX ``os.fsync``. A ``CreateFileW`` failure (a genuine
+    access/path problem) is also raised.
+    """
+    handle = ctypes.windll.kernel32.CreateFileW(  # type: ignore[attr-defined]
+        str(directory),
+        0x80000000 | 0x40000000,  # GENERIC_READ | GENERIC_WRITE
+        0x00000001 | 0x00000002 | 0x00000004,  # FILE_SHARE_READ/WRITE/DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS
+        None,
+    )
+    if handle in (0, -1, wintypes.HANDLE(-1).value):
+        raise OSError(f"CreateFileW failed to open directory for flush: {directory}")
+    try:
+        if not ctypes.windll.kernel32.FlushFileBuffers(handle):  # type: ignore[attr-defined]
+            error_code = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
+            raise OSError(
+                f"FlushFileBuffers failed for directory {directory} "
+                f"(GetLastError={error_code})"
+            )
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+
+
 def _fsync_parent_dir(path: Path) -> None:
     """Fsync the containing directory so a new/removed entry survives a crash.
 
@@ -91,6 +128,9 @@ def _fsync_parent_dir(path: Path) -> None:
     back up without the entry and silently permit consuming the same
     authorization (or reusing an authorization file) a second time.
     """
+    if sys.platform == "win32":
+        _win32_fsync_directory(path.parent)
+        return
     directory_fd = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(directory_fd)
