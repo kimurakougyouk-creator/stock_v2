@@ -40,8 +40,9 @@ def test_windows_entrypoint_blocks_before_required_env_vars_checked():
     required = [
         "LIVE_PILOT_INTENT_ID", "LIVE_PILOT_TICKER", "LIVE_PILOT_SIDE",
         "LIVE_PILOT_QUANTITY", "LIVE_PILOT_LIMIT_PRICE",
-        "LIVE_PILOT_NOTIONAL_JPY", "LIVE_PILOT_NONCE",
-        "LIVE_PILOT_ACCOUNT_FINGERPRINT", "LIVE_PILOT_EXPECTED_COMMIT_SHA",
+        "LIVE_PILOT_NOTIONAL_JPY", "LIVE_PILOT_OPERATOR_CONFIRMATION",
+        "LIVE_PILOT_ACCOUNT_FINGERPRINT", "LIVE_PILOT_ENDPOINT_PORT",
+        "LIVE_PILOT_EXPECTED_COMMIT_SHA",
     ]
     for name in required:
         assert name in script, f"{name} is no longer checked"
@@ -270,3 +271,44 @@ def test_windows_entrypoint_checks_lastexitcode_after_every_git_invocation():
     assert status_at < status_check_at < lsfiles_v_at
     assert lsfiles_v_at < lsfiles_v_check_at < lsfiles_ignored_at
     assert lsfiles_ignored_at < lsfiles_ignored_check_at
+
+
+def test_windows_entrypoint_never_exposes_nonce_as_operator_input():
+    # The nonce issue_live_pilot_authorization() generates internally must
+    # never be something the operator supplies or transcribes -- that was
+    # pure incidental transcription risk with no safety purpose. Only the
+    # two confirmation values (operator-issuance and final-send) remain
+    # operator-supplied.
+    script = _text()
+    assert "$env:LIVE_PILOT_NONCE" not in script
+    assert '"LIVE_PILOT_NONCE"' not in script
+    assert "$env:LIVE_PILOT_OPERATOR_CONFIRMATION" in script
+    assert "$env:LIVE_PILOT_FINAL_CONFIRMATION" in script
+
+
+def test_windows_entrypoint_issues_authorization_before_bootstrap_and_fails_closed():
+    script = _text()
+    issue_at = script.index("issue_live_pilot_authorization_cli.py")
+    issue_call_at = script.index("$IssuedNonce = & $TrustedPythonReal")
+    issue_check_at = script.index('Block "one-shot authorization could not be issued."')
+    nonce_use_at = script.index('"--nonce=$IssuedNonce"')
+    bootstrap_marker_at = script.index("# --- Bootstrap into the operational entrypoint")
+    assert issue_at < issue_call_at < issue_check_at < bootstrap_marker_at < nonce_use_at
+
+
+def test_windows_entrypoint_passes_matching_trade_params_to_issuance():
+    # The issuance call must use the exact same trade-parameter env vars
+    # already required above, so the later consume_live_pilot_authorization
+    # binding check (which re-verifies every field) succeeds naturally
+    # rather than by coincidence.
+    script = _text()
+    issue_block_start = script.index("$IssuedNonce = & $TrustedPythonReal")
+    issue_block_end = script.index("if ($LASTEXITCODE -ne 0 -or -not $IssuedNonce)")
+    issue_block = script[issue_block_start:issue_block_end]
+    for var in (
+        "LIVE_PILOT_OPERATOR_CONFIRMATION", "LIVE_PILOT_INTENT_ID",
+        "LIVE_PILOT_TICKER", "LIVE_PILOT_SIDE", "LIVE_PILOT_QUANTITY",
+        "LIVE_PILOT_LIMIT_PRICE", "LIVE_PILOT_NOTIONAL_JPY",
+        "LIVE_PILOT_ACCOUNT_FINGERPRINT", "LIVE_PILOT_ENDPOINT_PORT",
+    ):
+        assert f"$env:{var}" in issue_block, f"{var} not passed to issuance"

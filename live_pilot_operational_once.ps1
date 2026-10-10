@@ -1,18 +1,26 @@
 #Requires -Version 5.1
 <#
-Human-facing single Windows entrypoint for Issue #255, mirroring
-live_pilot_operational_once.sh. Every check in the POSIX script has a
-direct counterpart here, using the equivalent Windows primitive -- not a
-weaker substitute. See the comment above each check for the specific
-POSIX behavior it replaces and why.
+Human-facing single Windows entrypoint for Issue #255. Most checks here
+have a direct counterpart in live_pilot_operational_once.sh (the POSIX
+wrapper), using the equivalent Windows primitive -- not a weaker
+substitute; see the comment above each check for which POSIX behavior it
+replaces and why. The two wrappers' required-value contracts now
+intentionally differ, though: unlike the POSIX wrapper, this one issues
+its own one-shot authorization (or, on a recovery run, loads the
+already-recorded durable nonce) itself, immediately before launch, so
+the operator never supplies or transcribes LIVE_PILOT_NONCE at all. See
+the "Issue a fresh one-shot authorization" section below.
 
-This wrapper never creates an authorization and never supplies the final
-consequential confirmation by default. Those values must already exist in
-the environment from the separately approved operator step.
+This wrapper never supplies the final consequential confirmation
+(LIVE_PILOT_FINAL_CONFIRMATION) by default -- that value must come from
+the operator's own separately approved step, exactly as before.
 
 Re-running this same entrypoint after the irreversible campaign marker
 exists is recovery-only: the Python coordinator makes the sender
-unreachable and performs read-only reconciliation only.
+unreachable and performs read-only reconciliation only. This wrapper
+detects that condition itself (see below) and loads the already-
+recorded nonce rather than issuing a new one, so recovery runs work
+correctly without any extra operator step.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -186,13 +194,24 @@ foreach ($name in @(
 $GitSafeArgs = @("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", $Root)
 
 # --- Required operator-supplied values -------------------------------------
-# Same required-value contract as the POSIX script; same env var names, so
-# a previously-prepared value set is portable across either entrypoint.
+# Unlike the POSIX script, LIVE_PILOT_NONCE is not part of this contract:
+# issue_live_pilot_authorization() generates its own nonce internally, so
+# requiring the operator to read it from one step and retype/paste it into
+# another serves no safety purpose -- it is pure incidental transcription
+# risk. This wrapper instead issues a fresh authorization itself,
+# immediately before launch (see below), using the same trade parameters
+# already required here, and uses the nonce it gets back. The two
+# confirmation values remain operator-supplied and are never defaulted:
+# LIVE_PILOT_OPERATOR_CONFIRMATION binds this exact intent (the
+# authorization-issuance confirmation), and LIVE_PILOT_FINAL_CONFIRMATION
+# (checked later, still optional/empty by default) is the separate,
+# later, final send confirmation -- the two-step approval structure is
+# unchanged, only the nonce hand-off between them is automated.
 $RequiredVars = @(
     "LIVE_PILOT_INTENT_ID", "LIVE_PILOT_TICKER", "LIVE_PILOT_SIDE",
     "LIVE_PILOT_QUANTITY", "LIVE_PILOT_LIMIT_PRICE", "LIVE_PILOT_NOTIONAL_JPY",
-    "LIVE_PILOT_NONCE", "LIVE_PILOT_ACCOUNT_FINGERPRINT",
-    "LIVE_PILOT_EXPECTED_COMMIT_SHA"
+    "LIVE_PILOT_OPERATOR_CONFIRMATION", "LIVE_PILOT_ACCOUNT_FINGERPRINT",
+    "LIVE_PILOT_ENDPOINT_PORT", "LIVE_PILOT_EXPECTED_COMMIT_SHA"
 )
 foreach ($name in $RequiredVars) {
     $value = [System.Environment]::GetEnvironmentVariable($name)
@@ -369,6 +388,33 @@ if ($LASTEXITCODE -ne 0) {
 }
 $env:PYTHONTZPATH = $TzdataVerifiedCopy
 
+# --- Issue a fresh one-shot authorization and capture its nonce ------------
+# Binds this exact intent (issue_live_pilot_authorization requires
+# LIVE_PILOT_OPERATOR_CONFIRMATION to equal the fixed
+# AUTHORIZE_ONE_LIVE_PILOT_ONLY constant -- never defaulted here) using the
+# same trade parameters already required above, immediately before launch,
+# and captures the nonce it generates internally so the operator never
+# sees or transcribes it. This does not relax exactly-once: the entrypoint
+# still separately requires LIVE_PILOT_FINAL_CONFIRMATION (still optional/
+# empty by default, checked far later, immediately before transport) for
+# an actual send, and recovery-only runs (a prior send attempt already
+# recorded) bypass authorization consumption entirely regardless of nonce,
+# per the existing entrypoint's own global_send_attempt_recorded() check.
+$IssueAuthorizationScript = Join-Path $Root "scripts\issue_live_pilot_authorization_cli.py"
+$IssuedNonce = & $TrustedPythonReal -I -P -S $IssueAuthorizationScript `
+    "--confirmation=$($env:LIVE_PILOT_OPERATOR_CONFIRMATION)" `
+    "--intent-id=$($env:LIVE_PILOT_INTENT_ID)" `
+    "--ticker=$($env:LIVE_PILOT_TICKER)" `
+    "--side=$($env:LIVE_PILOT_SIDE)" `
+    "--quantity=$($env:LIVE_PILOT_QUANTITY)" `
+    "--limit-price=$($env:LIVE_PILOT_LIMIT_PRICE)" `
+    "--estimated-notional-jpy=$($env:LIVE_PILOT_NOTIONAL_JPY)" `
+    "--account-fingerprint=$($env:LIVE_PILOT_ACCOUNT_FINGERPRINT)" `
+    "--endpoint-port=$($env:LIVE_PILOT_ENDPOINT_PORT)"
+if ($LASTEXITCODE -ne 0 -or -not $IssuedNonce) {
+    Block "one-shot authorization could not be issued."
+}
+
 # --- Bootstrap into the operational entrypoint ------------------------------
 $PythonBootstrap = @'
 import runpy
@@ -407,7 +453,7 @@ if (-not $FinalConfirmation) { $FinalConfirmation = "" }
     "--quantity=$($env:LIVE_PILOT_QUANTITY)" `
     "--limit-price=$($env:LIVE_PILOT_LIMIT_PRICE)" `
     "--estimated-notional-jpy=$($env:LIVE_PILOT_NOTIONAL_JPY)" `
-    "--nonce=$($env:LIVE_PILOT_NONCE)" `
+    "--nonce=$IssuedNonce" `
     "--account-fingerprint=$($env:LIVE_PILOT_ACCOUNT_FINGERPRINT)" `
     "--expected-commit-sha=$($env:LIVE_PILOT_EXPECTED_COMMIT_SHA)" `
     "--final-confirmation=$FinalConfirmation" `
