@@ -10,6 +10,7 @@ import subprocess
 from typing import Callable
 
 from ai_asset_platform.execution.live_pilot_source_cutover import (
+    sanitized_git_env,
     audit_live_pilot_source_cutover,
     safe_git_command,
 )
@@ -124,6 +125,8 @@ def attest_strategy_source(
     try:
         ignored = runner(
             safe_git_command(
+                "-C",
+                str(repository_root),
                 "ls-files",
                 "--others",
                 "--ignored",
@@ -135,6 +138,7 @@ def attest_strategy_source(
             check=True,
             capture_output=True,
             text=True,
+            env=sanitized_git_env(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise StrategySourceAttestationError(

@@ -6,4 +6,4 @@ pytest
 yfinance
 openai
 python-dotenv>=1.2.2
-tzdata
+tzdata==2026.4
