@@ -1,18 +1,26 @@
 #Requires -Version 5.1
 <#
-Human-facing single Windows entrypoint for Issue #255, mirroring
-live_pilot_operational_once.sh. Every check in the POSIX script has a
-direct counterpart here, using the equivalent Windows primitive -- not a
-weaker substitute. See the comment above each check for the specific
-POSIX behavior it replaces and why.
+Human-facing single Windows entrypoint for Issue #255. Most checks here
+have a direct counterpart in live_pilot_operational_once.sh (the POSIX
+wrapper), using the equivalent Windows primitive -- not a weaker
+substitute; see the comment above each check for which POSIX behavior it
+replaces and why. The two wrappers' required-value contracts now
+intentionally differ, though: unlike the POSIX wrapper, this one issues
+its own one-shot authorization (or, on a recovery run, loads the
+already-recorded durable nonce) itself, immediately before launch, so
+the operator never supplies or transcribes LIVE_PILOT_NONCE at all. See
+the "Issue a fresh one-shot authorization" section below.
 
-This wrapper never creates an authorization and never supplies the final
-consequential confirmation by default. Those values must already exist in
-the environment from the separately approved operator step.
+This wrapper never supplies the final consequential confirmation
+(LIVE_PILOT_FINAL_CONFIRMATION) by default -- that value must come from
+the operator's own separately approved step, exactly as before.
 
 Re-running this same entrypoint after the irreversible campaign marker
 exists is recovery-only: the Python coordinator makes the sender
-unreachable and performs read-only reconciliation only.
+unreachable and performs read-only reconciliation only. This wrapper
+detects that condition itself (see below) and loads the already-
+recorded nonce rather than issuing a new one, so recovery runs work
+correctly without any extra operator step.
 #>
 
 $ErrorActionPreference = "Stop"
