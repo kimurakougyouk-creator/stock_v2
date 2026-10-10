@@ -1,6 +1,6 @@
 # First Live Cash Pilot — Operator Prerequisites
 
-Last verified: 2026-09-06 JST
+Last verified: 2026-10-10 JST
 
 This checklist exists so non-code prerequisites are not discovered at the last minute. It does not authorize a Live order.
 
@@ -16,7 +16,8 @@ The following must be prepared or verified before the execution day where possib
 - [ ] Any mandatory market registration is complete (for Japanese cash equities, verify JASDEC eligibility/registration as applicable to the account).
 - [ ] TWS or IB Gateway can be launched in **Live** mode.
 - [ ] API **Read-Only remains ON** throughout preparation.
-- [ ] Chromebook/network/power/runtime environment is available for the intended session.
+- [x] Windows runtime environment: Python 3.13 is installed **for all users** (HKLM-registered, under an admin-only-writable `%ProgramFiles%` root) — the Windows Phase 3 entrypoint (`live_pilot_operational_once.ps1`) deliberately fails closed on a per-user-only install, since that install location is fully writable by the operator's own account and cannot provide the same tamper-resistance POSIX's root-owned `/usr/bin/python3` does. Verified and resolved on the operator's machine 2026-10-10 (see `COMPLETION_ROADMAP.md`'s "Current state" section for detail); re-verify after any Windows reinstall or new machine.
+- [ ] PC/network/power/runtime environment is available for the intended session.
 - [ ] No planned software update/reboot should interrupt the execution window.
 - [ ] The intended market is scheduled to be open on the pilot date.
 
@@ -44,9 +45,8 @@ Do not rely on yesterday's `latest.json` or screenshots for these:
 - [ ] Do **not** create a second authorization as a workaround after timeout/disconnect/UNKNOWN.
 - [ ] Do **not** retry, cancel, modify, flatten, or close automatically while broker state is UNKNOWN.
 
-## Current 2026-09-07 calendar note
+## Current 2026-10-10 calendar note
 
-- NYSE regular session: closed for Labor Day; do not use AAPL/SPY as a regular-session pilot candidate.
-- JPX: scheduled regular trading day; within the already-bounded exact pilot scope, `9432.T` is the calendar-compatible candidate, subject to every other gate.
+- JPX: 2026-10-10 (Sat) / 10-11 (Sun) / 10-12 (Mon, national holiday — Sports Day) are non-trading days. `9432.T` is not executable until 2026-10-13 (Tue), subject to every other gate being GREEN that day.
 
 This is execution-mechanics preparation only, not an investment recommendation.
