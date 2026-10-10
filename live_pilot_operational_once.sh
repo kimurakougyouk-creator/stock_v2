@@ -109,7 +109,13 @@ fi
 # Git intentionally hides ignored files from status.  Most ignored runtime
 # caches are harmless, but importable source/bytecode/native-extension artifacts
 # under audited code paths could execute before the in-process audit.  Detect
-# those explicitly while allowing normal __pycache__ entries.
+# those explicitly.  A __pycache__ entry's embedded source-hash/mtime+size
+# header can be forged to match the tracked .py file it shadows, letting
+# CPython's import machinery (even under -I -P -S) load stale/forged
+# bytecode instead of recompiling from the audited source -- no concurrent
+# process required, just planting the file beforehand.  A bytecode cache is
+# never itself meaningful data (always reproducible by recompiling the
+# tracked source), so purge it here rather than merely allow it.
 IGNORED_IMPORTABLE="$(
   git ls-files --others --ignored --exclude-standard -- src tests scripts |
     while IFS= read -r path; do
@@ -119,6 +125,7 @@ IGNORED_IMPORTABLE="$(
       fi
       case "$path" in
         */__pycache__/*)
+          rm -f -- "$path" || printf '%s\n' "PYCACHE_PURGE_FAILED $path"
           ;;
         *.py|*.pyc|*.pyo|*.pyz|*.so|*.pyd|*.dylib)
           printf '%s\n' "$path"

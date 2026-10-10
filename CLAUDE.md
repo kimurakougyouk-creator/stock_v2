@@ -19,11 +19,11 @@ Complete the multi-broker, multi-market AI trading platform safely and efficient
 
 ## Roles
 
-- Claude Code: primary implementation agent. Preserve implementation continuity, inspect current repository state, implement the smallest blocker-closing change, add/repair tests, run relevant local tests, self-review the diff, and report concrete evidence.
-- ChatGPT: project manager/orchestrator, completion-roadmap control, architecture/safety acceptance, GitHub investigation/execution, evidence integration, progress control, and operator handoff.
-- Codex: independent second reviewer for safety-critical work. Inspect the actual diff/code/tests from a clean perspective and actively search for contradictions, missing edge cases, stale evidence, and unsafe assumptions. Do not duplicate Claude's whole implementation by default. Codex may implement only when explicitly delegated because Claude is blocked or when a task is clearly separable and non-overlapping.
+- Claude Code: primary implementation agent and default day-to-day progress/critical-path owner. Preserve implementation continuity, inspect current repository state, implement the smallest blocker-closing change, add/repair tests, run relevant local tests, self-review the diff, verify evidence against the current roadmap and governing issue, and report concrete evidence.
+- ChatGPT: optional advisory role only, consulted by explicit user request for a specific bounded question. Not part of the default implementation, acceptance, or merge-gate loop, and must not insert itself into that loop unasked. (Changed 2026-10-09, user-confirmed, after repeated user-documented instances of ChatGPT not following instructions, scope creep beyond critical path, and acceptance judgments the user found unreliable.)
+- Codex: independent second reviewer for safety-critical work. Inspect the actual diff/code/tests from a clean perspective and actively search for contradictions, missing edge cases, stale evidence, and unsafe assumptions. Do not duplicate Claude's whole implementation by default. Codex may implement only when explicitly delegated because Claude is blocked or when a task is clearly separable and non-overlapping. Remains structurally independent of Claude Code regardless of any other role change.
 - GitHub: canonical source of truth for source, diff, CI, issues, and merge state.
-- User: only actions AI cannot perform, such as broker login/identity verification, funding/account actions, broker-side setting changes, and explicit approval for consequential real trading actions.
+- User: only actions AI cannot perform, such as broker login/identity verification, funding/account actions, broker-side setting changes, and explicit approval for consequential real trading actions. Also the final merge/acceptance authority formerly routed through ChatGPT's evidence-verification step; Claude Code's own evidence report plus Codex's independent review (for safety-critical work) now stand in its place, subject to the user's own merge decision.
 
 The primary implementation role must not be changed by an AI on its own. Any role change requires an explicit user decision and a matching update to the canonical project documents.
 
@@ -82,7 +82,7 @@ For any safety-critical trading change, Codex must independently review the actu
 - any silent widening of Live scope;
 - any path that bypasses Read-Only preparation or explicit real-money approval.
 
-Do not mark a safety-critical change accepted merely because tests pass. Report concrete evidence and remaining uncertainty. Codex independent review plus GitHub CI is required before ChatGPT final acceptance of safety-critical work.
+Do not mark a safety-critical change accepted merely because tests pass. Report concrete evidence and remaining uncertainty. Codex independent review plus GitHub CI is required before the user's final merge/acceptance decision on safety-critical work.
 
 For documentation-only and other low-risk changes, Codex review is not automatically required.
 

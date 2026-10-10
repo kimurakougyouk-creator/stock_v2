@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -11,10 +12,22 @@ from ai_asset_platform.execution.live_pilot_source_cutover import (
     audit_live_pilot_source_cutover,
     source_cutover_record,
 )
+if sys.platform == "win32":
+    from ai_asset_platform.execution.live_pilot_source_cutover import (
+        _resolve_trusted_git_windows,
+    )
 
 
 NOW = datetime(2026, 9, 6, 8, 0, 0, tzinfo=timezone.utc)
 SHA = "a" * 40
+
+
+def _expected_git_prefix() -> list[str]:
+    if sys.platform == "win32":
+        git_exe = _resolve_trusted_git_windows()
+    else:
+        git_exe = "/usr/bin/git"
+    return [git_exe, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
 
 
 class FakeRunner:
@@ -39,7 +52,7 @@ class FakeRunner:
         if self.fail:
             raise subprocess.CalledProcessError(1, command)
         args = list(command[1:])
-        while len(args) >= 2 and args[0] == "-c":
+        while len(args) >= 2 and args[0] in ("-c", "-C"):
             args = args[2:]
         if args[:2] == ["rev-parse", "HEAD"]:
             stdout = self.actual_sha + "\n"
@@ -73,17 +86,11 @@ def test_exact_approved_commit_and_clean_audited_paths_are_ready(tmp_path: Path)
     index_call = runner.calls[2]
     ignored_call = runner.calls[3]
     for call in runner.calls:
-        assert call[:5] == [
-            "/usr/bin/git",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-        ]
+        assert call[:5] == _expected_git_prefix()
     assert "--untracked-files=all" in status_call
     def git_args(call):
         args = list(call[1:])
-        while len(args) >= 2 and args[0] == "-c":
+        while len(args) >= 2 and args[0] in ("-c", "-C"):
             args = args[2:]
         return args
 
@@ -256,6 +263,33 @@ def test_ignored_pycache_bytecode_is_allowed(tmp_path: Path):
 
     assert result.ready is True
     assert result.dirty_entries == ()
+
+
+def test_ignored_pycache_bytecode_on_disk_is_purged_not_merely_allowed(tmp_path: Path):
+    # Codex P1 (exact HEAD 948ff99): a stale .pyc's embedded source-hash/
+    # mtime+size header can be forged to match the tracked .py file it
+    # shadows, so CPython can load forged bytecode instead of recompiling
+    # from the audited source -- no concurrent process required. Allowing
+    # it to merely pass the audit is not enough; it must actually be
+    # deleted from disk so nothing stale can be loaded.
+    pycache_dir = tmp_path / "src" / "ai_asset_platform" / "__pycache__"
+    pycache_dir.mkdir(parents=True)
+    stale_pyc = pycache_dir / "settings.cpython-313.pyc"
+    stale_pyc.write_bytes(b"forged bytecode")
+    runner = FakeRunner(
+        ignored="src/ai_asset_platform/__pycache__/settings.cpython-313.pyc\n"
+    )
+
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is True
+    assert result.dirty_entries == ()
+    assert not stale_pyc.exists()
 
 
 def test_git_audit_failure_fails_closed(tmp_path: Path):

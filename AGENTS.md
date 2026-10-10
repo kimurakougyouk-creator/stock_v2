@@ -14,11 +14,11 @@ Then verify current `main`, open PRs/issues, and current CI. Classify work as `D
 
 ## Agent roles
 
-- **Claude Code / primary implementation agent:** preserve implementation continuity, inspect current repository state, implement the smallest safe blocker-closing change, add/repair tests, run local/relevant tests, review its own diff, and leave concrete evidence.
-- **Codex / independent second reviewer:** do not duplicate Claude's full implementation by default. For safety-critical trading changes, independently inspect the actual diff/code/tests and try to break assumptions. Codex may implement only when explicitly delegated because Claude is blocked or when the task is clearly separable and non-overlapping.
-- **ChatGPT:** project manager, cross-agent coordinator, completion-roadmap control, safety/architecture acceptance, GitHub investigation/execution, evidence integration, progress control, and user handoff only when unavoidable.
+- **Claude Code / primary implementation agent and default day-to-day progress/critical-path owner:** preserve implementation continuity, inspect current repository state, implement the smallest safe blocker-closing change, add/repair tests, run local/relevant tests, review its own diff, verify evidence against the current roadmap and governing issue, and leave concrete evidence.
+- **Codex / independent second reviewer:** do not duplicate Claude's full implementation by default. For safety-critical trading changes, independently inspect the actual diff/code/tests and try to break assumptions. Codex may implement only when explicitly delegated because Claude is blocked or when the task is clearly separable and non-overlapping. Remains structurally independent of Claude Code regardless of any other role change.
+- **ChatGPT:** optional advisory role only, consulted by explicit user request for a specific bounded question. Not part of the default implementation, acceptance, or merge-gate loop, and must not insert itself into that loop unasked. (Changed 2026-10-09, user-confirmed, after repeated user-documented instances of ChatGPT not following instructions, scope creep beyond critical path, and acceptance judgments the user found unreliable.)
 - **GitHub:** canonical project state and evidence source. Diff + CI + broker/runtime evidence outrank any agent narrative.
-- **User:** operator of last resort for broker login, identity/authentication, funding/account actions, broker-side setting changes, and explicit approval of consequential real-money actions.
+- **User:** operator of last resort for broker login, identity/authentication, funding/account actions, broker-side setting changes, and explicit approval of consequential real-money actions. Also the final merge/acceptance authority formerly routed through ChatGPT's evidence-verification step; Claude Code's own evidence report plus Codex's independent review (for safety-critical work) now stand in its place, subject to the user's own merge decision.
 
 Do not change the primary-agent role or introduce another development process without an explicit user decision recorded in the canonical project documents.
 
@@ -63,10 +63,10 @@ Required acceptance sequence:
 3. Codex independently reviews the actual diff/code/tests from a clean perspective and tries to break assumptions; it does not redo the whole task unless a separate implementation is specifically justified.
 4. Any finding is fixed by the primary implementation path and re-reviewed as needed.
 5. GitHub CI and secret scan pass on the exact proposed commit/PR.
-6. ChatGPT verifies the evidence against the current roadmap and governing issue before merge/acceptance.
+6. Claude Code verifies the evidence against the current roadmap and governing issue and presents it to the user before merge/acceptance; the user makes the final merge/acceptance decision.
 7. Real-money execution still requires separate explicit operator approval after fresh runtime gates are green.
 
-For non-safety-critical documentation or low-risk refactors, Claude Code or another single coding agent plus passing CI and ChatGPT verification may be sufficient; Codex review is not automatically required.
+For non-safety-critical documentation or low-risk refactors, Claude Code or another single coding agent plus passing CI is sufficient; Codex review is not automatically required.
 
 ## Critical-path freeze
 

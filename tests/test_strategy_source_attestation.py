@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -8,9 +9,21 @@ from ai_asset_platform.reports.strategy_source_attestation import (
     StrategySourceAttestationError,
     attest_strategy_source,
 )
+if sys.platform == "win32":
+    from ai_asset_platform.execution.live_pilot_source_cutover import (
+        _resolve_trusted_git_windows,
+    )
 
 
 SHA = "a" * 40
+
+
+def _expected_git_prefix() -> list[str]:
+    if sys.platform == "win32":
+        git_exe = _resolve_trusted_git_windows()
+    else:
+        git_exe = "/usr/bin/git"
+    return [git_exe, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
 
 
 class FakeRunner:
@@ -23,7 +36,7 @@ class FakeRunner:
     def __call__(self, command, **kwargs):
         self.calls.append(list(command))
         args = list(command[1:])
-        while len(args) >= 2 and args[0] == "-c":
+        while len(args) >= 2 and args[0] in ("-c", "-C"):
             args = args[2:]
         if args[:2] == ["rev-parse", "HEAD"]:
             stdout = SHA + "\n"
@@ -200,13 +213,7 @@ def test_strategy_attestation_disables_repo_git_hooks_and_fsmonitor(tmp_path: Pa
     ) == SHA
     assert runner.calls
     for call in runner.calls:
-        assert call[:5] == [
-            "/usr/bin/git",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-        ]
+        assert call[:5] == _expected_git_prefix()
 
 
 

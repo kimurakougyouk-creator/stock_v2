@@ -1,0 +1,314 @@
+"""Structural checks for live_pilot_operational_once.ps1.
+
+This mirrors the static-assertion style already used for
+ibkr_readonly_autopilot_windows.ps1 (see test_ibkr_windows_readonly_autopilot.py)
+rather than the subprocess-fixture style used for the bash wrapper's own
+tests: PowerShell execution policy and the interpreter-trust checks here
+(the `py` launcher, Get-AuthenticodeSignature) are not easily faked in a
+hermetic unit test, so this file instead asserts the script's actual
+tracked text never regresses on the specific safety properties the
+companion manual Windows-machine verification exercised at runtime (see
+the fix/live-pilot-windows-operational-entrypoint-script PR description
+for that empirical evidence: every BLOCKED branch was actually triggered
+and actually fails closed with exit code 2, and the happy path reaches
+the real production entrypoint's own BLOCKED_AUTHORIZATION_BINDING gate
+with ORDER TRANSPORT CALLED: False).
+"""
+from pathlib import Path
+
+
+SCRIPT = Path("live_pilot_operational_once.ps1")
+
+
+def _text() -> str:
+    assert SCRIPT.exists(), f"missing required file: {SCRIPT}"
+    return SCRIPT.read_text(encoding="utf-8")
+
+
+def test_windows_entrypoint_never_sends_or_mutates_broker_state():
+    script = _text()
+    assert "placeOrder(" not in script
+    assert "cancelOrder(" not in script
+    assert "reqGlobalCancel(" not in script
+    assert "git pull" not in script.lower()
+    assert "git fetch" not in script.lower()
+    assert "git push" not in script.lower()
+
+
+def test_windows_entrypoint_blocks_before_required_env_vars_checked():
+    script = _text()
+    required = [
+        "LIVE_PILOT_INTENT_ID", "LIVE_PILOT_TICKER", "LIVE_PILOT_SIDE",
+        "LIVE_PILOT_QUANTITY", "LIVE_PILOT_LIMIT_PRICE",
+        "LIVE_PILOT_NOTIONAL_JPY", "LIVE_PILOT_OPERATOR_CONFIRMATION",
+        "LIVE_PILOT_ACCOUNT_FINGERPRINT", "LIVE_PILOT_ENDPOINT_PORT",
+        "LIVE_PILOT_EXPECTED_COMMIT_SHA",
+    ]
+    for name in required:
+        assert name in script, f"{name} is no longer checked"
+    interpreter_check_at = script.index("Get-AuthenticodeSignature")
+    required_vars_at = script.index("$RequiredVars")
+    sha_check_at = script.index("$ActualSha = (& $TrustedGit @GitSafeArgs rev-parse HEAD)")
+    assert interpreter_check_at < required_vars_at, (
+        "trusted-interpreter attestation must run before required-value checks, "
+        "matching the bash wrapper's own ordering"
+    )
+    assert required_vars_at < sha_check_at
+
+
+def test_windows_entrypoint_checks_dirty_tree_and_hidden_index_before_launch():
+    script = _text()
+    dirty_at = script.index("$SourceDirty")
+    hidden_at = script.index("$IndexHidden")
+    ignored_at = script.index("$IgnoredImportable")
+    ibapi_at = script.index("verify_live_ibapi_runtime.py")
+    tzdata_at = script.index("verify_live_tzdata_runtime.py")
+    bootstrap_at = script.index("live_pilot_operational_entrypoint")
+    assert dirty_at < hidden_at < ignored_at < ibapi_at < tzdata_at < bootstrap_at
+
+
+def test_windows_entrypoint_index_hidden_regex_is_case_sensitive():
+    # Regression guard for the bug caught during manual verification:
+    # PowerShell's default -match is case-insensitive, which made the normal
+    # "H" (tracked, no special state) git ls-files flag falsely match the
+    # lowercase a-z class meant to catch only assume-unchanged/skip-worktree
+    # entries, blocking every ordinary clean checkout. -cmatch is required.
+    script = _text()
+    assert "-cmatch '^[Sa-z] '" in script
+    assert "-match '^[Sa-z] '" not in script
+
+
+def test_windows_entrypoint_uses_flag_equals_value_for_python_args():
+    # Regression guard for the bug caught during manual verification:
+    # PowerShell drops an empty string entirely when passed as a separate
+    # argument to a native executable, silently shifting every later
+    # argument by one position and corrupting argparse's view of argv.
+    # --flag=value keeps a (possibly empty) value attached to its flag.
+    script = _text()
+    assert '"--final-confirmation=$FinalConfirmation"' in script
+    assert "--final-confirmation $FinalConfirmation" not in script
+
+
+def test_windows_entrypoint_defaults_final_confirmation_empty():
+    script = _text()
+    default_at = script.index('if (-not $FinalConfirmation) { $FinalConfirmation = "" }')
+    use_at = script.index('"--final-confirmation=$FinalConfirmation"')
+    assert default_at < use_at
+
+
+def test_windows_entrypoint_pins_live_readonly_confirmation():
+    script = _text()
+    assert '"--live-readonly-confirmation=READ_LIVE_ACCOUNT_ONLY"' in script
+
+
+def test_windows_entrypoint_rejects_interpreter_inside_venv():
+    script = _text()
+    assert "$VenvRootFull" in script
+    assert "StartsWith($VenvRootFull" in script
+
+
+def test_windows_entrypoint_requires_python_software_foundation_signer():
+    script = _text()
+    assert 'SignerSubject -notmatch "O=Python Software Foundation"' in script
+
+
+def test_windows_entrypoint_sets_pythontzpath_only_after_verification():
+    script = _text()
+    verify_at = script.index("verify_live_tzdata_runtime.py")
+    block_at = script.index('Block "venv tzdata dependency does not match the pinned runtime manifest."')
+    set_at = script.index("$env:PYTHONTZPATH = $TzdataVerifiedCopy")
+    assert verify_at < block_at < set_at
+
+
+def test_windows_entrypoint_verifies_a_copy_not_the_writable_venv_directory():
+    # Regression guard for the Codex-caught TOCTOU finding: a hostile write
+    # to the still-writable venv tzdata directory after verification but
+    # before use must not be able to change the bytes PYTHONTZPATH serves.
+    # Verification and PYTHONTZPATH must both target the same immutable
+    # process-local copy, not the original source directory.
+    script = _text()
+    copy_at = script.index("Copy-Item -LiteralPath $TzdataSourceDir -Destination $TzdataVerifiedCopy")
+    verify_at = script.index('$TzdataVerifier --zoneinfo-dir $TzdataVerifiedCopy')
+    set_at = script.index("$env:PYTHONTZPATH = $TzdataVerifiedCopy")
+    assert copy_at < verify_at < set_at
+
+
+def test_windows_entrypoint_rejects_tzdata_reparse_points_before_verification():
+    # Regression guard: Python's Path.is_symlink() is not guaranteed to
+    # recognize an NTFS junction, so the PowerShell layer must reject any
+    # reparse point (symlink or junction) before the Python verifier runs.
+    script = _text()
+    reparse_at = script.index("$TzdataReparsePoints")
+    copy_at = script.index("Copy-Item -LiteralPath $TzdataSourceDir")
+    assert reparse_at < copy_at
+
+
+def test_windows_entrypoint_resolves_python_from_hklm_registry_only():
+    # Regression guard for the Codex-caught findings that (a) executing a
+    # bare `py` before attestation lets a hijacked PATH run arbitrary code
+    # first, and (b) an Authenticode signature on python.exe alone does not
+    # attest python313.dll or the standard library on a writable per-user
+    # install. HKLM-only registry resolution plus an admin-only-root
+    # directory check closes both without executing anything first.
+    script = _text()
+    assert "HKLM:\\SOFTWARE\\Python\\PythonCore\\$PinnedPythonVersion\\InstallPath" in script
+    assert "HKCU:\\SOFTWARE\\Python" not in script
+    assert 'py "-$PinnedPythonVersion"' not in script
+
+
+def test_windows_entrypoint_resolves_git_from_admin_only_root_not_path():
+    script = _text()
+    assert "$TrustedGit" in script
+    assert "GitCandidateSuffixes" in script
+    assert "& git rev-parse" not in script
+    assert "& git status" not in script
+    assert "& git ls-files" not in script
+
+
+def test_windows_entrypoint_clears_git_discovery_env_vars():
+    script = _text()
+    for name in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES",
+        "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ):
+        assert name in script
+
+
+def test_tzdata_manifest_matches_pinned_version():
+    import subprocess
+    import sys as _sys
+
+    result = subprocess.run(
+        [
+            _sys.executable, "-I",
+            "scripts/emit_live_tzdata_manifest.py",
+            "--check", "scripts/live_tzdata_manifest.json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_requirements_pins_exact_tzdata_version_matching_manifest():
+    import json
+
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+    manifest = json.loads(Path("scripts/live_tzdata_manifest.json").read_text(encoding="utf-8"))
+    pinned_version = manifest["version"]
+    assert f"tzdata=={pinned_version}" in requirements
+
+
+def test_windows_entrypoint_derives_admin_only_roots_from_registry_not_environment():
+    # Regression guard for the Codex-caught finding (exact HEAD 3825f0b):
+    # $env:ProgramFiles is just an environment variable, which a hostile
+    # inherited environment could redefine to point at a user-writable
+    # directory, defeating the whole admin-only-root check. The registry
+    # value (HKLM, not influenceable by this process's environment) must
+    # be used instead.
+    script = _text()
+    assert "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion" in script
+    assert "ProgramFilesDir" in script
+    assert "$AdminOnlyRoots = @($env:ProgramFiles" not in script
+    assert "${env:ProgramFiles(x86)}) | Where-Object" not in script
+
+
+def test_windows_entrypoint_hardens_tzdata_copy_read_only():
+    # Regression guard for the Codex-caught finding that moving the tzdata
+    # files to a fresh temp directory did not, by itself, close the
+    # check-then-use window, since the copy destination is just as
+    # user-writable as the source. Marking the copy read-only immediately
+    # after copying (before verification) is required.
+    script = _text()
+    copy_at = script.index("Copy-Item -LiteralPath $TzdataSourceDir -Destination $TzdataVerifiedCopy")
+    readonly_at = script.index("IsReadOnly = $true")
+    verify_at = script.index('$TzdataVerifier --zoneinfo-dir $TzdataVerifiedCopy')
+    assert copy_at < readonly_at < verify_at
+
+
+def test_windows_entrypoint_purges_pycache_instead_of_allowing_it():
+    # Regression guard for the Codex-caught finding (exact HEAD 948ff99):
+    # a stale .pyc's embedded source-hash/mtime+size header can be forged
+    # to match the tracked .py file it shadows, letting CPython load
+    # forged bytecode instead of recompiling from the audited source --
+    # no concurrent process required, just planting the file beforehand.
+    # Merely skipping it (not reporting it as a blocking finding) is not
+    # enough; it must be deleted before Python ever launches.
+    script = _text()
+    assert "Remove-Item -LiteralPath $full -Force -ErrorAction Stop" in script
+    purge_at = script.index("Remove-Item -LiteralPath $full -Force -ErrorAction Stop")
+    bootstrap_at = script.index("live_pilot_operational_entrypoint")
+    assert purge_at < bootstrap_at
+
+
+def test_bash_wrapper_purges_pycache_instead_of_allowing_it():
+    # Same regression guard, applied to the POSIX wrapper, which has the
+    # identical unconditional-allow pattern for __pycache__ entries.
+    script = Path("live_pilot_operational_once.sh").read_text(encoding="utf-8")
+    assert 'rm -f -- "$path"' in script
+
+
+def test_windows_entrypoint_checks_lastexitcode_after_every_git_invocation():
+    # Regression guard for the Codex-caught finding (exact HEAD f3a63eb):
+    # on PowerShell 5.1, $ErrorActionPreference = "Stop" does not make a
+    # native executable's nonzero exit status terminate the script (there
+    # is no $PSNativeCommandUseErrorActionPreference before PowerShell
+    # 7.3). A failed git invocation whose stdout happens to be empty (e.g.
+    # git status failing on a corrupt index) could therefore be silently
+    # treated as "clean" unless $LASTEXITCODE is checked explicitly after
+    # every single git call.
+    script = _text()
+    rev_parse_at = script.index("$ActualSha = (& $TrustedGit @GitSafeArgs rev-parse HEAD)")
+    rev_parse_check_at = script.index('Block "git rev-parse HEAD failed')
+    status_at = script.index("$SourceDirty = & $TrustedGit @GitSafeArgs status")
+    status_check_at = script.index('Block "git status failed')
+    lsfiles_v_at = script.index("$IndexHidden = & $TrustedGit @GitSafeArgs ls-files -v")
+    lsfiles_v_check_at = script.index('Block "git ls-files -v failed')
+    lsfiles_ignored_at = script.index("$IgnoredImportable = & $TrustedGit @GitSafeArgs ls-files --others")
+    lsfiles_ignored_check_at = script.index('Block "git ls-files --others --ignored failed')
+    assert rev_parse_at < rev_parse_check_at < status_at
+    assert status_at < status_check_at < lsfiles_v_at
+    assert lsfiles_v_at < lsfiles_v_check_at < lsfiles_ignored_at
+    assert lsfiles_ignored_at < lsfiles_ignored_check_at
+
+
+def test_windows_entrypoint_never_exposes_nonce_as_operator_input():
+    # The nonce issue_live_pilot_authorization() generates internally must
+    # never be something the operator supplies or transcribes -- that was
+    # pure incidental transcription risk with no safety purpose. Only the
+    # two confirmation values (operator-issuance and final-send) remain
+    # operator-supplied.
+    script = _text()
+    assert "$env:LIVE_PILOT_NONCE" not in script
+    assert '"LIVE_PILOT_NONCE"' not in script
+    assert "$env:LIVE_PILOT_OPERATOR_CONFIRMATION" in script
+    assert "$env:LIVE_PILOT_FINAL_CONFIRMATION" in script
+
+
+def test_windows_entrypoint_issues_authorization_before_bootstrap_and_fails_closed():
+    script = _text()
+    issue_at = script.index("issue_live_pilot_authorization_cli.py")
+    issue_call_at = script.index("$IssuedNonce = & $TrustedPythonReal")
+    issue_check_at = script.index('Block "one-shot authorization could not be issued."')
+    nonce_use_at = script.index('"--nonce=$IssuedNonce"')
+    bootstrap_marker_at = script.index("# --- Bootstrap into the operational entrypoint")
+    assert issue_at < issue_call_at < issue_check_at < bootstrap_marker_at < nonce_use_at
+
+
+def test_windows_entrypoint_passes_matching_trade_params_to_issuance():
+    # The issuance call must use the exact same trade-parameter env vars
+    # already required above, so the later consume_live_pilot_authorization
+    # binding check (which re-verifies every field) succeeds naturally
+    # rather than by coincidence.
+    script = _text()
+    issue_block_start = script.index("$IssuedNonce = & $TrustedPythonReal")
+    issue_block_end = script.index("if ($LASTEXITCODE -ne 0 -or -not $IssuedNonce)")
+    issue_block = script[issue_block_start:issue_block_end]
+    for var in (
+        "LIVE_PILOT_OPERATOR_CONFIRMATION", "LIVE_PILOT_INTENT_ID",
+        "LIVE_PILOT_TICKER", "LIVE_PILOT_SIDE", "LIVE_PILOT_QUANTITY",
+        "LIVE_PILOT_LIMIT_PRICE", "LIVE_PILOT_NOTIONAL_JPY",
+        "LIVE_PILOT_ACCOUNT_FINGERPRINT", "LIVE_PILOT_ENDPOINT_PORT",
+    ):
+        assert f"$env:{var}" in issue_block, f"{var} not passed to issuance"
