@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -249,14 +250,28 @@ def test_global_marker_is_canonical_and_ignores_a_different_journal_dir(tmp_path
         record_send_attempt(other_intent, directory=second_dir, now=NOW + timedelta(seconds=3))
 
 
+def _mock_operator_home(monkeypatch, home_value: str) -> None:
+    """Mock the OS-authoritative home/profile-dir lookup on either platform.
+
+    POSIX: ``os.geteuid()`` + ``pwd.getpwuid(...)``.
+    Windows: ``_win32_profile_dir()`` (``SHGetFolderPathW`` under the hood).
+    Neither path is reachable through an environment variable, which is
+    exactly the property these tests exist to verify.
+    """
+    if sys.platform == "win32":
+        monkeypatch.setattr(journal, "_win32_profile_dir", lambda: home_value)
+    else:
+        monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
+        monkeypatch.setattr(
+            journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=home_value)
+        )
+
+
 def test_launch_environment_and_checkout_cannot_relocate_machine_state_marker(
     monkeypatch, tmp_path: Path
 ):
     passwd_home = tmp_path / "passwd-home"
-    monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
-    monkeypatch.setattr(
-        journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(passwd_home))
-    )
+    _mock_operator_home(monkeypatch, str(passwd_home))
     monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-a"))
     monkeypatch.setenv("HOME", str(tmp_path / "home-a"))
@@ -274,10 +289,7 @@ def test_launch_environment_and_checkout_cannot_relocate_machine_state_marker(
 
 def test_pre_change_marker_blocks_post_change_launch(monkeypatch, tmp_path: Path):
     passwd_home = tmp_path / "passwd-home"
-    monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
-    monkeypatch.setattr(
-        journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(passwd_home))
-    )
+    _mock_operator_home(monkeypatch, str(passwd_home))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-a"))
     monkeypatch.setenv("HOME", str(tmp_path / "home-a"))
     monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
@@ -306,7 +318,16 @@ def test_pre_change_marker_blocks_post_change_launch(monkeypatch, tmp_path: Path
 @pytest.mark.parametrize("failure", ["euid", "passwd"])
 def test_unresolvable_os_identity_fails_closed(monkeypatch, tmp_path: Path, failure: str):
     monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
-    if failure == "euid":
+    if sys.platform == "win32":
+        # Only one OS-level lookup exists on this platform (_win32_profile_dir);
+        # both parametrized cases exercise the same failure path there, which
+        # is still a faithful test of the same contract: identity resolution
+        # failing must raise "identity cannot be resolved", regardless of
+        # platform or which underlying OS call failed.
+        monkeypatch.setattr(
+            journal, "_win32_profile_dir", lambda: (_ for _ in ()).throw(OSError("no profile"))
+        )
+    elif failure == "euid":
         monkeypatch.setattr(
             journal.os, "geteuid", lambda: (_ for _ in ()).throw(OSError("no euid"))
         )
@@ -327,10 +348,7 @@ def test_unresolvable_os_identity_fails_closed(monkeypatch, tmp_path: Path, fail
 @pytest.mark.parametrize("passwd_home", ["", "relative/home"])
 def test_invalid_passwd_home_fails_closed(monkeypatch, tmp_path: Path, passwd_home: str):
     monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
-    monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
-    monkeypatch.setattr(
-        journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=passwd_home)
-    )
+    _mock_operator_home(monkeypatch, passwd_home)
     directory = tmp_path / "invalid-home-journal"
     _create(directory)
     assert send_attempt_permitted(INTENT, directory=directory) is False
@@ -340,13 +358,10 @@ def test_invalid_passwd_home_fails_closed(monkeypatch, tmp_path: Path, passwd_ho
 
 def test_unusable_passwd_home_fails_closed(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(journal, "_canonical_journal_root", journal._resolve_machine_state_root)
-    monkeypatch.setattr(journal.os, "geteuid", lambda: 1234)
 
     unusable = tmp_path / "not-a-directory"
     unusable.write_text("occupied", encoding="utf-8")
-    monkeypatch.setattr(
-        journal.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(unusable))
-    )
+    _mock_operator_home(monkeypatch, str(unusable))
     other_dir = tmp_path / "unusable-state-journal"
     _create(other_dir)
     assert send_attempt_permitted(INTENT, directory=other_dir) is False
