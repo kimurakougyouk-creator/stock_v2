@@ -265,6 +265,33 @@ def test_ignored_pycache_bytecode_is_allowed(tmp_path: Path):
     assert result.dirty_entries == ()
 
 
+def test_ignored_pycache_bytecode_on_disk_is_purged_not_merely_allowed(tmp_path: Path):
+    # Codex P1 (exact HEAD 948ff99): a stale .pyc's embedded source-hash/
+    # mtime+size header can be forged to match the tracked .py file it
+    # shadows, so CPython can load forged bytecode instead of recompiling
+    # from the audited source -- no concurrent process required. Allowing
+    # it to merely pass the audit is not enough; it must actually be
+    # deleted from disk so nothing stale can be loaded.
+    pycache_dir = tmp_path / "src" / "ai_asset_platform" / "__pycache__"
+    pycache_dir.mkdir(parents=True)
+    stale_pyc = pycache_dir / "settings.cpython-313.pyc"
+    stale_pyc.write_bytes(b"forged bytecode")
+    runner = FakeRunner(
+        ignored="src/ai_asset_platform/__pycache__/settings.cpython-313.pyc\n"
+    )
+
+    result = audit_live_pilot_source_cutover(
+        expected_commit_sha=SHA,
+        repository_root=tmp_path,
+        now=NOW,
+        runner=runner,
+    )
+
+    assert result.ready is True
+    assert result.dirty_entries == ()
+    assert not stale_pyc.exists()
+
+
 def test_git_audit_failure_fails_closed(tmp_path: Path):
     runner = FakeRunner(fail=True)
     result = audit_live_pilot_source_cutover(

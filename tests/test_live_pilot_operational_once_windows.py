@@ -224,3 +224,25 @@ def test_windows_entrypoint_hardens_tzdata_copy_read_only():
     readonly_at = script.index("IsReadOnly = $true")
     verify_at = script.index('$TzdataVerifier --zoneinfo-dir $TzdataVerifiedCopy')
     assert copy_at < readonly_at < verify_at
+
+
+def test_windows_entrypoint_purges_pycache_instead_of_allowing_it():
+    # Regression guard for the Codex-caught finding (exact HEAD 948ff99):
+    # a stale .pyc's embedded source-hash/mtime+size header can be forged
+    # to match the tracked .py file it shadows, letting CPython load
+    # forged bytecode instead of recompiling from the audited source --
+    # no concurrent process required, just planting the file beforehand.
+    # Merely skipping it (not reporting it as a blocking finding) is not
+    # enough; it must be deleted before Python ever launches.
+    script = _text()
+    assert "Remove-Item -LiteralPath $full -Force -ErrorAction Stop" in script
+    purge_at = script.index("Remove-Item -LiteralPath $full -Force -ErrorAction Stop")
+    bootstrap_at = script.index("live_pilot_operational_entrypoint")
+    assert purge_at < bootstrap_at
+
+
+def test_bash_wrapper_purges_pycache_instead_of_allowing_it():
+    # Same regression guard, applied to the POSIX wrapper, which has the
+    # identical unconditional-allow pattern for __pycache__ entries.
+    script = Path("live_pilot_operational_once.sh").read_text(encoding="utf-8")
+    assert 'rm -f -- "$path"' in script

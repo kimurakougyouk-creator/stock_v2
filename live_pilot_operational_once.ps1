@@ -248,7 +248,25 @@ foreach ($path in $IgnoredImportable) {
         $IgnoredImportableHits += $path
         continue
     }
-    if ($path -match '__pycache__/') { continue }
+    if ($path -match '__pycache__/') {
+        # Codex P1 (exact HEAD 948ff99): a stale .pyc's embedded
+        # source-hash/mtime+size header can be forged to match the tracked
+        # .py file it shadows, so CPython (even under -I -P -S) can load
+        # forged bytecode instead of recompiling from the audited source
+        # -- no concurrent process required, just planting the file ahead
+        # of time. A bytecode cache is never itself meaningful data
+        # (always reproducible by recompiling the tracked source), so
+        # purge it here, before Python is ever launched, rather than
+        # merely allow it.
+        try {
+            if ($item -and -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+            }
+        } catch {
+            $IgnoredImportableHits += $path
+        }
+        continue
+    }
     if ($path -match '\.(py|pyc|pyo|pyz|so|pyd|dylib)$') {
         $IgnoredImportableHits += $path
         continue
