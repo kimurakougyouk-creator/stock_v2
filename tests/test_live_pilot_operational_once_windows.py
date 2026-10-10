@@ -246,3 +246,27 @@ def test_bash_wrapper_purges_pycache_instead_of_allowing_it():
     # identical unconditional-allow pattern for __pycache__ entries.
     script = Path("live_pilot_operational_once.sh").read_text(encoding="utf-8")
     assert 'rm -f -- "$path"' in script
+
+
+def test_windows_entrypoint_checks_lastexitcode_after_every_git_invocation():
+    # Regression guard for the Codex-caught finding (exact HEAD f3a63eb):
+    # on PowerShell 5.1, $ErrorActionPreference = "Stop" does not make a
+    # native executable's nonzero exit status terminate the script (there
+    # is no $PSNativeCommandUseErrorActionPreference before PowerShell
+    # 7.3). A failed git invocation whose stdout happens to be empty (e.g.
+    # git status failing on a corrupt index) could therefore be silently
+    # treated as "clean" unless $LASTEXITCODE is checked explicitly after
+    # every single git call.
+    script = _text()
+    rev_parse_at = script.index("$ActualSha = (& $TrustedGit @GitSafeArgs rev-parse HEAD)")
+    rev_parse_check_at = script.index('Block "git rev-parse HEAD failed')
+    status_at = script.index("$SourceDirty = & $TrustedGit @GitSafeArgs status")
+    status_check_at = script.index('Block "git status failed')
+    lsfiles_v_at = script.index("$IndexHidden = & $TrustedGit @GitSafeArgs ls-files -v")
+    lsfiles_v_check_at = script.index('Block "git ls-files -v failed')
+    lsfiles_ignored_at = script.index("$IgnoredImportable = & $TrustedGit @GitSafeArgs ls-files --others")
+    lsfiles_ignored_check_at = script.index('Block "git ls-files --others --ignored failed')
+    assert rev_parse_at < rev_parse_check_at < status_at
+    assert status_at < status_check_at < lsfiles_v_at
+    assert lsfiles_v_at < lsfiles_v_check_at < lsfiles_ignored_at
+    assert lsfiles_ignored_at < lsfiles_ignored_check_at

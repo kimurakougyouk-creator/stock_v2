@@ -202,7 +202,18 @@ foreach ($name in $RequiredVars) {
 }
 
 # --- Exact commit SHA pin ----------------------------------------------------
+# Codex P1 (exact HEAD f3a63eb): $ErrorActionPreference = "Stop" does not
+# make a native executable's nonzero exit status terminate the script on
+# PowerShell 5.1 (there is no $PSNativeCommandUseErrorActionPreference
+# before PowerShell 7.3) -- it only governs PowerShell's own terminating
+# errors. If git itself fails (corrupt/unreadable index, etc.) while this
+# assignment only inspects stdout, a failure could be silently treated as
+# "clean" (empty output). Every git invocation below must check
+# $LASTEXITCODE explicitly and fail closed.
 $ActualSha = (& $TrustedGit @GitSafeArgs rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) {
+    Block "git rev-parse HEAD failed (exit $LASTEXITCODE)."
+}
 if ($ActualSha -ne $env:LIVE_PILOT_EXPECTED_COMMIT_SHA) {
     Block "checkout SHA does not match the explicitly approved SHA."
 }
@@ -214,6 +225,9 @@ $AuditedPaths = @(
     "live_pilot_operational_once.sh", "live_pilot_operational_once.ps1"
 )
 $SourceDirty = & $TrustedGit @GitSafeArgs status --porcelain=v1 --untracked-files=all -- $AuditedPaths
+if ($LASTEXITCODE -ne 0) {
+    Block "git status failed (exit $LASTEXITCODE)."
+}
 if ($SourceDirty) {
     Block "tracked or untracked audited source changes are present before Python launch."
 }
@@ -229,6 +243,9 @@ $IndexHidden = & $TrustedGit @GitSafeArgs ls-files -v -- $AuditedPaths | Where-O
     # version's `[[ $1 ~ /^[a-z]$/ ]]`.
     $_ -cmatch '^[Sa-z] '
 }
+if ($LASTEXITCODE -ne 0) {
+    Block "git ls-files -v failed (exit $LASTEXITCODE)."
+}
 if ($IndexHidden) {
     Block "audited source contains assume-unchanged or skip-worktree index entries."
 }
@@ -239,6 +256,9 @@ if ($IndexHidden) {
 # native-extension suffix is .pyd (not .so); .dylib is macOS-only and kept
 # here only for parity since it is harmless to also exclude.
 $IgnoredImportable = & $TrustedGit @GitSafeArgs ls-files --others --ignored --exclude-standard -- src tests scripts
+if ($LASTEXITCODE -ne 0) {
+    Block "git ls-files --others --ignored failed (exit $LASTEXITCODE)."
+}
 $IgnoredImportableHits = @()
 foreach ($path in $IgnoredImportable) {
     if (-not $path) { continue }
