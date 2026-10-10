@@ -1,6 +1,6 @@
 # stock_v2 — Reverse-Engineered Completion Roadmap
 
-Last verified: 2026-09-08 JST
+Last verified: 2026-10-09 JST
 
 This document defines what **completion** means and works backward from that end state. It is intentionally stricter than a percentage estimate. A phase is complete only when its exit evidence exists; a high percentage never substitutes for a missing mandatory gate.
 
@@ -294,7 +294,27 @@ Every expansion — new ticker quantity, market, broker, derivative, crypto, wid
 
 ---
 
-# Current state at 2026-09-24
+# Incident record and recommended practices (non-binding)
+
+The two items below are **not** cross-cutting gates A–D and are **not** required for `V1_PRODUCTION_COMPLETE`. They are a dated record of a real incident and recommended follow-on hardening, kept here so the lesson is not lost — but they do not gate merge, Phase advancement, or any existing completion condition unless and until the user explicitly promotes a specific item to a required gate. (A 2026-10-09 review found that an earlier revision of this section incorrectly added these as permanent gates on par with A–D without that explicit promotion; this is the corrected form — see PR #339/#338 history.)
+
+## Incident: Windows runtime never exercised before pilot day (2026-10-09)
+
+On 2026-10-09, immediately before what was intended to be the first Live pilot execution window, running the already-"ready" operational entrypoint on the operator's real Windows machine failed at the first line: `ModuleNotFoundError: fcntl` / `pwd`. These are POSIX-only modules unconditionally imported at module load time by `live_pilot_completion.py` and `live_pilot_send_journal.py`. The entire Live Pilot production chain had never actually been run, or even imported, on Windows before that moment — not by CI, not by any prior preparation step. This was a genuine A blocker (it broke the existing Phase 1/3 requirement that execution-day commands actually run) and was fixed in PR #337 with empirical, re-tested evidence; that fix itself is binding, this record of the incident is not.
+
+Root cause, verified from the exact CI configuration: `pytest.yml` (the required merge check) runs only on `ubuntu-latest`; a separate `windows-readonly-autopilot.yml` runs on `windows-latest` but its `paths:` trigger never covered `src/ai_asset_platform/execution/live_pilot_*` or its tests. A Windows-only failure in the exact production entrypoint could therefore ship through any number of merged, fully-green PRs undetected.
+
+**Recommended (not required) follow-on**: expand Windows CI to cover the full Live Pilot execution chain, and promote it to a required check for changes under that path — but only if and when the user decides this is worth the added CI/process weight. Until then, Phase 1's existing requirement to actually prepare and verify exact execution-day commands remains the binding obligation; this incident is evidence of what "verify" must mean in practice, not a new obligation on top of it.
+
+## Recommendation: operator capability rehearsal
+
+The same incident window separately surfaced that operator-facing manual steps (GitHub PR merge, TWS GUI order entry) were being asked of the operator for the first time under live, time-pressured conditions, with no prior confirmation the operator could mechanically perform them (the browser used to view a merge button was not authenticated to GitHub, discovered only when the click did nothing).
+
+**Recommended (not required) practice**: before any phase asks the operator for a consequential first-time action, rehearse the mechanical steps once in a zero-consequence context. This is good practice, consistent with Phase 1's existing "no hidden operator dependency" requirement, but is not itself elevated to a separate formal gate here.
+
+---
+
+# Current state at 2026-10-09
 
 ## DONE / VERIFIED
 - Exact bounded Paper milestone and strict read-only unattended Paper monitoring foundation.
@@ -305,14 +325,22 @@ Every expansion — new ticker quantity, market, broker, derivative, crypto, wid
 - Versioned strategy-promotion policy implementation and tests (PR #316), while the checked-in policy remains deliberately disabled/unapproved and cannot promote anything.
 - Exact-head multi-agent review/CI gate completed for PR #316 before merge.
 - Active `protect-main` repository ruleset requiring PR + strict `pytest` and `release-integrity-gate` checks on the default branch.
-- Documentation/status synchronization through PR #317.
-- Current main before this documentation-only synchronization PR: `80583b2b303e2ec3dbbd200d96a18c8c55591c89`; post-merge pytest #2793 succeeded.
+- Cash-account-gated SettledCash backfill from `TotalCashValue-S`/`EquityWithLoanValue-S`, confirmed only when `TradingType-S=STKCASH` and zero open positions (PR #336). Independently corroborated 2026-10-09 by IBKR API Team support reply: SettledCash is sent only for cash accounts; `TotalCashValue` is IBKR's own suggested fallback, with `$LEDGER:ALL` as the recommended way to confirm which cash tags an account actually returns (not yet used by current code — tracked as a minor follow-up, not a blocker).
+- Standing autonomous-mode authorization formalized into `CLAUDE.md`/`AGENTS.md` (PR #334): bounded read-only investigation → A-blocker root-cause → feature-branch fix → test → push → PR → CI → Codex exact-head review loop, without per-step confirmation; merge and all broker-write/Live/Paper/Read-Only/funds/FX/risk-gate actions remain excluded and require fresh explicit authorization every time.
+- Windows fcntl/pwd A-blocker fix (PR #337, pending merge as of this writing): the full Live Pilot operational entrypoint chain now imports and runs on Windows; includes a Codex-caught-and-fixed P1 (directory-flush handle opened with insufficient access rights, silently discarding a failed flush — see the incident record near the end of this document for the generalized lesson).
+- ChatGPT changed from mandatory PM/acceptance role to optional advisory role across all four canonical docs (PR #339, user-confirmed 2026-10-09); Claude Code is now the default day-to-day progress/critical-path owner, with the user retaining final merge/acceptance authority and Codex's independent-review role unchanged.
 
 ## TODO before first Live send
-1. Collect fresh execution-day exact-source/runtime evidence and fresh Live **read-only** broker evidence only.
-2. Prove the correct Live account fingerprint/session/endpoint, settled/available funds and currency, intended-market permission/registration where applicable, target position, zero unexpected open orders, quote/FX, market/session, emergency-stop state, evidence freshness/skew, and exact notional cap.
-3. Any stale/missing/contradictory evidence or timeout/UNKNOWN remains NO-GO; do not send/retry/cancel/modify/flatten/close.
-4. Only after every read-only gate is GREEN may the user be asked for a separate explicit one-shot Live-pilot authorization.
+1. Merge PR #337 (explicit user action; CI green, Codex review clean as of HEAD `49c9110`).
+2. Merge PR #339 (ChatGPT role change) and this PR (incident record), both documentation-only.
+3. (Recommended, not required) Expand Windows CI over the full Live Pilot execution chain, and rehearse operator-facing manual steps once in a zero-consequence context — see the incident record near the end of this document. Neither blocks Phase 2/3.
+4. Collect fresh execution-day exact-source/runtime evidence and fresh Live **read-only** broker evidence only.
+5. Prove the correct Live account fingerprint/session/endpoint, settled/available funds and currency, intended-market permission/registration where applicable, target position, zero unexpected open orders, quote/FX, market/session, emergency-stop state, evidence freshness/skew, and exact notional cap.
+6. Any stale/missing/contradictory evidence or timeout/UNKNOWN remains NO-GO; do not send/retry/cancel/modify/flatten/close.
+7. Only after every read-only gate is GREEN may the user be asked for a separate explicit one-shot Live-pilot authorization.
+
+## Market calendar note (verified 2026-10-09)
+2026-10-10 (Sat) / 10-11 (Sun) / 10-12 (Mon, national holiday — Sports Day) are non-trading days for the TSE; `9432.T` is not executable until 2026-10-13 (Tue). This does not block merge, CI, or any read-only preparation — only the bounded Live send itself.
 
 ## TODO after first pilot but before normal Live strategy deployment
 1. Reconcile the one-time pilot to a durable terminal broker-truth outcome.
