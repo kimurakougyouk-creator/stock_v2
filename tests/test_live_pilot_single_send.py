@@ -762,6 +762,35 @@ def test_definitive_callback_persists_proof_before_waking_waiter():
     assert events[1] == ("wake", None)
 
 
+def test_readonly_api_validation_error_persists_proof_before_waking_waiter():
+    # Regression for the 2026-10-13 first Live pilot: IBKR error 321 ("API
+    # interface is currently in Read-Only mode") refused the exact watched
+    # placeOrder request and was previously not recognized as a definitive
+    # terminal rejection, so no proof was persisted before the waiter woke
+    # and the attempt was left stuck as UNKNOWN with no durable broker-side
+    # rejection evidence. Error 321 tied to the watched order_id must now
+    # behave exactly like error 201 above: proof persisted first, then wake.
+    client = subject._LivePilotClient()
+    client.watched_order_id = 77
+    client.watched_account = PINNED_ACCOUNT
+    events = []
+    client.definitive_rejection_recorder = lambda reason: events.append(
+        ("proof", reason)
+    )
+    client.ack_ready = SimpleNamespace(set=lambda: events.append(("wake", None)))
+
+    client.error(
+        77,
+        321,
+        "Error validating request:-'PlaceOrder(3)': cause - API interface "
+        "is currently in Read-Only mode.",
+    )
+
+    assert events[0][0] == "proof"
+    assert "321" in events[0][1]
+    assert events[1] == ("wake", None)
+
+
 def test_accepted_open_order_status_still_acknowledges():
     client = subject._LivePilotClient()
     client.watched_order_id = 77

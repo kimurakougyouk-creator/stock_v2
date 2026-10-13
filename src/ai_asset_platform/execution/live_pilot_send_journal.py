@@ -1050,12 +1050,19 @@ def _definitive_terminal_rejection_reason(value: object) -> str | None:
         if reason.startswith(prefix):
             status = reason[len(prefix) :].strip()
             return reason if status in {"Cancelled", "ApiCancelled"} else None
+    # 201/202 are IBKR's order-rejected/order-cancelled error codes. 321 is
+    # IBKR's request-validation-error code: a placeOrder request tied to our
+    # exact watched order_id that TWS refused during validation (e.g. the
+    # API interface was in Read-Only mode) and therefore never admitted into
+    # the broker's order book at all -- strictly more definitive than 201/202
+    # (there is no window for a later async fill), not merely a transient
+    # connectivity/timeout condition, so it belongs in the same terminal set.
     parts = reason.split(":", 2)
     if (
         len(parts) == 3
         and parts[0].isdigit()
         and parts[1].isdigit()
-        and int(parts[1]) in {201, 202}
+        and int(parts[1]) in {201, 202, 321}
     ):
         return reason
     return None
