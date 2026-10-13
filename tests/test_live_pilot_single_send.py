@@ -1066,3 +1066,24 @@ def test_stale_reordered_pending_submit_after_ack_does_not_disturb_the_outcome()
     assert client.ack_perm_id == 880077
     assert client.order_error is None
     assert client.broker_status == "Submitted"
+
+
+def test_build_order_disables_deprecated_etrade_only_and_firm_quote_only():
+    # Regression for the 2026-10-13 second Live pilot attempt: ibapi.Order's
+    # own constructor defaults these two long-deprecated fields to True;
+    # current TWS rejects any order that still carries them as True with
+    # error 10268 ("EtradeOnly order attribute is not supported"), before
+    # the order is ever admitted into the book. Every other Order/Contract
+    # field was audited and confirmed to already default to its modern
+    # no-op value -- this is the only compatibility gap.
+    _, order = subject._build_order(
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=172.5,
+        account_id="U1234567",
+        intent_id="live-pilot:9432.T:BUY:100:test",
+    )
+
+    assert order.eTradeOnly is False
+    assert order.firmQuoteOnly is False
