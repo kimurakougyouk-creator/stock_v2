@@ -1,6 +1,6 @@
 # stock_v2 — Reverse-Engineered Completion Roadmap
 
-Last verified: 2026-10-10 JST
+Last verified: 2026-10-13 JST
 
 This document defines what **completion** means and works backward from that end state. It is intentionally stricter than a percentage estimate. A phase is complete only when its exit evidence exists; a high percentage never substitutes for a missing mandatory gate.
 
@@ -312,6 +312,18 @@ The same incident window separately surfaced that operator-facing manual steps (
 
 **Recommended (not required) practice**: before any phase asks the operator for a consequential first-time action, rehearse the mechanical steps once in a zero-consequence context. This is good practice, consistent with Phase 1's existing "no hidden operator dependency" requirement, but is not itself elevated to a separate formal gate here.
 
+## Incident: first Live pilot send refused by TWS Read-Only, immutable rejection proof unavailable (2026-10-13)
+
+On 2026-10-13 (JPX trading day), with every Phase 2 read-only gate GREEN and after the operator's explicit, exact-bound final-send authorization (`live-pilot-9432T-2026-10-13`: 9432.T BUY 100 @ LIMIT 170.0 JPY, estimated notional ¥17,000, order_id 1, sender_client_id 681), the Windows operational entrypoint made its one permitted broker transport attempt (`send_attempt_count: 1`, `order_transport_called: True`). TWS refused the `placeOrder` request during API validation with IBKR error 321: *"Error validating request:-'PlaceOrder(3)': cause - API interface is currently in Read-Only mode."* Broker-side API Read-Only — which Phase 3's final pre-send sequence (step 7) anticipates removing only as a separate explicit operator action after every other gate is green — had not been disabled before this exact final-send attempt. `order_sent`, `live_order_sent`, and `perm_id` all remained unset; the journal's `state` became `UNKNOWN`.
+
+Fresh, repeated, read-only evidence after the attempt is unambiguous: Live position count 0, Live open orders 0, settled JPY cash unchanged at ¥20,000, and (after the operator separately, explicitly, and temporarily disabled Read-Only for diagnosis only, then restored it) `ReqCompletedOrders` returned `completed_order_count: 0` — no row at all for order_id 1 / client_id 681 in IBKR's completed-order history. This is consistent with a request TWS refused during validation, before it was ever admitted into the broker's order book; such a request can never later appear in completed-order history, unlike every rejection class (IBKR codes 201/202, or an explicit Cancelled/ApiCancelled callback status) the existing reconciliation code already recognized as definitive proof.
+
+Root cause of the Phase 4 gap, verified from the exact code at the time: `_definitive_terminal_rejection_reason` (`live_pilot_send_journal.py`) and its manually-synchronized duplicate `_DEFINITIVE_REJECTION_ERROR_CODES` (`live_pilot_operational_entrypoint.py`) recognized only IBKR error codes 201 and 202 as definitive terminal rejection proof. Error 321 was not recognized, so the synchronous `orderError` callback that fired for this exact watched order did not call `record_definitive_rejection_evidence` — the only mechanism that persists immutable (write-once) rejection proof. This was fixed going forward in PR #344 (merged to `main` at `a28209b9b6758a9d7a6f3133c6c5f5dbd3b61850`): error 321 now joins 201/202 in both recognized sets, so a future send attempt that hits this same rejection class will have its proof recorded live, through the existing, unchanged `REJECTED_RECONCILED` promotion path.
+
+That fix is **forward-looking only** and does not, and architecturally cannot, resolve this exact pilot. The one synchronous callback that could have recorded immutable proof for `live-pilot-9432T-2026-10-13` already fired, with error 321 then unrecognized; the global exactly-once send-attempt lock (`global_send_attempt_recorded`) permanently forbids any further broker transport attempt for this intent, so no second callback can ever occur. A draft of PR #344 explored deriving retroactive proof from the journal's own `unknown_reason` field during read-only recovery; this was deliberately rejected before implementation finished, because `unknown_reason` is a mutable field (overwritable by any later `mark_unknown` call) and using it as proof would have defeated the existing immutable-evidence invariant that `test_mutable_unknown_reason_cannot_manufacture_rejection_without_immutable_proof` exists to guarantee. No code change, present or future, can manufacture the immutable proof this exact pilot's journal is missing.
+
+Consequently, and by design rather than oversight: `live-pilot-9432T-2026-10-13`'s journal `state` remains `UNKNOWN` permanently; `PHASE4_COMPLETE` for this specific pilot is `FALSE` permanently; this pilot is not, and will never become, `COMPLETE_RECONCILED`, `REJECTED_RECONCILED`, or `PARTIAL_RECONCILED` under the existing Phase 4 exit criterion. This record changes nothing about that criterion, about `V1_PRODUCTION_COMPLETE`'s definition, or about any other completion condition; it does not promote this pilot to any terminal/complete status, and it does not by itself authorize a resend of this pilot or the start of a new one — both remain separate, explicit operator decisions, not taken here.
+
 ---
 
 # Current state at 2026-10-10
@@ -354,6 +366,12 @@ The same incident window separately surfaced that operator-facing manual steps (
 4. Controlled Live strategy integration with shared risk gates.
 5. Live monitoring/recovery soak.
 6. Final production acceptance audit.
+
+## Update — 2026-10-13 (pilot day)
+- PR #343 (merged 2026-10-10): `PRE_LIVE_OPERATOR_CHECKLIST.md` updated with real 2026-10-10 read-only evidence (Live account/open-orders), while every pilot-day-only item remained explicitly unchecked pending fresh evidence.
+- **The first bounded Live pilot send attempt occurred on 2026-10-13**, under full explicit operator authorization with every Phase 2 read-only gate GREEN: `live-pilot-9432T-2026-10-13`, 9432.T BUY 100 @ LIMIT 170.0 JPY. TWS refused the request during API validation (IBKR error 321, Read-Only mode); no order, fill, or position resulted. Full detail, root cause, and why this exact pilot's journal can never be retroactively reconciled: see "Incident: first Live pilot send refused by TWS Read-Only, immutable rejection proof unavailable (2026-10-13)" above.
+- PR #344 (merged, `main` `a28209b9b6758a9d7a6f3133c6c5f5dbd3b61850`): fixed the underlying gap going forward — IBKR error 321 now joins codes 201/202 as recognized definitive terminal rejection proof, so a future pilot hitting this same rejection class will be reconciled correctly by the existing, unchanged `REJECTED_RECONCILED` path.
+- Net effect on the critical path below: `one bounded Live send attempt` has now been exercised once, but did not yield a reconciled terminal outcome for Phase 4's exit criterion (`PHASE4_COMPLETE` remains `FALSE` for this exact pilot, permanently). `post-pilot reconciliation` and everything after it on the critical path remain not-yet-reached. Whether/when to attempt a second, separately authorized pilot is an explicit future operator decision, not taken here.
 
 ---
 
