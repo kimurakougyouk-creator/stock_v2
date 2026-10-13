@@ -9,7 +9,11 @@ import pytest
 
 import ai_asset_platform.execution.live_pilot_send_journal as journal
 from ai_asset_platform.execution.live_pilot_send_journal import (
+    CAMPAIGN_RESET_CONFIRMATION_VALUE,
+    confirm_campaign_reset,
     create_consumed_authorization_journal,
+    current_campaign_generation,
+    global_send_attempt_recorded,
     load_definitive_rejection_evidence,
     load_send_journal,
     load_terminal_reconciliation_marker,
@@ -850,6 +854,73 @@ def test_late_terminal_rejection_proof_survives_timeout_unknown_race(tmp_path: P
     assert load_send_journal(INTENT, directory=tmp_path)["state"] == "UNKNOWN"
 
 
+def test_readonly_api_validation_error_is_a_definitive_terminal_rejection(
+    tmp_path: Path,
+):
+    # Regression for the 2026-10-13 first Live pilot: IBKR error 321
+    # ("Error validating request:-'PlaceOrder(3)': cause - API interface is
+    # currently in Read-Only mode") refuses a placeOrder request before it is
+    # ever admitted into the broker's order book, so it can never later
+    # appear in completed-order history -- unlike every other rejection
+    # class this journal already recognizes. It must be recognized as
+    # definitive terminal rejection proof exactly like 201/202, not treated
+    # as an ambiguous/UNKNOWN condition.
+    rejection_reason = (
+        "1:321:Error validating request:-'PlaceOrder(3)': cause - "
+        "API interface is currently in Read-Only mode."
+    )
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason=rejection_reason,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    evidence = record_definitive_rejection_evidence(
+        INTENT,
+        nonce=NONCE,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        account_fingerprint="a" * 64,
+        endpoint_port=4001,
+        order_id=101,
+        client_id=681,
+        rejection_reason=rejection_reason,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+    assert evidence["rejection_reason"] == rejection_reason
+    assert evidence["perm_id"] is None
+
+    result = mark_rejected_reconciled(
+        INTENT,
+        rejection_reason=rejection_reason,
+        order_id=101,
+        final_position_quantity=0.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert result["state"] == "REJECTED_RECONCILED"
+    marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["state"] == "REJECTED_RECONCILED"
+    assert marker["rejection_reason"] == rejection_reason
+    assert marker["final_position_quantity"] == 0.0
+
+
 def test_post_ack_cancelled_rejection_keeps_acknowledged_perm_id(tmp_path: Path):
     _create(tmp_path)
     record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
@@ -1243,3 +1314,214 @@ def test_broker_identity_corruption_fails_closed_without_typeerror(tmp_path: Pat
             directory=tmp_path,
             now=NOW + timedelta(seconds=3),
         )
+
+
+# --- Campaign generation / operator-approved reset --------------------------
+# Regression for the 2026-10-13 first Live pilot: the sole permitted send
+# attempt ended UNKNOWN (IBKR error 321, Read-Only mode) with its immutable
+# rejection proof unrecoverable, so Phase 4's exit criterion can never be
+# reached for that intent under the pre-existing single, permanent
+# GLOBAL_SEND_ATTEMPT.lock. confirm_campaign_reset adds a deliberately
+# narrow, explicitly operator-confirmed escape hatch: a new campaign
+# generation, itself still bound by the same at-most-one-transmission-ever
+# guarantee, without touching anything about the stuck generation.
+
+SECOND_INTENT = "live-pilot:9432.T:BUY:100:20260908-gen2"
+
+
+def _stuck_unknown_generation(tmp_path: Path, *, intent_id: str = INTENT) -> dict:
+    """Create a journal, spend its one attempt, and leave it UNKNOWN -- the
+    exact shape of the 2026-10-13 incident this feature exists to recover
+    from."""
+    create_consumed_authorization_journal(
+        intent_id=intent_id,
+        nonce=NONCE,
+        consumed_authorization=_consumed(intent_id=intent_id),
+        directory=tmp_path,
+        now=NOW,
+    )
+    record_send_attempt(intent_id, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        intent_id,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=1),
+    )
+    return mark_unknown(
+        intent_id,
+        reason="1:321:Error validating request:-'PlaceOrder(3)': cause - "
+        "API interface is currently in Read-Only mode.",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+
+
+def test_generation_defaults_to_one_and_uses_the_original_lock_path(tmp_path: Path):
+    assert current_campaign_generation() == 1
+    assert journal._global_attempt_path(tmp_path) == (
+        journal._canonical_journal_root() / "GLOBAL_SEND_ATTEMPT.lock"
+    )
+    assert global_send_attempt_recorded(directory=tmp_path) is False
+
+
+def test_campaign_reset_rejects_wrong_confirmation(tmp_path: Path):
+    _stuck_unknown_generation(tmp_path)
+
+    with pytest.raises(PermissionError, match="confirmation"):
+        confirm_campaign_reset(
+            confirmation="WRONG_VALUE",
+            reason="2026-10-13 pilot UNKNOWN, immutable proof unrecoverable",
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+    assert current_campaign_generation() == 1
+
+
+def test_campaign_reset_rejects_empty_reason(tmp_path: Path):
+    _stuck_unknown_generation(tmp_path)
+
+    with pytest.raises(ValueError, match="reason"):
+        confirm_campaign_reset(
+            confirmation=CAMPAIGN_RESET_CONFIRMATION_VALUE,
+            reason="   ",
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=3),
+        )
+    assert current_campaign_generation() == 1
+
+
+def test_campaign_reset_rejects_when_no_attempt_exists_yet(tmp_path: Path):
+    # Nothing has ever been sent in generation 1 -- there is nothing to
+    # recover from, so reset must refuse rather than silently no-op/advance.
+    with pytest.raises(PermissionError, match="only valid after a send attempt"):
+        confirm_campaign_reset(
+            confirmation=CAMPAIGN_RESET_CONFIRMATION_VALUE,
+            reason="premature reset attempt",
+            directory=tmp_path,
+            now=NOW,
+        )
+    assert current_campaign_generation() == 1
+
+
+def test_campaign_reset_rejects_when_current_generation_already_reconciled(
+    tmp_path: Path,
+):
+    _stuck_unknown_generation(tmp_path)
+    rejection = _record_rejection_evidence(tmp_path)
+    mark_rejected_reconciled(
+        INTENT,
+        rejection_reason=rejection["rejection_reason"],
+        order_id=101,
+        final_position_quantity=0.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+
+    with pytest.raises(PermissionError, match="already reached"):
+        confirm_campaign_reset(
+            confirmation=CAMPAIGN_RESET_CONFIRMATION_VALUE,
+            reason="should not apply once reconciled",
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=5),
+        )
+    assert current_campaign_generation() == 1
+
+
+def test_campaign_reset_succeeds_for_a_genuinely_stuck_unknown_pilot(tmp_path: Path):
+    _stuck_unknown_generation(tmp_path)
+    original_lock_path = journal._global_attempt_path(tmp_path)
+    original_lock_bytes = original_lock_path.read_bytes()
+    original_journal = load_send_journal(INTENT, directory=tmp_path)
+
+    record = confirm_campaign_reset(
+        confirmation=CAMPAIGN_RESET_CONFIRMATION_VALUE,
+        reason="2026-10-13 pilot UNKNOWN (IBKR 321), immutable proof unrecoverable",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert record["prior_generation"] == 1
+    assert record["new_generation"] == 2
+    assert record["prior_generation_stuck_intent_id"] == INTENT
+    assert record["prior_generation_stuck_state"] == "UNKNOWN"
+    assert record["automatic"] is False
+    assert current_campaign_generation() == 2
+
+    # The prior generation's lock and journal are completely untouched.
+    assert original_lock_path.exists()
+    assert original_lock_path.read_bytes() == original_lock_bytes
+    assert load_send_journal(INTENT, directory=tmp_path) == original_journal
+
+    # The reset itself is durably, immutably recorded.
+    reset_path = journal._campaign_reset_record_path(record["reset_id"])
+    assert reset_path.exists()
+    assert journal._load_json(reset_path, label="x") == record
+
+
+def test_new_generation_grants_exactly_one_fresh_attempt_at_the_new_path(
+    tmp_path: Path,
+):
+    _stuck_unknown_generation(tmp_path)
+    confirm_campaign_reset(
+        confirmation=CAMPAIGN_RESET_CONFIRMATION_VALUE,
+        reason="2026-10-13 pilot UNKNOWN, immutable proof unrecoverable",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    # Generation 2 starts with no attempt recorded of its own.
+    assert global_send_attempt_recorded(directory=tmp_path) is False
+    assert send_attempt_permitted(SECOND_INTENT, directory=tmp_path) is False  # no journal yet
+
+    create_consumed_authorization_journal(
+        intent_id=SECOND_INTENT,
+        nonce="nonce-gen2",
+        consumed_authorization=_consumed(intent_id=SECOND_INTENT, nonce="nonce-gen2"),
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+    assert send_attempt_permitted(SECOND_INTENT, directory=tmp_path) is True
+
+    record_send_attempt(
+        SECOND_INTENT, directory=tmp_path, now=NOW + timedelta(seconds=5)
+    )
+
+    assert global_send_attempt_recorded(directory=tmp_path) is True
+    gen2_lock = journal._global_attempt_path(tmp_path)
+    assert gen2_lock.name == "GLOBAL_SEND_ATTEMPT.gen2.lock"
+    assert gen2_lock != journal._global_attempt_path_for_generation(1)
+    # Generation 1's own lock is still exactly where it was.
+    assert journal._global_attempt_path_for_generation(1).exists()
+
+    # Generation 2 itself now enforces its own exactly-once guarantee: a
+    # second attempt, even under a brand new third intent, is refused.
+    with pytest.raises(PermissionError):
+        record_send_attempt(
+            "live-pilot:another-intent", directory=tmp_path, now=NOW + timedelta(seconds=6)
+        )
+
+
+def test_campaign_reset_cannot_be_repeated_without_a_new_attempt_in_between(
+    tmp_path: Path,
+):
+    _stuck_unknown_generation(tmp_path)
+    confirm_campaign_reset(
+        confirmation=CAMPAIGN_RESET_CONFIRMATION_VALUE,
+        reason="first reset",
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+    assert current_campaign_generation() == 2
+
+    # Generation 2 has no attempt of its own yet -- a second reset call must
+    # refuse, exactly like the original no-attempt-yet case, rather than
+    # silently advancing to generation 3 on demand.
+    with pytest.raises(PermissionError, match="only valid after a send attempt"):
+        confirm_campaign_reset(
+            confirmation=CAMPAIGN_RESET_CONFIRMATION_VALUE,
+            reason="second reset without an intervening attempt",
+            directory=tmp_path,
+            now=NOW + timedelta(seconds=4),
+        )
+    assert current_campaign_generation() == 2

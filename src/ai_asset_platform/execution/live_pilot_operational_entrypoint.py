@@ -114,7 +114,11 @@ DEFAULT_PREFLIGHT_REPORT = Path("results/live_pilot_same_run_preflight_latest.js
 DEFAULT_OPERATIONAL_RESULT = Path("results/live_pilot_operational_once_latest.json")
 _USD_TICKERS = {"AAPL", "SPY"}
 _DEFINITIVE_REJECTION_STATUSES = {"Cancelled", "ApiCancelled"}
-_DEFINITIVE_REJECTION_ERROR_CODES = {201, 202}
+# Kept in sync manually with live_pilot_send_journal._definitive_terminal_
+# rejection_reason's own copy of this set -- see that function's comment for
+# why 321 (IBKR request-validation error, e.g. Read-Only mode) belongs here
+# alongside 201 (order rejected) and 202 (order cancelled).
+_DEFINITIVE_REJECTION_ERROR_CODES = {201, 202, 321}
 
 
 @dataclass(frozen=True)
