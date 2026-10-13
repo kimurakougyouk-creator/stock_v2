@@ -411,6 +411,15 @@ def _build_order(
     order.lmtPrice = limit_price
     order.tif = "DAY"
     order.outsideRth = False
+    # Regression for the 2026-10-13 second Live pilot attempt: ibapi.Order's
+    # own constructor defaults these two long-deprecated SMART-routing-only
+    # fields to True (every other field in Order/Contract defaults to its
+    # modern no-op value -- audited exhaustively). Current TWS rejects any
+    # order that still carries them as True with error 10268 ("EtradeOnly
+    # order attribute is not supported"), before the order is ever admitted
+    # into the book -- unrelated to, and not fixed by, API Read-Only state.
+    order.eTradeOnly = False
+    order.firmQuoteOnly = False
     order.account = account_id
     order.orderRef = intent_id
     order.transmit = True
