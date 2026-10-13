@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sys
 
 if sys.platform == "win32":
@@ -32,6 +33,35 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 _GLOBAL_ATTEMPT_FILENAME = "GLOBAL_SEND_ATTEMPT.lock"
 _MACHINE_STATE_SUBDIR = (
     Path(".local") / "state" / "ai_asset_platform" / "live_pilot"
+)
+
+# --- Campaign generation / operator-approved reset -------------------------
+# The exactly-once guarantee above ("at most one transmission ever", see
+# global_send_attempt_recorded's docstring) was hardened deliberately
+# (Codex round 8, commit 8b156f1) and never anticipated the one case the
+# 2026-10-13 first Live pilot actually hit: the sole permitted attempt ended
+# UNKNOWN with its immutable rejection proof unrecoverable (see
+# COMPLETION_ROADMAP.md's incident record), so Phase 4's exit criterion can
+# never be reached for that intent -- permanently, by the campaign's own
+# design, with no existing recovery path.
+#
+# CAMPAIGN_GENERATION.json makes "at most one transmission ever" instead
+# read as "at most one transmission per campaign generation", with
+# generation 1 implicit and permanently bound to the original, unchanged
+# GLOBAL_SEND_ATTEMPT.lock path -- so every machine that has never had a
+# reset, and every existing test, behaves identically to before this
+# concept existed. Only confirm_campaign_reset can ever advance the
+# generation, and only after an explicit, exact, non-automatic operator
+# confirmation plus a non-empty human-readable reason; it never touches the
+# prior generation's journal, attempt marker, UNKNOWN state, or rejection
+# evidence, and records its own call as a durable, write-once ledger entry.
+_CAMPAIGN_GENERATION_FILENAME = "CAMPAIGN_GENERATION.json"
+_CAMPAIGN_RESET_SUBDIR = "campaign_resets"
+CAMPAIGN_RESET_CONFIRMATION_VALUE = (
+    "RESET_LIVE_PILOT_CAMPAIGN_AFTER_UNRECOVERABLE_UNKNOWN"
+)
+_NON_RESETTABLE_JOURNAL_STATES = frozenset(
+    {"COMPLETE", "POSTFILL_PROVEN", "PARTIAL_RECONCILED", "REJECTED_RECONCILED"}
 )
 
 
@@ -127,12 +157,151 @@ def _canonical_journal_root() -> Path:
     return _resolve_machine_state_root()
 
 
-def _global_attempt_path(directory: Path) -> Path:
-    # Deliberately ignores caller storage, cwd, checkout path, and intent_id.
-    del directory
+def _campaign_generation_path() -> Path:
+    return _canonical_journal_root() / _CAMPAIGN_GENERATION_FILENAME
+
+
+def _campaign_reset_record_path(reset_id: str) -> Path:
+    return (
+        _canonical_journal_root()
+        / _CAMPAIGN_RESET_SUBDIR
+        / f"{_safe(reset_id, 'reset_id')}.json"
+    )
+
+
+def _current_campaign_generation() -> int:
+    """Return the current campaign generation; 1 if never reset.
+
+    Fails closed to 1 (the most restrictive/original generation) on any
+    missing or unreadable pointer file, so a corrupt or deleted pointer can
+    never silently advance past a reset that genuinely happened, nor
+    silently skip past one that never did.
+    """
+    path = _campaign_generation_path()
+    if not path.exists():
+        return 1
+    try:
+        data = _load_json(path, label="campaign generation pointer")
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return 1
+    generation = data.get("generation")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        return 1
+    return generation
+
+
+def current_campaign_generation() -> int:
+    """Public accessor for the current campaign generation (1 if never reset)."""
+    return _current_campaign_generation()
+
+
+def _global_attempt_path_for_generation(generation: int) -> Path:
     root = _canonical_journal_root()
     _mkdir_durable(root)
-    return root / _GLOBAL_ATTEMPT_FILENAME
+    if generation <= 1:
+        return root / _GLOBAL_ATTEMPT_FILENAME
+    return root / f"GLOBAL_SEND_ATTEMPT.gen{generation}.lock"
+
+
+def _global_attempt_path(directory: Path) -> Path:
+    # Deliberately ignores caller storage, cwd, checkout path, and intent_id
+    # -- see _resolve_machine_state_root's docstring. Also deliberately
+    # ignores any notion of a caller-supplied generation: this always
+    # reflects the one durably recorded current generation, which only
+    # confirm_campaign_reset (itself gated on an explicit, exact,
+    # non-automatic operator confirmation) can ever advance.
+    del directory
+    return _global_attempt_path_for_generation(_current_campaign_generation())
+
+
+def confirm_campaign_reset(
+    *,
+    confirmation: str,
+    reason: str,
+    directory: Path = DEFAULT_JOURNAL_DIR,
+    now: datetime | None = None,
+) -> dict:
+    """Operator-approved, one-time advance to the next Live pilot campaign generation.
+
+    Exists for exactly one situation: the sole send attempt permitted in the
+    current campaign generation ended in a state that can never reach a
+    reconciled Phase 4 terminal outcome (e.g. a definitive broker-side
+    rejection whose immutable proof was lost -- see the 2026-10-13 incident
+    recorded in COMPLETION_ROADMAP.md). It does not relax, bypass, or
+    retroactively rewrite anything about that attempt: its journal, UNKNOWN
+    state, and every record already produced survive completely untouched,
+    permanently, under their own intent_id, in the prior generation. All
+    this does is let a *new*, separately authorized intent_id reach the
+    sender again, under a fresh generation that is itself still bound by the
+    exact same at-most-one-transmission-ever guarantee the prior generation
+    had -- it is never itself a Live order approval; the one-shot
+    authorization and final send confirmation remain fully, separately
+    required for any new pilot exactly as before.
+
+    Raises PermissionError/ValueError and changes nothing on any failure,
+    including: wrong confirmation, empty reason, no attempt recorded yet in
+    the current generation, or the current generation's attempt having
+    already reached a reconciled terminal outcome (nothing to recover from).
+    """
+    if str(confirmation or "").strip() != CAMPAIGN_RESET_CONFIRMATION_VALUE:
+        raise PermissionError("exact campaign-reset operator confirmation is missing")
+    normalized_reason = str(reason or "").strip()
+    if not normalized_reason:
+        raise ValueError("a human-readable campaign-reset reason is required")
+
+    current_generation = _current_campaign_generation()
+    current_lock_path = _global_attempt_path_for_generation(current_generation)
+    if not current_lock_path.exists():
+        raise PermissionError(
+            "campaign reset is only valid after a send attempt exists in the "
+            "current campaign generation"
+        )
+    marker = _load_json(current_lock_path, label="global send attempt marker")
+    stuck_intent_id = str(marker.get("intent_id") or "").strip()
+    if not stuck_intent_id:
+        raise PermissionError(
+            "current campaign generation's attempt marker is malformed"
+        )
+    stuck_journal = load_send_journal(stuck_intent_id, directory=directory)
+    stuck_state = (
+        stuck_journal.get("state") if isinstance(stuck_journal, dict) else None
+    )
+    if stuck_state in _NON_RESETTABLE_JOURNAL_STATES:
+        raise PermissionError(
+            "current campaign generation already reached a reconciled "
+            "terminal outcome; campaign reset is not applicable"
+        )
+
+    new_generation = current_generation + 1
+    reset_id = secrets.token_urlsafe(16)
+    reset_record = {
+        "schema_version": 1,
+        "reset_id": reset_id,
+        "prior_generation": current_generation,
+        "new_generation": new_generation,
+        "prior_generation_stuck_intent_id": stuck_intent_id,
+        "prior_generation_stuck_state": stuck_state,
+        "reason": normalized_reason,
+        "confirmed_at": _now(now),
+        "automatic": False,
+    }
+    # The immutable ledger entry (write-once) must exist before the pointer
+    # ever advances, so a crash between the two steps leaves either a fully
+    # recorded reset with the pointer not yet advanced (safely re-advanceable
+    # by re-deriving from the ledger, not done automatically here) or no
+    # trace of a reset at all -- never an advanced pointer with no ledger
+    # proof behind it.
+    _atomic_new(_campaign_reset_record_path(reset_id), reset_record)
+    _atomic_replace(
+        _campaign_generation_path(),
+        {
+            "schema_version": 1,
+            "generation": new_generation,
+            "advanced_at": _now(now),
+            "last_reset_id": reset_id,
+        },
+    )
+    return reset_record
 
 
 def _win32_fsync_directory(directory: Path) -> None:
