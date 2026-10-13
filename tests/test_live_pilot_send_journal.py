@@ -850,6 +850,73 @@ def test_late_terminal_rejection_proof_survives_timeout_unknown_race(tmp_path: P
     assert load_send_journal(INTENT, directory=tmp_path)["state"] == "UNKNOWN"
 
 
+def test_readonly_api_validation_error_is_a_definitive_terminal_rejection(
+    tmp_path: Path,
+):
+    # Regression for the 2026-10-13 first Live pilot: IBKR error 321
+    # ("Error validating request:-'PlaceOrder(3)': cause - API interface is
+    # currently in Read-Only mode") refuses a placeOrder request before it is
+    # ever admitted into the broker's order book, so it can never later
+    # appear in completed-order history -- unlike every other rejection
+    # class this journal already recognizes. It must be recognized as
+    # definitive terminal rejection proof exactly like 201/202, not treated
+    # as an ambiguous/UNKNOWN condition.
+    rejection_reason = (
+        "1:321:Error validating request:-'PlaceOrder(3)': cause - "
+        "API interface is currently in Read-Only mode."
+    )
+    _create(tmp_path)
+    record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))
+    record_order_id_before_transport(
+        INTENT,
+        order_id=101,
+        client_id=681,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=2),
+    )
+    mark_unknown(
+        INTENT,
+        reason=rejection_reason,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    evidence = record_definitive_rejection_evidence(
+        INTENT,
+        nonce=NONCE,
+        ticker="9432.T",
+        side="BUY",
+        quantity=100,
+        limit_price=400.0,
+        estimated_notional_jpy=40_000.0,
+        account_fingerprint="a" * 64,
+        endpoint_port=4001,
+        order_id=101,
+        client_id=681,
+        rejection_reason=rejection_reason,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=4),
+    )
+    assert evidence["rejection_reason"] == rejection_reason
+    assert evidence["perm_id"] is None
+
+    result = mark_rejected_reconciled(
+        INTENT,
+        rejection_reason=rejection_reason,
+        order_id=101,
+        final_position_quantity=0.0,
+        directory=tmp_path,
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert result["state"] == "REJECTED_RECONCILED"
+    marker = load_terminal_reconciliation_marker(INTENT, directory=tmp_path)
+    assert marker is not None
+    assert marker["state"] == "REJECTED_RECONCILED"
+    assert marker["rejection_reason"] == rejection_reason
+    assert marker["final_position_quantity"] == 0.0
+
+
 def test_post_ack_cancelled_rejection_keeps_acknowledged_perm_id(tmp_path: Path):
     _create(tmp_path)
     record_send_attempt(INTENT, directory=tmp_path, now=NOW + timedelta(seconds=1))

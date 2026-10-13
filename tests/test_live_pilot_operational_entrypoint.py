@@ -2683,6 +2683,96 @@ def test_explicit_rejection_with_no_fill_becomes_terminal_reconciled(monkeypatch
     assert calls[0]["final_position_quantity"] == 0.0
 
 
+def test_readonly_validation_rejection_with_no_fill_becomes_terminal_reconciled(
+    monkeypatch,
+):
+    # Regression for the 2026-10-13 first Live pilot: TWS refused the
+    # placeOrder request during API validation (error 321, "API interface is
+    # currently in Read-Only mode"), so the order was never admitted into
+    # IBKR's order book and never appears in completed-order history --
+    # unlike every other rejection class already covered by the sibling test
+    # above. This exercises the live-callback path with error 321 now
+    # recognized as a definitive terminal rejection, mirroring exactly how
+    # record_definitive_rejection_evidence is actually invoked by
+    # _signal_order_error at send time.
+    rejection_reason = (
+        "1:321:Error validating request:-'PlaceOrder(3)': cause - "
+        "API interface is currently in Read-Only mode."
+    )
+    journal = _terminal_journal(perm_id=None, unknown_reason=rejection_reason)
+    postfill, account, open_orders, paper = _terminal_reports(
+        executions=[], position=0.0
+    )
+    reports = {
+        subject.DEFAULT_POSTFILL_REPORT: postfill,
+        subject.DEFAULT_LIVE_ACCOUNT_REPORT: account,
+        subject.DEFAULT_LIVE_OPEN_ORDERS_REPORT: open_orders,
+        subject.DEFAULT_LIVE_COMPLETED_ORDERS_REPORT: _terminal_completed_report(),
+        subject.DEFAULT_PAPER_MONITOR_REPORT: paper,
+    }
+    monkeypatch.setattr(subject, "load_send_journal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(subject, "_load_json", lambda path: reports[path])
+    monkeypatch.setattr(
+        subject,
+        "load_send_attempt_marker",
+        lambda *args, **kwargs: {
+            "recorded_at": "2026-09-21T12:39:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 12, 40, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        subject,
+        "load_definitive_rejection_evidence",
+        lambda *args, **kwargs: {
+            "schema_version": subject.SEND_JOURNAL_SCHEMA_VERSION,
+            "intent_id": _request().intent_id,
+            "nonce": _request().nonce,
+            "ticker": "9432.T",
+            "side": "BUY",
+            "quantity": 100,
+            "limit_price": 400.0,
+            "estimated_notional_jpy": 40_000.0,
+            "account_fingerprint": FINGERPRINT,
+            "endpoint_port": 4001,
+            "order_id": 77,
+            "sender_client_id": 681,
+            "send_attempt_recorded_at": "2026-09-21T12:39:00+00:00",
+            "rejection_recorded_at": "2026-09-21T12:39:30+00:00",
+            "rejection_reason": rejection_reason,
+            "automatic_resend_allowed": False,
+            "automatic_cancel_allowed": False,
+            "automatic_modify_allowed": False,
+            "automatic_flatten_allowed": False,
+            "automatic_close_allowed": False,
+            "order_sent": False,
+            "live_order_sent": False,
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        subject,
+        "mark_rejected_reconciled",
+        lambda *args, **kwargs: calls.append(kwargs) or {},
+    )
+    monkeypatch.setattr(
+        subject,
+        "mark_partial_reconciled",
+        lambda *args, **kwargs: pytest.fail("partial path must be unreachable"),
+    )
+
+    status = subject._promote_terminal_reconciliation_if_proven(_request())
+
+    assert status == "REJECTED_RECONCILED"
+    assert len(calls) == 1
+    assert calls[0]["order_id"] == 77
+    assert calls[0]["final_position_quantity"] == 0.0
+    assert calls[0]["rejection_reason"] == rejection_reason
+
+
 def test_callback_rejection_without_permid_accepts_exact_completed_cancelled_history(
     monkeypatch,
 ):
@@ -3307,6 +3397,11 @@ def test_timeout_without_definitive_rejection_remains_unknown(monkeypatch):
         ),
         ("77:201:Order rejected - Reason: test", True),
         ("77:202:Order cancelled - Reason: test", True),
+        (
+            "1:321:Error validating request:-'PlaceOrder(3)': cause - "
+            "API interface is currently in Read-Only mode.",
+            True,
+        ),
         ("77:399:Order message error", False),
         ("77:2104:Market data farm connection is OK", False),
         (
