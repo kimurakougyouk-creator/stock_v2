@@ -1,6 +1,6 @@
 # stock_v2 — Reverse-Engineered Completion Roadmap
 
-Last verified: 2026-10-10 JST
+Last verified: 2026-10-13 JST
 
 This document defines what **completion** means and works backward from that end state. It is intentionally stricter than a percentage estimate. A phase is complete only when its exit evidence exists; a high percentage never substitutes for a missing mandatory gate.
 
@@ -366,6 +366,12 @@ Consequently, and by design rather than oversight: `live-pilot-9432T-2026-10-13`
 4. Controlled Live strategy integration with shared risk gates.
 5. Live monitoring/recovery soak.
 6. Final production acceptance audit.
+
+## Update — 2026-10-13 (pilot day)
+- PR #343 (merged 2026-10-10): `PRE_LIVE_OPERATOR_CHECKLIST.md` updated with real 2026-10-10 read-only evidence (Live account/open-orders), while every pilot-day-only item remained explicitly unchecked pending fresh evidence.
+- **The first bounded Live pilot send attempt occurred on 2026-10-13**, under full explicit operator authorization with every Phase 2 read-only gate GREEN: `live-pilot-9432T-2026-10-13`, 9432.T BUY 100 @ LIMIT 170.0 JPY. TWS refused the request during API validation (IBKR error 321, Read-Only mode); no order, fill, or position resulted. Full detail, root cause, and why this exact pilot's journal can never be retroactively reconciled: see "Incident: first Live pilot send refused by TWS Read-Only, immutable rejection proof unavailable (2026-10-13)" above.
+- PR #344 (merged, `main` `a28209b9b6758a9d7a6f3133c6c5f5dbd3b61850`): fixed the underlying gap going forward — IBKR error 321 now joins codes 201/202 as recognized definitive terminal rejection proof, so a future pilot hitting this same rejection class will be reconciled correctly by the existing, unchanged `REJECTED_RECONCILED` path.
+- Net effect on the critical path below: `one bounded Live send attempt` has now been exercised once, but did not yield a reconciled terminal outcome for Phase 4's exit criterion (`PHASE4_COMPLETE` remains `FALSE` for this exact pilot, permanently). `post-pilot reconciliation` and everything after it on the critical path remain not-yet-reached. Whether/when to attempt a second, separately authorized pilot is an explicit future operator decision, not taken here.
 
 ---
 
