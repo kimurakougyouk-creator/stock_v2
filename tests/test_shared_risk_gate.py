@@ -3,6 +3,9 @@ from datetime import datetime, timedelta
 
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.execution.natural_trading_emergency_stop import (
+    request_natural_trading_stop,
+)
 from ai_asset_platform.execution.shared_risk_gate import (
     LegacyRiskSnapshot,
     _today_ibkr_realized_pnl_currency_safe,
@@ -71,6 +74,40 @@ def test_emergency_stop_blocks_before_state_read():
     )
     assert gate(OrderRequest("SPY", OrderSide.BUY, 1)).allowed is False
     assert called is False
+
+
+def test_local_stop_file_blocks_before_state_read(tmp_path):
+    # Regression for the 2026-10-16 Phase 5 safety audit: before
+    # natural_trading_emergency_stop.py existed, the only stop source here
+    # was the PlatformSettings.emergency_stop code-level default, with no
+    # way to assert it at runtime without a code change. A file-based latch
+    # must block the gate exactly like the settings flag does, including
+    # never reaching the snapshot provider.
+    called = False
+
+    def should_not_run(order, settings):
+        nonlocal called
+        called = True
+        return snapshot()
+
+    stop_path = tmp_path / "natural_trading_emergency_stop.json"
+    request_natural_trading_stop("operator requested stop", stop_path=stop_path)
+
+    gate = build_shared_risk_gate(
+        snapshot_provider=should_not_run,
+        stop_path=stop_path,
+    )
+    assert gate(OrderRequest("SPY", OrderSide.BUY, 1)).allowed is False
+    assert called is False
+
+
+def test_no_local_stop_file_does_not_block_safe_order(tmp_path):
+    stop_path = tmp_path / "natural_trading_emergency_stop.json"
+    gate = build_shared_risk_gate(
+        snapshot_provider=provider(snapshot()),
+        stop_path=stop_path,
+    )
+    assert gate(OrderRequest("SPY", OrderSide.BUY, 1)).allowed is True
 
 
 def test_paper_disabled_blocks():

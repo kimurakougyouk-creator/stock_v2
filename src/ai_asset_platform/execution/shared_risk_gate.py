@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable
 
 from ai_asset_platform.brokers.orders import OrderRequest, OrderSide
@@ -19,6 +20,10 @@ from ai_asset_platform.execution.account_calendar_ledger import (
     daily_order_count,
     record_time_in_account_zone,
     repurchase_cooldown_remaining_minutes,
+)
+from ai_asset_platform.execution.natural_trading_emergency_stop import (
+    DEFAULT_STOP_PATH as DEFAULT_NATURAL_TRADING_STOP_PATH,
+    natural_trading_stop_is_active,
 )
 from ai_asset_platform.execution.service import RiskGateResult
 from ai_asset_platform.reports.multicurrency_trade_history import (
@@ -154,9 +159,16 @@ def build_shared_risk_gate(
     *,
     settings: PlatformSettings = SETTINGS,
     snapshot_provider: SnapshotProvider = load_legacy_risk_snapshot,
+    stop_path: Path = DEFAULT_NATURAL_TRADING_STOP_PATH,
 ):
     def gate(order: OrderRequest) -> RiskGateResult:
-        if settings.emergency_stop:
+        # Two independent stop sources, combined: the existing immutable
+        # PlatformSettings.emergency_stop flag (code-level default, requires
+        # a code change to assert), and a durable local stop file that can be
+        # asserted at runtime without any code or config change -- see
+        # natural_trading_emergency_stop.py's own module docstring for why
+        # the settings flag alone was an operationally unusable kill switch.
+        if natural_trading_stop_is_active(settings=settings, stop_path=stop_path):
             return RiskGateResult(False, "緊急停止が有効なため注文を拒否しました")
         if not settings.enable_paper_trading:
             return RiskGateResult(False, "Paper Tradingが無効なため注文を拒否しました")
