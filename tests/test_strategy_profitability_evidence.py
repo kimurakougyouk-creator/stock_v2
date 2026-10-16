@@ -317,6 +317,46 @@ def test_fee_aware_jpy_roundtrip_reports_true_net_pnl():
     assert result.live_ready is False
 
 
+def test_broker_provenance_verified_flag_threads_through_when_caller_confirms_it():
+    records = [
+        _fill(
+            intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
+            side="BUY",
+            price=150.0,
+            exec_ids=["buy-1"],
+        ),
+        _fill(
+            intent=_natural_intent(
+                ticker="9432.T",
+                side="SELL",
+                shares=100,
+                bar_key="2026-09-02T10:00:00+09:00",
+            ),
+            side="SELL",
+            price=160.0,
+            exec_ids=["sell-1"],
+        ),
+    ]
+    commissions = _commission_report(
+        _commission("buy-1", 5.0, "JPY"),
+        _commission("sell-1", 5.0, "JPY"),
+    )
+
+    unverified = build_strategy_profitability_evidence(
+        records, account_currency="JPY", commission_report=commissions,
+    )
+    verified = build_strategy_profitability_evidence(
+        records,
+        account_currency="JPY",
+        commission_report=commissions,
+        broker_provenance_verified=True,
+    )
+
+    assert unverified.broker_provenance_verified is False
+    assert verified.broker_provenance_verified is True
+    assert verified.evidence_status == "NET_POSITIVE_AFTER_FEES"
+
+
 def test_fee_aware_evidence_counts_unattributed_broker_recovery_fills():
     records = [
         _fill(

@@ -613,6 +613,21 @@ def select_natural_strategy_fills(records: Iterable[dict]) -> list[dict]:
     return [record for record in records if is_natural_strategy_fill(record)]
 
 
+def select_and_dedupe_natural_strategy_fills(records: Iterable[dict]) -> list[dict]:
+    """Return the exact natural strategy fills used for profitability accounting.
+
+    Exposed so an independent broker-provenance verification layer (see
+    ``ai_asset_platform.execution.strategy_broker_provenance``) checks the
+    identical fill set this module accounts for, instead of re-deriving its
+    own selection logic. May raise ``StrategyProfitabilityEvidenceError`` on
+    conflicting duplicate fills, exactly like ``build_strategy_profitability_evidence``.
+    """
+    raw_strategy_fills = select_natural_strategy_fills(
+        record for record in records if isinstance(record, dict)
+    )
+    return _dedupe_strategy_fills_by_intent(raw_strategy_fills)
+
+
 def _json_safe_performance(performance) -> dict:
     payload = asdict(performance)
     factor = float(payload["profit_factor"])
@@ -648,6 +663,7 @@ def build_strategy_profitability_evidence(
     *,
     account_currency: str = "JPY",
     commission_report: dict | None = None,
+    broker_provenance_verified: bool = False,
 ) -> StrategyProfitabilityEvidence:
     """Build strategy evidence while excluding every non-strategy fill.
 
@@ -828,10 +844,19 @@ def build_strategy_profitability_evidence(
         ),
         gross_result=gross_result,
         reason=(
-            "Every natural strategy fill is bound to explicit broker exec_id commission "
-            "evidence; net realized PnL includes buy and sell commissions in account currency. "
-            "The local raw fill/commission ledgers are not yet authenticated against an "
-            "independent broker provenance source, so promotion remains fail-closed."
+            (
+                "Every natural strategy fill is bound to explicit broker exec_id commission "
+                "evidence; net realized PnL includes buy and sell commissions in account currency. "
+                "An independent broker-provenance check has confirmed every exec_id against a live "
+                "Paper broker query."
+            )
+            if broker_provenance_verified
+            else (
+                "Every natural strategy fill is bound to explicit broker exec_id commission "
+                "evidence; net realized PnL includes buy and sell commissions in account currency. "
+                "The local raw fill/commission ledgers are not yet authenticated against an "
+                "independent broker provenance source, so promotion remains fail-closed."
+            )
         ),
         account_currency=account,
         strategy_fill_count=len(strategy_fills),
@@ -848,10 +873,12 @@ def build_strategy_profitability_evidence(
         live_ready=False,
         strategy_source_sha=strategy_source_sha,
         strategy_parameters_sha=strategy_parameters_sha,
-        # Local ignored ledgers can be internally consistent after manual edits.
-        # Until a separate authenticated broker-provenance mechanism exists,
-        # the operational builder must never assert provenance verification.
-        broker_provenance_verified=False,
+        # Local ledgers can be internally consistent after manual edits. This
+        # may only be True when the caller has independently re-verified every
+        # exec_id against a live broker query (see
+        # ai_asset_platform.execution.strategy_broker_provenance); it is never
+        # derived from local evidence alone.
+        broker_provenance_verified=bool(broker_provenance_verified),
         unattributed_recovery_fill_count=unattributed_recovery_fill_count,
     )
 
