@@ -8,7 +8,9 @@ import subprocess
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
-from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
+from ai_asset_platform.brokers.ibkr_fx_historical import (
+    preview_ibkr_paper_historical_fx_rate,
+)
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.reports.strategy_source_attestation import (
     attest_strategy_source,
@@ -25,7 +27,15 @@ from ai_asset_platform.execution.signal_order_bridge import (
 )
 
 _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
-preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
+# Reproducibility, not freshness, is what later broker-provenance
+# verification (ai_asset_platform.execution.strategy_broker_provenance) needs:
+# a live/delayed market quote can never be fetched again after the fact, but
+# a closed historical MIDPOINT bar can. ibkr_execution_reconcile.py's own FX
+# resolution already uses this same historical-only source for exactly this
+# reason; this capture point is switched to match it so a captured rate is
+# independently reproducible later instead of merely being "fresh" at capture
+# time.
+preview_ibkr_paper_fx_rate = preview_ibkr_paper_historical_fx_rate
 
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
