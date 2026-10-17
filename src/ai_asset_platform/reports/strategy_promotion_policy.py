@@ -1,7 +1,15 @@
 """Fail-closed, versioned strategy-promotion policy evaluation.
 
-This module evaluates already-persisted Paper strategy profitability evidence.
-It never connects to a broker and never authorizes or performs a Live action.
+``evaluate_strategy_promotion`` itself only evaluates an already-built
+profitability evidence record and never connects to a broker. The ``main()``
+operational entrypoint, however, must be able to observe a genuinely
+broker-verified ``broker_provenance_verified`` value (see
+``ai_asset_platform.execution.strategy_broker_provenance``); it therefore
+rebuilds the profitability evidence through that independent broker-
+provenance layer rather than through the broker-free
+``audit_strategy_profitability_evidence`` alone. This never authorizes or
+performs a Live action, and it never creates, changes, cancels, or transmits
+any order (the underlying broker collectors are read-only and Paper-only).
 
 A policy may exist in a disabled/unapproved state. Disabled or incomplete
 policies always block. Even a passing promotion policy does not, by itself,
@@ -19,9 +27,11 @@ import re
 import subprocess
 from typing import Any
 
+from ai_asset_platform.execution.strategy_broker_provenance import (
+    audit_strategy_profitability_evidence_with_broker_provenance,
+)
 from ai_asset_platform.reports.performance import calculate_performance
 from ai_asset_platform.reports.strategy_profitability_evidence import (
-    audit_strategy_profitability_evidence,
     evidence_record as profitability_evidence_record,
     persist_strategy_profitability_evidence,
 )
@@ -740,7 +750,12 @@ def main() -> int:
         # for promotion. Rebuild it from the raw Paper fill and commission
         # ledgers in this same attested source run, persist that canonical
         # artifact, and evaluate the exact in-memory record just generated.
-        profitability_result = audit_strategy_profitability_evidence()
+        # Use the broker-provenance-verifying audit (not the broker-free one)
+        # so broker_provenance_verified can ever actually become True here;
+        # see the module docstring above.
+        profitability_result, broker_provenance = (
+            audit_strategy_profitability_evidence_with_broker_provenance()
+        )
         persist_strategy_profitability_evidence(
             profitability_result,
             source_sha=source_sha,
@@ -774,7 +789,7 @@ def main() -> int:
     print("LIVE ALLOWED :", decision.normal_live_strategy_deployment_allowed)
     print("BLOCKERS     :", list(decision.blockers))
     print("REPORT       :", DEFAULT_DECISION_REPORT_PATH)
-    print("BROKER USED  : False")
+    print("BROKER USED  :", broker_provenance is not None)
     print("ORDER SENT   : False")
     print("LIVE TRADING : PROHIBITED")
     return 0 if decision.promotion_policy_passed else 1

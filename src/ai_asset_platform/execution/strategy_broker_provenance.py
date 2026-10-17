@@ -40,6 +40,7 @@ from ai_asset_platform.reports.strategy_profitability_evidence import (
     DEFAULT_ORDER_LOG_PATH,
     StrategyProfitabilityEvidence,
     StrategyProfitabilityEvidenceError,
+    _commission_index,
     _load_json_object,
     _load_jsonl,
     _blocked_input_evidence,
@@ -66,15 +67,24 @@ def verify_broker_provenance_for_strategy_fills(
     *,
     execution_snapshot: IbkrPaperExecutionSnapshot,
     commission_snapshot: IbkrPaperCommissionSnapshot,
+    local_commission_report: dict | None,
 ) -> BrokerProvenanceResult:
     """Cross-check local natural-strategy fills against independent broker evidence.
 
     Every ``broker_exec_fills`` row on every fill must match exactly one
     broker execution row (same symbol/side/currency/quantity, STK only) that
-    also carries exactly one broker commission row in the same currency, and
-    the matched quantities must sum to the fill's full share count. Missing,
-    mismatched, or conflicting evidence fails closed; nothing is guessed or
-    back-filled.
+    also carries exactly one broker commission row in the same currency and
+    amount as the local commission ledger entry for that exec_id. The matched
+    quantities must sum to the fill's full share count, and the broker's
+    quantity-weighted average execution price must equal the fill's local
+    ``reference_price`` exactly. Missing, mismatched, or conflicting evidence
+    fails closed; nothing is guessed, back-filled, or tolerance-rounded.
+
+    Checking identity (symbol/side/currency/quantity) alone is not enough: a
+    local fill whose ``reference_price`` or whose local commission ledger
+    amount was edited after the fact would still carry a matching exec_id and
+    would otherwise pass unnoticed, silently corrupting the net-PnL evidence
+    this provenance check exists to protect.
     """
     fills = [record for record in strategy_fills if isinstance(record, dict)]
     blockers: list[str] = []
@@ -88,6 +98,23 @@ def verify_broker_provenance_for_strategy_fills(
     if not fills:
         return BrokerProvenanceResult(
             False, ("no natural strategy fills were supplied",), 0, 0
+        )
+
+    try:
+        if local_commission_report is None:
+            raise StrategyProfitabilityEvidenceError(
+                "no local commission ledger was supplied"
+            )
+        local_commissions = _commission_index(local_commission_report)
+    except StrategyProfitabilityEvidenceError as exc:
+        return BrokerProvenanceResult(
+            False,
+            (
+                "local commission ledger is unreadable; cannot verify broker "
+                f"commission amounts: {exc}",
+            ),
+            0,
+            len(fills),
         )
 
     executions_by_id: dict[str, IbkrExecutionEvidence] = {}
@@ -112,6 +139,11 @@ def verify_broker_provenance_for_strategy_fills(
         except (TypeError, ValueError):
             blockers.append(f"strategy fill #{position} has invalid shares")
             continue
+        try:
+            reference_price = Decimal(str(record.get("reference_price")))
+        except InvalidOperation:
+            blockers.append(f"strategy fill #{position} has an invalid reference_price")
+            continue
 
         raw_exec_fills = record.get("broker_exec_fills")
         if not isinstance(raw_exec_fills, list) or not raw_exec_fills:
@@ -120,6 +152,7 @@ def verify_broker_provenance_for_strategy_fills(
 
         symbol = _symbol_for_ticker(ticker)
         matched_total = Decimal("0")
+        matched_price_times_quantity = Decimal("0")
         fill_blocked = False
         for raw_fill in raw_exec_fills:
             if not isinstance(raw_fill, dict):
@@ -162,14 +195,43 @@ def verify_broker_provenance_for_strategy_fills(
                     "currency does not match the fill"
                 )
                 continue
+            local_commission = local_commissions.get(exec_id)
+            if local_commission is None:
+                fill_blocked = True
+                blockers.append(
+                    f"strategy fill #{position} exec_id={exec_id} has no local "
+                    "commission ledger entry to cross-check"
+                )
+                continue
+            local_commission_amount, local_commission_currency = local_commission
             try:
-                local_shares = Decimal(str(raw_fill.get("shares")))
-                broker_shares = Decimal(str(execution.quantity))
+                broker_commission_amount = Decimal(str(commission.commission))
             except InvalidOperation:
                 fill_blocked = True
                 blockers.append(
                     f"strategy fill #{position} exec_id={exec_id} has a non-finite "
-                    "share quantity"
+                    "broker commission amount"
+                )
+                continue
+            if (
+                local_commission_currency != currency
+                or broker_commission_amount != local_commission_amount
+            ):
+                fill_blocked = True
+                blockers.append(
+                    f"strategy fill #{position} exec_id={exec_id} broker commission "
+                    "amount does not match the local commission ledger"
+                )
+                continue
+            try:
+                local_shares = Decimal(str(raw_fill.get("shares")))
+                broker_shares = Decimal(str(execution.quantity))
+                broker_price = Decimal(str(execution.price))
+            except InvalidOperation:
+                fill_blocked = True
+                blockers.append(
+                    f"strategy fill #{position} exec_id={exec_id} has a non-finite "
+                    "share quantity or price"
                 )
                 continue
             if broker_shares != local_shares:
@@ -180,6 +242,7 @@ def verify_broker_provenance_for_strategy_fills(
                 )
                 continue
             matched_total += local_shares
+            matched_price_times_quantity += local_shares * broker_price
 
         if fill_blocked:
             continue
@@ -187,6 +250,13 @@ def verify_broker_provenance_for_strategy_fills(
             blockers.append(
                 f"strategy fill #{position} matched broker quantity does not equal "
                 "the total fill shares"
+            )
+            continue
+        weighted_average_price = matched_price_times_quantity / matched_total
+        if weighted_average_price != reference_price:
+            blockers.append(
+                f"strategy fill #{position} broker quantity-weighted average execution "
+                "price does not match the local reference_price"
             )
             continue
         verified_fill_count += 1
@@ -198,6 +268,7 @@ def verify_broker_provenance_for_strategy_fills(
 def collect_and_verify_broker_provenance(
     strategy_fills: Iterable[dict],
     *,
+    local_commission_report: dict | None,
     timeout: float = 10.0,
 ) -> BrokerProvenanceResult:
     """Connect to the Paper broker and verify the supplied natural strategy fills.
@@ -213,6 +284,7 @@ def collect_and_verify_broker_provenance(
         strategy_fills,
         execution_snapshot=execution_snapshot,
         commission_snapshot=commission_snapshot,
+        local_commission_report=local_commission_report,
     )
 
 
@@ -251,7 +323,11 @@ def audit_strategy_profitability_evidence_with_broker_provenance(
         provenance_fills = []
 
     provenance = (
-        collect_and_verify_broker_provenance(provenance_fills, timeout=timeout)
+        collect_and_verify_broker_provenance(
+            provenance_fills,
+            local_commission_report=commission_report,
+            timeout=timeout,
+        )
         if provenance_fills
         else None
     )

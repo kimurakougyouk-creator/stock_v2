@@ -483,8 +483,8 @@ def test_main_regenerates_profitability_from_raw_ledgers_instead_of_loading_muta
     )
     monkeypatch.setattr(
         promotion_module,
-        "audit_strategy_profitability_evidence",
-        lambda: raw_result,
+        "audit_strategy_profitability_evidence_with_broker_provenance",
+        lambda: (raw_result, None),
     )
 
     def _persist_raw(result, *, source_sha):
