@@ -21,9 +21,10 @@ or transmitted here, and no Live endpoint is ever contacted.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from ai_asset_platform.brokers.ibkr_commission_snapshot import (
     IbkrPaperCommissionSnapshot,
@@ -34,7 +35,13 @@ from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     IbkrPaperExecutionSnapshot,
     preview_ibkr_paper_execution_snapshot,
 )
+from ai_asset_platform.brokers.ibkr_fx_historical import (
+    preview_ibkr_paper_historical_fx_rate,
+)
 from ai_asset_platform.core.settings import SETTINGS
+from ai_asset_platform.execution.ibkr_execution_reconcile import (
+    _execution_reference_timestamp,
+)
 from ai_asset_platform.reports.strategy_profitability_evidence import (
     DEFAULT_COMMISSION_REPORT_PATH,
     DEFAULT_ORDER_LOG_PATH,
@@ -47,6 +54,20 @@ from ai_asset_platform.reports.strategy_profitability_evidence import (
     build_strategy_profitability_evidence,
     select_and_dedupe_natural_strategy_fills,
 )
+
+# Natural-strategy fills are the only fills this module ever verifies (see
+# select_and_dedupe_natural_strategy_fills), and those are recorded only by
+# ibkr_signal_runtime.py's synchronous call to legacy_fill_sync.record_confirmed_fill
+# immediately after the broker's own execDetails callback -- never by the
+# separate, asynchronous broker-recovery reconciliation path. The only
+# expected gap between a fill's local created_at and the broker's own
+# execution.time is therefore processing latency/clock drift, not a batch
+# delay. This bound is generous enough to absorb that latency while still
+# rejecting any hour/day-scale tampering relevant to the promotion policy's
+# observation-span/evidence-age thresholds.
+MAX_LOCAL_VS_BROKER_TIMESTAMP_SKEW_SECONDS = 300.0
+
+FxRateFetcher = Callable[[str, str, float, str], "float | None"]
 
 
 @dataclass(frozen=True)
@@ -62,30 +83,77 @@ def _symbol_for_ticker(ticker: str) -> str:
     return "9432" if normalized == "9432.T" else normalized
 
 
+def _local_created_at_timestamp(record: dict) -> float | None:
+    raw = record.get("created_at")
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
+def default_fx_rate_fetcher(
+    base_currency: str,
+    quote_currency: str,
+    reference_timestamp: float,
+    end_datetime: str,
+    *,
+    timeout: float = 10.0,
+) -> float | None:
+    """Independently resolve a broker historical FX rate near a fill's exec time.
+
+    Reuses the existing read-only ``preview_ibkr_paper_historical_fx_rate``
+    collector (already used by the natural-strategy reconciliation path in
+    ``ibkr_execution_reconcile.py``) instead of inventing a new FX source.
+    """
+    evidence = preview_ibkr_paper_historical_fx_rate(
+        base_currency=base_currency,
+        quote_currency=quote_currency,
+        end_datetime=end_datetime,
+        reference_timestamp=reference_timestamp,
+        timeout=timeout,
+    )
+    if evidence.ready and evidence.rate is not None and float(evidence.rate) > 0:
+        return float(evidence.rate)
+    return None
+
+
 def verify_broker_provenance_for_strategy_fills(
     strategy_fills: Iterable[dict],
     *,
     execution_snapshot: IbkrPaperExecutionSnapshot,
     commission_snapshot: IbkrPaperCommissionSnapshot,
     local_commission_report: dict | None,
+    account_currency: str,
+    fx_rate_fetcher: FxRateFetcher,
 ) -> BrokerProvenanceResult:
     """Cross-check local natural-strategy fills against independent broker evidence.
 
     Every ``broker_exec_fills`` row on every fill must match exactly one
     broker execution row (same symbol/side/currency/quantity, STK only) that
     also carries exactly one broker commission row in the same currency and
-    amount as the local commission ledger entry for that exec_id. The matched
-    quantities must sum to the fill's full share count, and the broker's
-    quantity-weighted average execution price must equal the fill's local
-    ``reference_price`` exactly. Missing, mismatched, or conflicting evidence
-    fails closed; nothing is guessed, back-filled, or tolerance-rounded.
+    amount as the local commission ledger entry for that exec_id, and whose
+    local ``created_at`` is within
+    ``MAX_LOCAL_VS_BROKER_TIMESTAMP_SKEW_SECONDS`` of the broker's own
+    execution time. The matched quantities must sum to the fill's full share
+    count, the broker's quantity-weighted average execution price must equal
+    the fill's local ``reference_price`` exactly, and, for any fill whose
+    currency differs from ``account_currency``, the local
+    ``fx_to_account_rate`` must equal an independently fetched broker
+    historical FX rate exactly. Missing, mismatched, or conflicting evidence
+    fails closed; nothing is guessed, back-filled, or tolerance-rounded
+    (other than the bounded, justified clock-skew tolerance above).
 
     Checking identity (symbol/side/currency/quantity) alone is not enough: a
-    local fill whose ``reference_price`` or whose local commission ledger
-    amount was edited after the fact would still carry a matching exec_id and
+    local fill whose ``reference_price``, commission amount, timestamp, or FX
+    rate was edited after the fact would still carry a matching exec_id and
     would otherwise pass unnoticed, silently corrupting the net-PnL evidence
-    this provenance check exists to protect.
+    (and the promotion policy's time-based thresholds) this provenance check
+    exists to protect.
     """
+    normalized_account_currency = str(account_currency).strip().upper()
     fills = [record for record in strategy_fills if isinstance(record, dict)]
     blockers: list[str] = []
 
@@ -144,6 +212,12 @@ def verify_broker_provenance_for_strategy_fills(
         except InvalidOperation:
             blockers.append(f"strategy fill #{position} has an invalid reference_price")
             continue
+        local_created_at_epoch = _local_created_at_timestamp(record)
+        if local_created_at_epoch is None:
+            blockers.append(
+                f"strategy fill #{position} is missing a valid timezone-aware created_at"
+            )
+            continue
 
         raw_exec_fills = record.get("broker_exec_fills")
         if not isinstance(raw_exec_fills, list) or not raw_exec_fills:
@@ -153,6 +227,7 @@ def verify_broker_provenance_for_strategy_fills(
         symbol = _symbol_for_ticker(ticker)
         matched_total = Decimal("0")
         matched_price_times_quantity = Decimal("0")
+        first_execution_time: str | None = None
         fill_blocked = False
         for raw_fill in raw_exec_fills:
             if not isinstance(raw_fill, dict):
@@ -180,6 +255,26 @@ def verify_broker_provenance_for_strategy_fills(
                     "does not match the local fill"
                 )
                 continue
+            broker_execution_epoch = _execution_reference_timestamp(execution.time)
+            if broker_execution_epoch is None:
+                fill_blocked = True
+                blockers.append(
+                    f"strategy fill #{position} exec_id={exec_id} has an unparseable "
+                    "broker execution time"
+                )
+                continue
+            if (
+                abs(local_created_at_epoch - broker_execution_epoch)
+                > MAX_LOCAL_VS_BROKER_TIMESTAMP_SKEW_SECONDS
+            ):
+                fill_blocked = True
+                blockers.append(
+                    f"strategy fill #{position} exec_id={exec_id} local created_at does "
+                    "not match the broker execution time within tolerance"
+                )
+                continue
+            if first_execution_time is None:
+                first_execution_time = execution.time
             commission = commissions_by_id.get(exec_id)
             if commission is None:
                 fill_blocked = True
@@ -259,6 +354,49 @@ def verify_broker_provenance_for_strategy_fills(
                 "price does not match the local reference_price"
             )
             continue
+
+        if currency != normalized_account_currency:
+            raw_fx_rate = record.get("fx_to_account_rate")
+            try:
+                local_fx_rate = Decimal(str(raw_fx_rate))
+            except InvalidOperation:
+                blockers.append(
+                    f"strategy fill #{position} has an invalid fx_to_account_rate "
+                    "for a foreign-currency fill"
+                )
+                continue
+            assert first_execution_time is not None  # guaranteed by matched_total == shares
+            reference_epoch = _execution_reference_timestamp(first_execution_time)
+            if reference_epoch is None:
+                blockers.append(
+                    f"strategy fill #{position} has no parseable broker execution "
+                    "time to anchor an independent FX check"
+                )
+                continue
+            broker_fx_rate = fx_rate_fetcher(
+                currency, normalized_account_currency, reference_epoch, first_execution_time
+            )
+            if broker_fx_rate is None:
+                blockers.append(
+                    f"strategy fill #{position} independent broker FX evidence for "
+                    f"{currency}->{normalized_account_currency} near the fill time "
+                    "is unavailable"
+                )
+                continue
+            try:
+                broker_fx_rate_decimal = Decimal(str(broker_fx_rate))
+            except InvalidOperation:
+                blockers.append(
+                    f"strategy fill #{position} broker FX rate is non-finite"
+                )
+                continue
+            if broker_fx_rate_decimal != local_fx_rate:
+                blockers.append(
+                    f"strategy fill #{position} local fx_to_account_rate does not "
+                    "match the independently fetched broker FX rate"
+                )
+                continue
+
         verified_fill_count += 1
 
     verified = not blockers and verified_fill_count == len(fills)
@@ -269,22 +407,44 @@ def collect_and_verify_broker_provenance(
     strategy_fills: Iterable[dict],
     *,
     local_commission_report: dict | None,
+    account_currency: str | None = None,
     timeout: float = 10.0,
 ) -> BrokerProvenanceResult:
     """Connect to the Paper broker and verify the supplied natural strategy fills.
 
-    This is the only function in this module that opens a broker socket. It
-    never creates, changes, cancels, retries, or transmits an order, and it
-    never contacts a Live endpoint (the underlying collectors are hardcoded
-    to the Paper gateway/TWS ports).
+    This is the only function in this module that opens a broker socket
+    unconditionally. It never creates, changes, cancels, retries, or
+    transmits an order, and it never contacts a Live endpoint (the underlying
+    collectors are hardcoded to the Paper gateway/TWS ports). For any
+    foreign-currency fill, ``verify_broker_provenance_for_strategy_fills``
+    opens one additional read-only historical-FX socket per fill via the
+    injected ``fx_rate_fetcher``.
     """
+    normalized_account_currency = str(account_currency or SETTINGS.account_currency)
     execution_snapshot = preview_ibkr_paper_execution_snapshot(timeout=timeout)
     commission_snapshot = preview_ibkr_paper_commission_snapshot(timeout=timeout)
+
+    def _fetch_fx_rate(
+        base_currency: str,
+        quote_currency: str,
+        reference_timestamp: float,
+        end_datetime: str,
+    ) -> float | None:
+        return default_fx_rate_fetcher(
+            base_currency,
+            quote_currency,
+            reference_timestamp,
+            end_datetime,
+            timeout=timeout,
+        )
+
     return verify_broker_provenance_for_strategy_fills(
         strategy_fills,
         execution_snapshot=execution_snapshot,
         commission_snapshot=commission_snapshot,
         local_commission_report=local_commission_report,
+        account_currency=normalized_account_currency,
+        fx_rate_fetcher=_fetch_fx_rate,
     )
 
 
@@ -326,6 +486,7 @@ def audit_strategy_profitability_evidence_with_broker_provenance(
         collect_and_verify_broker_provenance(
             provenance_fills,
             local_commission_report=commission_report,
+            account_currency=account,
             timeout=timeout,
         )
         if provenance_fills

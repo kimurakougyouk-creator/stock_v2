@@ -13,6 +13,10 @@ from ai_asset_platform.execution.strategy_broker_provenance import (
 )
 
 
+DEFAULT_EXEC_TIME = "20261016 09:00:00 Asia/Tokyo"
+DEFAULT_CREATED_AT = "2026-10-16T09:00:00+09:00"
+
+
 def _execution(**overrides) -> IbkrExecutionEvidence:
     base = dict(
         exec_id="exec-1",
@@ -25,7 +29,7 @@ def _execution(**overrides) -> IbkrExecutionEvidence:
         side="BUY",
         quantity=100.0,
         price=172.1,
-        time="20261016 09:00:00",
+        time=DEFAULT_EXEC_TIME,
         account="DU0000001",
     )
     base.update(overrides)
@@ -52,6 +56,7 @@ def _fill(**overrides) -> dict:
         shares=100,
         currency="JPY",
         reference_price=172.1,
+        created_at=DEFAULT_CREATED_AT,
         broker_exec_fills=[{"exec_id": "exec-1", "shares": 100}],
     )
     base.update(overrides)
@@ -93,8 +98,30 @@ def _local_commission(exec_id: str = "exec-1", commission: float = 80.0, currenc
     return {"exec_id": exec_id, "commission": commission, "currency": currency}
 
 
+def _unused_fx_fetcher(*args):
+    raise AssertionError(
+        "fx_rate_fetcher must not be called for a same-currency (non-foreign) fill"
+    )
+
+
+def _fixed_fx_fetcher(rate: float | None):
+    def _fetch(base_currency, quote_currency, reference_timestamp, end_datetime):
+        return rate
+
+    return _fetch
+
+
+def _verify(fills, *, account_currency="JPY", fx_rate_fetcher=_unused_fx_fetcher, **snapshots):
+    return verify_broker_provenance_for_strategy_fills(
+        fills,
+        account_currency=account_currency,
+        fx_rate_fetcher=fx_rate_fetcher,
+        **snapshots,
+    )
+
+
 def test_matching_broker_evidence_verifies_provenance():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -107,7 +134,7 @@ def test_matching_broker_evidence_verifies_provenance():
 
 
 def test_not_ready_execution_snapshot_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution(), ready=False),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -118,7 +145,7 @@ def test_not_ready_execution_snapshot_fails_closed():
 
 
 def test_not_ready_commission_snapshot_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(_commission(), ready=False),
@@ -129,7 +156,7 @@ def test_not_ready_commission_snapshot_fails_closed():
 
 
 def test_missing_exec_id_in_broker_execution_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -140,7 +167,7 @@ def test_missing_exec_id_in_broker_execution_fails_closed():
 
 
 def test_symbol_mismatch_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution(symbol="AAPL")),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -151,7 +178,7 @@ def test_symbol_mismatch_fails_closed():
 
 
 def test_side_mismatch_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution(side="SELL")),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -162,7 +189,7 @@ def test_side_mismatch_fails_closed():
 
 
 def test_quantity_mismatch_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution(quantity=50.0)),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -173,7 +200,7 @@ def test_quantity_mismatch_fails_closed():
 
 
 def test_missing_commission_evidence_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(),
@@ -184,7 +211,7 @@ def test_missing_commission_evidence_fails_closed():
 
 
 def test_commission_currency_mismatch_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(_commission(currency="USD")),
@@ -198,7 +225,7 @@ def test_broker_execution_price_mismatch_fails_closed():
     # Regression for Codex P1 finding on PR #350: a locally-edited
     # reference_price must not silently pass just because exec_id/quantity
     # still line up with the broker execution.
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill(reference_price=999.0)],
         execution_snapshot=_execution_snapshot(_execution(price=172.1)),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -214,7 +241,7 @@ def test_broker_execution_price_mismatch_fails_closed():
 def test_broker_commission_amount_mismatch_fails_closed():
     # Regression for Codex P1 finding on PR #350: a locally-edited commission
     # amount (same exec_id/currency) must not silently pass.
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(_commission(commission=80.0)),
@@ -230,7 +257,7 @@ def test_broker_commission_amount_mismatch_fails_closed():
 
 
 def test_missing_local_commission_entry_for_exec_id_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -243,7 +270,7 @@ def test_missing_local_commission_entry_for_exec_id_fails_closed():
 
 
 def test_missing_local_commission_report_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -254,7 +281,7 @@ def test_missing_local_commission_report_fails_closed():
 
 
 def test_malformed_local_commission_report_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [_fill()],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -273,7 +300,7 @@ def test_multiple_execution_rows_summing_to_total_shares_verifies():
             {"exec_id": "exec-2", "shares": 40},
         ],
     )
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [fill],
         execution_snapshot=_execution_snapshot(
             _execution(exec_id="exec-1", quantity=60.0, price=172.0),
@@ -302,7 +329,7 @@ def test_multi_leg_weighted_average_price_must_match_reference_price():
             {"exec_id": "exec-2", "shares": 40},
         ],
     )
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [fill],
         execution_snapshot=_execution_snapshot(
             _execution(exec_id="exec-1", quantity=60.0, price=170.0),
@@ -325,7 +352,7 @@ def test_partial_execution_rows_not_summing_to_total_shares_fails_closed():
         shares=100,
         broker_exec_fills=[{"exec_id": "exec-1", "shares": 60}],
     )
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [fill],
         execution_snapshot=_execution_snapshot(_execution(exec_id="exec-1", quantity=60.0)),
         commission_snapshot=_commission_snapshot(_commission(exec_id="exec-1", commission=48.0)),
@@ -338,7 +365,7 @@ def test_partial_execution_rows_not_summing_to_total_shares_fails_closed():
 
 
 def test_no_fills_supplied_fails_closed():
-    result = verify_broker_provenance_for_strategy_fills(
+    result = _verify(
         [],
         execution_snapshot=_execution_snapshot(_execution()),
         commission_snapshot=_commission_snapshot(_commission()),
@@ -347,6 +374,140 @@ def test_no_fills_supplied_fails_closed():
     assert result.verified is False
     assert result.blockers == ("no natural strategy fills were supplied",)
     assert result.total_fill_count == 0
+
+
+def test_missing_created_at_fails_closed():
+    result = _verify(
+        [_fill(created_at=None)],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+    )
+    assert result.verified is False
+    assert any(
+        "missing a valid timezone-aware created_at" in b for b in result.blockers
+    )
+
+
+def test_naive_created_at_without_timezone_fails_closed():
+    result = _verify(
+        [_fill(created_at="2026-10-16T09:00:00")],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+    )
+    assert result.verified is False
+    assert any(
+        "missing a valid timezone-aware created_at" in b for b in result.blockers
+    )
+
+
+def test_local_created_at_far_from_broker_execution_time_fails_closed():
+    # Regression for Codex P1 finding on PR #350: a locally-edited created_at
+    # must not silently pass even though exec_id/qty/price/commission match.
+    result = _verify(
+        [_fill(created_at="2026-10-20T09:00:00+09:00")],  # 4 days away
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+    )
+    assert result.verified is False
+    assert any(
+        "does not match the broker execution time within tolerance" in b
+        for b in result.blockers
+    )
+
+
+def test_local_created_at_within_tolerance_of_broker_execution_time_verifies():
+    result = _verify(
+        [_fill(created_at="2026-10-16T09:02:00+09:00")],  # 120s after exec
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+    )
+    assert result.verified is True
+
+
+def test_foreign_currency_fill_matching_broker_fx_rate_verifies():
+    result = _verify(
+        [
+            _fill(
+                ticker="AAPL",
+                currency="USD",
+                fx_to_account_rate=150.0,
+            )
+        ],
+        execution_snapshot=_execution_snapshot(_execution(symbol="AAPL", currency="USD")),
+        commission_snapshot=_commission_snapshot(_commission(currency="USD")),
+        local_commission_report=_local_commission_report(
+            _local_commission(currency="USD")
+        ),
+        account_currency="JPY",
+        fx_rate_fetcher=_fixed_fx_fetcher(150.0),
+    )
+    assert result.verified is True
+
+
+def test_foreign_currency_fill_fx_rate_mismatch_fails_closed():
+    # Regression for Codex P1 finding on PR #350: an edited local
+    # fx_to_account_rate must not silently pass.
+    result = _verify(
+        [
+            _fill(
+                ticker="AAPL",
+                currency="USD",
+                fx_to_account_rate=999.0,
+            )
+        ],
+        execution_snapshot=_execution_snapshot(_execution(symbol="AAPL", currency="USD")),
+        commission_snapshot=_commission_snapshot(_commission(currency="USD")),
+        local_commission_report=_local_commission_report(
+            _local_commission(currency="USD")
+        ),
+        account_currency="JPY",
+        fx_rate_fetcher=_fixed_fx_fetcher(150.0),
+    )
+    assert result.verified is False
+    assert any(
+        "fx_to_account_rate does not match the independently fetched broker FX rate" in b
+        for b in result.blockers
+    )
+
+
+def test_foreign_currency_fill_missing_broker_fx_evidence_fails_closed():
+    result = _verify(
+        [
+            _fill(
+                ticker="AAPL",
+                currency="USD",
+                fx_to_account_rate=150.0,
+            )
+        ],
+        execution_snapshot=_execution_snapshot(_execution(symbol="AAPL", currency="USD")),
+        commission_snapshot=_commission_snapshot(_commission(currency="USD")),
+        local_commission_report=_local_commission_report(
+            _local_commission(currency="USD")
+        ),
+        account_currency="JPY",
+        fx_rate_fetcher=_fixed_fx_fetcher(None),
+    )
+    assert result.verified is False
+    assert any(
+        "independent broker FX evidence" in b and "unavailable" in b
+        for b in result.blockers
+    )
+
+
+def test_same_currency_fill_never_calls_fx_rate_fetcher():
+    # account_currency == fill currency (JPY/JPY): the FX check must be
+    # skipped entirely. _unused_fx_fetcher raises if ever invoked.
+    result = _verify(
+        [_fill()],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+    )
+    assert result.verified is True
 
 
 def test_module_contains_no_order_transport():
