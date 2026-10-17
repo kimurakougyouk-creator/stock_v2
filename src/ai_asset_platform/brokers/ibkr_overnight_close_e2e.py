@@ -21,6 +21,7 @@ from ai_asset_platform.execution.confirmed_fill_evidence import confirmed_fill_f
 from ai_asset_platform.execution.ibkr_execution_reconcile import reconcile_execution_snapshot_to_ledger
 from ai_asset_platform.execution.ibkr_signal_runtime import (
     _broker_exec_ids, _capture_account_fx_rate, _connect_first_available_paper_broker,
+    _first_broker_execution_time,
 )
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.service import ExecutionService
@@ -95,7 +96,9 @@ def run_spy_overnight_paper_close(*, limit_price: float, order_log_path: Path = 
         persisted = False
         if confirmed is not None:
             quantity, price = confirmed
-            fx_rate = _capture_account_fx_rate("USD")
+            fx_rate = _capture_account_fx_rate(
+                "USD", execution_time=_first_broker_execution_time(result)
+            )
             raw_order_id = getattr(result, "order_id", None)
             record_confirmed_fill(
                 ticker="SPY", side="SELL", filled_quantity=quantity, avg_fill_price=price,
