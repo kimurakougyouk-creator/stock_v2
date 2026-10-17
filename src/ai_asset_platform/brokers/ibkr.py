@@ -167,6 +167,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
         order: OrderRequest,
         *,
         instrument: InstrumentSpec | None = None,
+        order_intent_id: str | None = None,
     ) -> OrderResult:
         if not self.is_connected() or self._session is None:
             return OrderResult(
@@ -182,6 +183,7 @@ class IbkrBrokerAdapter(BrokerAdapter):
             next_order_id=self._session.next_order_id,
             enable_transmission=self._enable_paper_order_transmission,
             instrument=instrument,
+            order_intent_id=order_intent_id,
         )
 
         if not result.sent:
@@ -269,7 +271,9 @@ class IbkrBrokerAdapter(BrokerAdapter):
                 ),
             )
 
-        result = self.place_order(order, instrument=instrument)
+        result = self.place_order(
+            order, instrument=instrument, order_intent_id=order_intent_id
+        )
 
         if result.status is not OrderStatus.ACCEPTED:
             _release_intent_lock(lock_path)

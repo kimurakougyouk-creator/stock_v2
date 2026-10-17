@@ -29,6 +29,7 @@ from ai_asset_platform.execution.ibkr_signal_runtime import (
     _broker_exec_ids,
     _capture_account_fx_rate,
     _connect_first_available_paper_broker,
+    _first_broker_execution_time,
 )
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.service import ExecutionService
@@ -153,7 +154,9 @@ def run_spy_extended_paper_close(
         persisted = False
         if confirmed is not None:
             quantity, price = confirmed
-            fx_rate = _capture_account_fx_rate("USD")
+            fx_rate = _capture_account_fx_rate(
+                "USD", execution_time=_first_broker_execution_time(result)
+            )
             raw_order_id = getattr(result, "order_id", None)
             record_confirmed_fill(
                 ticker="SPY",

@@ -8,13 +8,18 @@ import subprocess
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
 from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
-from ai_asset_platform.brokers.ibkr_fx_evidence import resolve_ibkr_paper_fx_evidence
+from ai_asset_platform.brokers.ibkr_fx_historical import (
+    preview_ibkr_paper_historical_fx_rate,
+)
 from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.reports.strategy_source_attestation import (
     attest_strategy_source,
 )
 from ai_asset_platform.execution.broker_position_guard import evaluate_broker_position_guard
 from ai_asset_platform.execution.confirmed_fill_evidence import confirmed_fill_from_broker_result
+from ai_asset_platform.execution.ibkr_execution_reconcile import (
+    _execution_reference_timestamp,
+)
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.service import ExecutionService
 from ai_asset_platform.execution.shared_risk_gate import build_shared_risk_gate
@@ -25,7 +30,15 @@ from ai_asset_platform.execution.signal_order_bridge import (
 )
 
 _confirmed_fill_from_broker_result = confirmed_fill_from_broker_result
-preview_ibkr_paper_fx_rate = resolve_ibkr_paper_fx_evidence
+# Reproducibility, not freshness, is what later broker-provenance
+# verification (ai_asset_platform.execution.strategy_broker_provenance) needs:
+# a live/delayed market quote can never be fetched again after the fact, but
+# a closed historical MIDPOINT bar can. ibkr_execution_reconcile.py's own FX
+# resolution already uses this same historical-only source for exactly this
+# reason; this capture point is switched to match it so a captured rate is
+# independently reproducible later instead of merely being "fresh" at capture
+# time.
+preview_ibkr_paper_fx_rate = preview_ibkr_paper_historical_fx_rate
 
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PARAMETERS_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -92,21 +105,49 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
     raise RuntimeError(f"IBKR Paperへ接続できません: {detail}")
 
 
-def _capture_account_fx_rate(instrument_currency: str) -> float | None:
+def _capture_account_fx_rate(
+    instrument_currency: str, *, execution_time: str | None = None
+) -> float | None:
     instrument = str(instrument_currency).strip().upper()
     account = str(SETTINGS.account_currency).strip().upper()
     if len(instrument) != 3 or len(account) != 3:
         return None
     if instrument == account:
         return 1.0
+    # The historical bar this resolves to is anchored to execution_time (the
+    # broker's own exec timestamp) rather than "now": later independent
+    # broker-provenance verification (strategy_broker_provenance.py) can only
+    # re-query anchored to that same broker timestamp, and a discretized
+    # historical bar selected by any other anchor could land in a different
+    # bucket, permanently failing an honest fill's verification.
+    reference_timestamp = (
+        _execution_reference_timestamp(execution_time) if execution_time else None
+    )
+    if reference_timestamp is None:
+        return None
     try:
-        snapshot = preview_ibkr_paper_fx_rate(base_currency=instrument, quote_currency=account)
+        snapshot = preview_ibkr_paper_fx_rate(
+            base_currency=instrument,
+            quote_currency=account,
+            end_datetime=str(execution_time).strip(),
+            reference_timestamp=reference_timestamp,
+        )
     except Exception:
         return None
     if not snapshot.ready or snapshot.rate is None:
         return None
     rate = float(snapshot.rate)
     return rate if rate > 0 else None
+
+
+def _first_broker_execution_time(result: object | None) -> str | None:
+    for row in list(getattr(result, "executions", None) or []):
+        if not isinstance(row, dict):
+            continue
+        value = str(row.get("time", "") or "").strip()
+        if value:
+            return value
+    return None
 
 
 def _broker_exec_ids(result: object | None) -> list[str]:
@@ -191,7 +232,10 @@ def execute_approved_signal_via_ibkr_paper(
         confirmed = confirmed_fill_from_broker_result(result, shares) if execution.attempted else None
         if confirmed is not None:
             confirmed_quantity, confirmed_price = confirmed
-            fx_rate = _capture_account_fx_rate(instrument.currency)
+            fx_rate = _capture_account_fx_rate(
+                instrument.currency,
+                execution_time=_first_broker_execution_time(result),
+            )
             raw_order_id = getattr(result, "order_id", None)
             record_confirmed_fill(
                 ticker=ticker, side=normalized_signal,

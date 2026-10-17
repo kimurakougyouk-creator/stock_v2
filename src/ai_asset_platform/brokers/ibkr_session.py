@@ -108,6 +108,12 @@ class _IbkrPaperClient(EWrapper, EClient):
                 "exec_id": str(execution.execId),
                 "shares": float(execution.shares),
                 "price": float(execution.price),
+                # Lets the caller anchor any later broker query (e.g. a
+                # historical FX rate lookup) to the broker's own execution
+                # time instead of its own local call time, which can land in
+                # a different discretized time bucket than a later
+                # independent re-query anchored to this same exec.
+                "time": str(getattr(execution, "time", "") or "").strip(),
             }
         )
 

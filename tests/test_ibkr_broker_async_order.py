@@ -18,11 +18,12 @@ class FakeContract:
 
 
 class FakeExecution:
-    def __init__(self, order_id, exec_id, shares, price):
+    def __init__(self, order_id, exec_id, shares, price, time=""):
         self.orderId = order_id
         self.execId = exec_id
         self.shares = shares
         self.price = price
+        self.time = time
 
 
 class FakeOrderState:
@@ -97,6 +98,7 @@ class FakeClient:
                 "exec_id": str(execution.execId),
                 "shares": float(execution.shares),
                 "price": float(execution.price),
+                "time": str(getattr(execution, "time", "") or "").strip(),
             }
         )
         if self.exec_details_handler is not None:
@@ -472,7 +474,9 @@ def test_diagnostics_and_observability_fields_populated(monkeypatch, tmp_path):
         session.client.error(order_id, 0, 2104, "market data farm connection is OK", "")
         session.client.openOrder(order_id, contract, order, FakeOrderState("Filled"))
         session.client.execDetails(
-            9999, FakeContract(), FakeExecution(order_id, "exec-1", 1.0, 200.0)
+            9999,
+            FakeContract(),
+            FakeExecution(order_id, "exec-1", 1.0, 200.0, time="20261016 09:00:00 Asia/Tokyo"),
         )
 
     session.client.placeOrder = fake_place_order
@@ -497,6 +501,7 @@ def test_diagnostics_and_observability_fields_populated(monkeypatch, tmp_path):
             "exec_id": "exec-1",
             "shares": 1.0,
             "price": 200.0,
+            "time": "20261016 09:00:00 Asia/Tokyo",
         }
     ]
 

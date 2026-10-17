@@ -114,6 +114,45 @@ def test_explicit_instrument_without_verified_quantity_fails_closed():
         )
 
 
+def test_order_ref_is_set_from_order_intent_id():
+    # Regression for Codex P1 finding on PR #350: without an immutable
+    # broker-side linkage, a locally-relabeled unrelated trade could be
+    # authenticated as a natural-strategy fill as long as its other fields
+    # happened to match. Mirrors the existing Live Pilot pattern
+    # (live_pilot_single_send.py: order.orderRef = intent_id).
+    prepared = prepare_ibkr_paper_order(
+        OrderRequest(symbol="AAPL", side=OrderSide.BUY, quantity=1),
+        create_ibkr_paper_config(),
+        order_intent_id="signal-runner:AAPL:BUY:1:2026-10-17T09:00:00+09:00",
+    )
+    assert prepared.order.orderRef == "signal-runner:AAPL:BUY:1:2026-10-17T09:00:00+09:00"
+
+
+def test_order_ref_is_set_from_order_intent_id_for_explicit_instrument():
+    instrument = InstrumentSpec(
+        symbol="9432",
+        asset_class=AssetClass.STOCK,
+        exchange="TSEJ",
+        currency="JPY",
+        verified_paper_test_quantity=100,
+    )
+    prepared = prepare_ibkr_paper_order_for_instrument(
+        OrderRequest(symbol="9432", side=OrderSide.BUY, quantity=100),
+        instrument,
+        create_ibkr_paper_config(),
+        order_intent_id="signal-runner:9432.T:BUY:100:2026-10-17T09:00:00+09:00",
+    )
+    assert prepared.order.orderRef == "signal-runner:9432.T:BUY:100:2026-10-17T09:00:00+09:00"
+
+
+def test_order_ref_is_left_unset_without_order_intent_id():
+    prepared = prepare_ibkr_paper_order(
+        OrderRequest(symbol="AAPL", side=OrderSide.BUY, quantity=1),
+        create_ibkr_paper_config(),
+    )
+    assert prepared.order.orderRef == ""
+
+
 def test_blocks_non_paper_configuration():
     with pytest.raises(RuntimeError, match="Paper Trading設定ではない"):
         prepare_ibkr_paper_order(

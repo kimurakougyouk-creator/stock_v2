@@ -49,7 +49,9 @@ def test_close_happy_path_is_sell_once_and_persists_broker_identity(monkeypatch,
     monkeypatch.setattr(module, "evaluate_verified_paper_preflight", lambda **k: SimpleNamespace(allowed=True, reason="ok"))
     monkeypatch.setattr(module, "preview_spy_overnight_close_whatif", lambda **k: SimpleNamespace(ready=True, primary_exchange="ARCA"))
     monkeypatch.setattr(module, "build_shared_risk_gate", lambda: object())
-    monkeypatch.setattr(module, "_capture_account_fx_rate", lambda currency: None)
+    monkeypatch.setattr(
+        module, "_capture_account_fx_rate", lambda currency, **kwargs: None
+    )
     monkeypatch.setattr(module, "_broker_exec_ids", lambda result: ["SELL-E1"])
 
     broker_result = SimpleNamespace(

@@ -152,6 +152,7 @@ def test_exec_details_records_raw_event_even_without_handler():
         execId = "exec-1"
         shares = 1.0
         price = 150.25
+        time = "20261016 09:00:00 Asia/Tokyo"
 
     client = _IbkrPaperClient()
     client.execDetails(9999, object(), FakeExecution())
@@ -163,6 +164,7 @@ def test_exec_details_records_raw_event_even_without_handler():
             "exec_id": "exec-1",
             "shares": 1.0,
             "price": 150.25,
+            "time": "20261016 09:00:00 Asia/Tokyo",
         }
     ]
 

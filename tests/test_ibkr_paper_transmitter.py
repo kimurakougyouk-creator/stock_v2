@@ -137,6 +137,21 @@ def test_explicit_enable_sends_one_paper_order():
     assert order.transmit is True
 
 
+def test_order_intent_id_reaches_order_ref_when_sent():
+    # Regression for Codex P1 finding on PR #350: the broker-side linkage
+    # must survive the full transmit path, not just order preparation.
+    client = FakeClient()
+    request = OrderRequest("AAPL", OrderSide.BUY, 1)
+    result = transmit_ibkr_paper_order(
+        request, create_ibkr_paper_config(), client=client, next_order_id=321,
+        enable_transmission=True, guard=ready_guard(),
+        order_intent_id="signal-runner:AAPL:BUY:1:2026-10-17T09:00:00+09:00",
+    )
+    assert result.sent is True
+    _, _, order = client.calls[0]
+    assert order.orderRef == "signal-runner:AAPL:BUY:1:2026-10-17T09:00:00+09:00"
+
+
 def test_explicit_etf_instrument_reaches_contract_and_remains_unsent_by_default():
     client = FakeClient()
     request = OrderRequest("SPY", OrderSide.BUY, 1)
