@@ -70,7 +70,7 @@ def _report() -> dict:
         "strategy_parameters_sha": PARAMETERS_SHA,
         "generated_at": "2026-09-23T02:30:00+00:00",
         "paper_only": True,
-        "broker_connection_used": False,
+        "broker_connection_used": True,
         "order_sent": False,
         "live_trading": "PROHIBITED",
         "fees_accounted": True,
@@ -162,6 +162,26 @@ def test_unauthenticated_raw_ledger_provenance_blocks_even_when_metrics_pass():
 
     assert decision.promotion_policy_passed is False
     assert any("provenance" in blocker for blocker in decision.blockers)
+
+
+def test_report_claiming_no_broker_connection_blocks_even_when_metrics_pass():
+    # Regression for Codex P1 finding on PR #350: broker_provenance_verified
+    # can only ever be True if a broker connection was actually used (see
+    # ai_asset_platform.execution.strategy_broker_provenance), so a report
+    # claiming True provenance while denying any broker connection is
+    # self-contradictory and must never pass.
+    report = _report()
+    report["broker_connection_used"] = False
+
+    decision = evaluate_strategy_promotion(
+        report,
+        _policy(),
+        source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+
+    assert decision.promotion_policy_passed is False
+    assert any("broker connection" in blocker for blocker in decision.blockers)
 
 
 def test_unattributed_broker_recovery_fill_blocks_promotion():
@@ -481,15 +501,17 @@ def test_main_regenerates_profitability_from_raw_ledgers_instead_of_loading_muta
             AssertionError("mutable profitability JSON must not be promotion authority")
         ),
     )
+    fake_provenance = SimpleNamespace(verified=True)
     monkeypatch.setattr(
         promotion_module,
         "audit_strategy_profitability_evidence_with_broker_provenance",
-        lambda: (raw_result, None),
+        lambda: (raw_result, fake_provenance),
     )
 
-    def _persist_raw(result, *, source_sha):
+    def _persist_raw(result, *, source_sha, broker_connection_used):
         observed["persisted_result"] = result
         observed["persisted_source_sha"] = source_sha
+        observed["persisted_broker_connection_used"] = broker_connection_used
 
     monkeypatch.setattr(
         promotion_module,
@@ -497,9 +519,10 @@ def test_main_regenerates_profitability_from_raw_ledgers_instead_of_loading_muta
         _persist_raw,
     )
 
-    def _canonical_record(result, *, source_sha):
+    def _canonical_record(result, *, source_sha, broker_connection_used):
         assert result is raw_result
         assert source_sha == SOURCE_SHA
+        observed["evidence_record_broker_connection_used"] = broker_connection_used
         return canonical_report
 
     monkeypatch.setattr(
@@ -533,3 +556,11 @@ def test_main_regenerates_profitability_from_raw_ledgers_instead_of_loading_muta
     assert observed["evaluated_report"] is canonical_report
     assert observed["evaluated_source_sha"] == SOURCE_SHA
     assert observed["decision"].normal_live_strategy_deployment_allowed is False
+    # Regression for Codex P1 finding on PR #350: main() must propagate the
+    # actual broker-connection-used state (derived from whether a
+    # BrokerProvenanceResult was produced at all) into both the persisted
+    # evidence and the record handed to the evaluator, instead of silently
+    # defaulting both to False regardless of what the broker-provenance
+    # audit actually did.
+    assert observed["persisted_broker_connection_used"] is True
+    assert observed["evidence_record_broker_connection_used"] is True

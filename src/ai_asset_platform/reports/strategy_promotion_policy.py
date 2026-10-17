@@ -395,8 +395,17 @@ def evaluate_strategy_promotion(
         blockers.append("profitability report schema_version is not the expected exact version")
     if profitability_report.get("paper_only") is not True:
         blockers.append("profitability report is not explicitly Paper-only")
-    if profitability_report.get("broker_connection_used") is not False:
-        blockers.append("profitability report unexpectedly used a broker connection")
+    if profitability_report.get("broker_connection_used") is not True:
+        # Reaching PASS also requires broker_provenance_verified is True
+        # below, which this project's only implementation
+        # (ai_asset_platform.execution.strategy_broker_provenance) can never
+        # produce without having actually used a broker connection. A report
+        # claiming True provenance while denying any broker connection was
+        # ever used is therefore self-contradictory, not merely unverified.
+        blockers.append(
+            "profitability report does not confirm an independent broker "
+            "connection was actually used to verify provenance"
+        )
     if profitability_report.get("order_sent") is not False:
         blockers.append("profitability report unexpectedly indicates an order send")
     if str(profitability_report.get("live_trading") or "").strip().upper() != "PROHIBITED":
@@ -756,13 +765,16 @@ def main() -> int:
         profitability_result, broker_provenance = (
             audit_strategy_profitability_evidence_with_broker_provenance()
         )
+        broker_connection_used = broker_provenance is not None
         persist_strategy_profitability_evidence(
             profitability_result,
             source_sha=source_sha,
+            broker_connection_used=broker_connection_used,
         )
         profitability = profitability_evidence_record(
             profitability_result,
             source_sha=source_sha,
+            broker_connection_used=broker_connection_used,
         )
         decision = evaluate_strategy_promotion(
             profitability,

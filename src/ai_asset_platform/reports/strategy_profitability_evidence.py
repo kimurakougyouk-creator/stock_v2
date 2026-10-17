@@ -909,6 +909,7 @@ def evidence_record(
     *,
     source_sha: str | None = None,
     generated_at: datetime | None = None,
+    broker_connection_used: bool = False,
 ) -> dict:
     normalized_sha = None
     if source_sha is not None:
@@ -926,7 +927,13 @@ def evidence_record(
         "strategy_intent_prefix": STRATEGY_INTENT_PREFIX,
         "strategy_intent_shape": "signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>",
         "paper_only": True,
-        "broker_connection_used": False,
+        # This module itself never connects to a broker (see module
+        # docstring); the caller passes True only when it independently used
+        # a separate broker-provenance layer to build `result` (see
+        # ai_asset_platform.execution.strategy_broker_provenance). Hardcoding
+        # this False regardless would misreport the evidence-gathering
+        # process for exactly the reports this field exists to describe.
+        "broker_connection_used": bool(broker_connection_used),
         "order_sent": False,
         "live_trading": "PROHIBITED",
     }
@@ -960,6 +967,7 @@ def persist_strategy_profitability_evidence(
     report_path: Path = DEFAULT_REPORT_PATH,
     source_sha: str | None = None,
     generated_at: datetime | None = None,
+    broker_connection_used: bool = False,
 ) -> None:
     exact_source_sha = source_sha or _git_head()
     attest_strategy_source(exact_source_sha)
@@ -971,6 +979,7 @@ def persist_strategy_profitability_evidence(
                 result,
                 source_sha=exact_source_sha,
                 generated_at=generated_at,
+                broker_connection_used=broker_connection_used,
             ),
             ensure_ascii=False,
             indent=2,
