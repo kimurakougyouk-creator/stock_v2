@@ -29,6 +29,8 @@ def prepare_ibkr_paper_order_for_instrument(
     request: OrderRequest,
     instrument: InstrumentSpec,
     config: IbkrConnectionConfig,
+    *,
+    order_intent_id: str | None = None,
 ) -> IbkrPreparedOrder:
     """共通OrderRequestと明示的InstrumentSpecをIBKR API形式へ安全に変換する。
 
@@ -82,6 +84,15 @@ def prepare_ibkr_paper_order_for_instrument(
             f"未対応のIBKR注文種別です: {request.order_type}"
         )
 
+    # Immutable broker-side linkage back to the local order intent, so
+    # independent broker-provenance verification (strategy_broker_provenance.py)
+    # can confirm a fill actually originated from this exact intent instead of
+    # trusting only the local ledger's own (editable) label. Mirrors the
+    # existing Live Pilot pattern (live_pilot_single_send.py: order.orderRef
+    # = intent_id).
+    if order_intent_id:
+        ib_order.orderRef = str(order_intent_id)
+
     # 注文準備段階では安全のため送信を無効化する。
     ib_order.transmit = False
 
@@ -91,6 +102,8 @@ def prepare_ibkr_paper_order_for_instrument(
 def prepare_ibkr_paper_order(
     request: OrderRequest,
     config: IbkrConnectionConfig,
+    *,
+    order_intent_id: str | None = None,
 ) -> IbkrPreparedOrder:
     """既存の検証済みUS株1株Paper入口。新市場は明示InstrumentSpecを使う。"""
     instrument = InstrumentSpec(
@@ -98,4 +111,6 @@ def prepare_ibkr_paper_order(
         asset_class=AssetClass.STOCK,
         verified_paper_test_quantity=1,
     )
-    return prepare_ibkr_paper_order_for_instrument(request, instrument, config)
+    return prepare_ibkr_paper_order_for_instrument(
+        request, instrument, config, order_intent_id=order_intent_id
+    )

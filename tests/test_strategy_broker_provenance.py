@@ -4,6 +4,10 @@ from ai_asset_platform.brokers.ibkr_commission_snapshot import (
     IbkrCommissionEvidence,
     IbkrPaperCommissionSnapshot,
 )
+from ai_asset_platform.brokers.ibkr_completed_order_evidence import (
+    IbkrCompletedOrderEvidence,
+    IbkrPaperCompletedOrderSnapshot,
+)
 from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     IbkrExecutionEvidence,
     IbkrPaperExecutionSnapshot,
@@ -15,6 +19,7 @@ from ai_asset_platform.execution.strategy_broker_provenance import (
 
 DEFAULT_EXEC_TIME = "20261016 09:00:00 Asia/Tokyo"
 DEFAULT_CREATED_AT = "2026-10-16T09:00:00+09:00"
+DEFAULT_INTENT_ID = "signal-runner:9432.T:BUY:100:2026-10-16T09:00:00+09:00"
 
 
 def _execution(**overrides) -> IbkrExecutionEvidence:
@@ -57,6 +62,7 @@ def _fill(**overrides) -> dict:
         currency="JPY",
         reference_price=172.1,
         created_at=DEFAULT_CREATED_AT,
+        order_intent_id=DEFAULT_INTENT_ID,
         broker_exec_fills=[{"exec_id": "exec-1", "shares": 100}],
     )
     base.update(overrides)
@@ -79,6 +85,40 @@ def _commission_snapshot(*rows: IbkrCommissionEvidence, ready: bool = True) -> I
         endpoint_port=4002 if ready else None,
         commissions=tuple(rows),
         duplicate_conflicts=(),
+        order_sent=False,
+        errors=(),
+    )
+
+
+def _completed_order(**overrides) -> IbkrCompletedOrderEvidence:
+    base = dict(
+        order_id=1,
+        perm_id=100,
+        symbol="9432",
+        sec_type="STK",
+        currency="JPY",
+        exchange="TSEJ",
+        action="BUY",
+        quantity=100.0,
+        order_type="LMT",
+        limit_price=172.1,
+        status="Filled",
+        completed_time=DEFAULT_EXEC_TIME,
+        completed_status="",
+        account="DU0000001",
+        order_ref=DEFAULT_INTENT_ID,
+    )
+    base.update(overrides)
+    return IbkrCompletedOrderEvidence(**base)
+
+
+def _completed_order_snapshot(
+    *rows: IbkrCompletedOrderEvidence, ready: bool = True
+) -> IbkrPaperCompletedOrderSnapshot:
+    return IbkrPaperCompletedOrderSnapshot(
+        connected=ready,
+        endpoint_port=4002 if ready else None,
+        orders=tuple(rows),
         order_sent=False,
         errors=(),
     )
@@ -111,11 +151,21 @@ def _fixed_fx_fetcher(rate: float | None):
     return _fetch
 
 
-def _verify(fills, *, account_currency="JPY", fx_rate_fetcher=_unused_fx_fetcher, **snapshots):
+def _verify(
+    fills,
+    *,
+    account_currency="JPY",
+    fx_rate_fetcher=_unused_fx_fetcher,
+    completed_order_snapshot=None,
+    **snapshots,
+):
+    if completed_order_snapshot is None:
+        completed_order_snapshot = _completed_order_snapshot(_completed_order())
     return verify_broker_provenance_for_strategy_fills(
         fills,
         account_currency=account_currency,
         fx_rate_fetcher=fx_rate_fetcher,
+        completed_order_snapshot=completed_order_snapshot,
         **snapshots,
     )
 
@@ -508,6 +558,138 @@ def test_same_currency_fill_never_calls_fx_rate_fetcher():
         local_commission_report=_local_commission_report(_local_commission()),
     )
     assert result.verified is True
+
+
+def test_missing_order_intent_id_fails_closed():
+    result = _verify(
+        [_fill(order_intent_id="")],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+    )
+    assert result.verified is False
+    assert any("missing order_intent_id" in b for b in result.blockers)
+
+
+def test_not_ready_completed_order_snapshot_fails_closed():
+    result = _verify(
+        [_fill()],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+        completed_order_snapshot=_completed_order_snapshot(_completed_order(), ready=False),
+    )
+    assert result.verified is False
+    assert "completed-order snapshot is not ready" in result.blockers[0]
+
+
+def test_missing_completed_order_evidence_fails_closed():
+    result = _verify(
+        [_fill()],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+        completed_order_snapshot=_completed_order_snapshot(),
+    )
+    assert result.verified is False
+    assert any(
+        "no matching broker completed-order evidence" in b for b in result.blockers
+    )
+
+
+def test_order_ref_mismatch_fails_closed():
+    # Regression for Codex P1 finding on PR #350: an unrelated real Paper
+    # trade relabeled locally with a signal-runner: intent must not pass
+    # just because its other fields happen to match the broker snapshot.
+    result = _verify(
+        [_fill()],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+        completed_order_snapshot=_completed_order_snapshot(
+            _completed_order(order_ref="some-unrelated-manual-proof-trade")
+        ),
+    )
+    assert result.verified is False
+    assert any(
+        "orderRef does not match the local order_intent_id" in b
+        for b in result.blockers
+    )
+
+
+def test_order_ref_empty_fails_closed():
+    result = _verify(
+        [_fill()],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+        completed_order_snapshot=_completed_order_snapshot(
+            _completed_order(order_ref="")
+        ),
+    )
+    assert result.verified is False
+    assert any(
+        "orderRef does not match the local order_intent_id" in b
+        for b in result.blockers
+    )
+
+
+def test_order_ref_matching_local_intent_verifies():
+    result = _verify(
+        [_fill(order_intent_id="signal-runner:9432.T:BUY:100:bar-key-x")],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+        completed_order_snapshot=_completed_order_snapshot(
+            _completed_order(order_ref="signal-runner:9432.T:BUY:100:bar-key-x")
+        ),
+    )
+    assert result.verified is True
+
+
+def test_multi_leg_fill_matches_the_same_order_ref_for_both_executions():
+    fill = _fill(
+        shares=100,
+        reference_price=172.0,
+        broker_exec_fills=[
+            {"exec_id": "exec-1", "shares": 60},
+            {"exec_id": "exec-2", "shares": 40},
+        ],
+    )
+    result = _verify(
+        [fill],
+        execution_snapshot=_execution_snapshot(
+            _execution(exec_id="exec-1", quantity=60.0, price=172.0),
+            _execution(exec_id="exec-2", quantity=40.0, price=172.0),
+        ),
+        commission_snapshot=_commission_snapshot(
+            _commission(exec_id="exec-1", commission=48.0),
+            _commission(exec_id="exec-2", commission=32.0),
+        ),
+        local_commission_report=_local_commission_report(
+            _local_commission(exec_id="exec-1", commission=48.0),
+            _local_commission(exec_id="exec-2", commission=32.0),
+        ),
+        completed_order_snapshot=_completed_order_snapshot(_completed_order()),
+    )
+    assert result.verified is True
+
+
+def test_conflicting_completed_order_rows_for_same_perm_id_fail_closed():
+    result = _verify(
+        [_fill()],
+        execution_snapshot=_execution_snapshot(_execution()),
+        commission_snapshot=_commission_snapshot(_commission()),
+        local_commission_report=_local_commission_report(_local_commission()),
+        completed_order_snapshot=_completed_order_snapshot(
+            _completed_order(order_ref=DEFAULT_INTENT_ID),
+            _completed_order(order_ref="different-intent"),
+        ),
+    )
+    assert result.verified is False
+    assert any(
+        "conflicting broker completed-order rows" in b for b in result.blockers
+    )
 
 
 def test_module_contains_no_order_transport():

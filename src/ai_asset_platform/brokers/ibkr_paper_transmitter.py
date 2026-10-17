@@ -22,7 +22,7 @@ class IbkrPaperTransmissionResult:
     message: str
 
 
-def transmit_ibkr_paper_order(request: OrderRequest, config: IbkrConnectionConfig, *, client: IbkrOrderClient, next_order_id: int | None, enable_transmission: bool = False, guard: IbkrPaperOrderGuardResult | None = None, instrument: InstrumentSpec | None = None) -> IbkrPaperTransmissionResult:
+def transmit_ibkr_paper_order(request: OrderRequest, config: IbkrConnectionConfig, *, client: IbkrOrderClient, next_order_id: int | None, enable_transmission: bool = False, guard: IbkrPaperOrderGuardResult | None = None, instrument: InstrumentSpec | None = None, order_intent_id: str | None = None) -> IbkrPaperTransmissionResult:
     """Send only Paper orders whose pilot quantity is explicitly permitted."""
     config.validate()
     if not config.paper_trading or config.allow_live_trading:
@@ -42,7 +42,7 @@ def transmit_ibkr_paper_order(request: OrderRequest, config: IbkrConnectionConfi
     if next_order_id is None or next_order_id < 0:
         return IbkrPaperTransmissionResult("WAITING", False, None, "IBKRから有効なnextValidIdを取得できていないため送信しません。")
 
-    prepared = prepare_ibkr_paper_order_for_instrument(request, instrument, config) if instrument is not None else prepare_ibkr_paper_order(request, config)
+    prepared = prepare_ibkr_paper_order_for_instrument(request, instrument, config, order_intent_id=order_intent_id) if instrument is not None else prepare_ibkr_paper_order(request, config, order_intent_id=order_intent_id)
     if not enable_transmission:
         return IbkrPaperTransmissionResult("READY_NOT_SENT", False, next_order_id, "Paper注文は送信可能ですが、安全ロックにより未送信です。")
 

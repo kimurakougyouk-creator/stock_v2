@@ -6,14 +6,16 @@ input, and its own comment is explicit that ``broker_provenance_verified`` may
 only become True once a *separate* authenticated broker-provenance mechanism
 exists. This module is that separate mechanism.
 
-It independently re-queries the IBKR Paper account for executions and
-commissions (reusing the existing, already-tested read-only collectors in
-``ibkr_execution_snapshot.py`` and ``ibkr_commission_snapshot.py``) and cross-
-checks every exec_id referenced by the exact natural-strategy fills that
-``strategy_profitability_evidence`` accounts for. A local ledger that was
-hand-edited to look internally consistent cannot pass this check, because the
-broker-reported symbol/side/currency/quantity and the broker-reported
-commission must independently match.
+It independently re-queries the IBKR Paper account for executions,
+commissions, and completed orders (reusing the existing, already-tested
+read-only collectors in ``ibkr_execution_snapshot.py``,
+``ibkr_commission_snapshot.py``, and ``ibkr_completed_order_evidence.py``)
+and cross-checks every exec_id referenced by the exact natural-strategy fills
+that ``strategy_profitability_evidence`` accounts for. A local ledger that
+was hand-edited to look internally consistent cannot pass this check, because
+the broker-reported symbol/side/currency/quantity, commission, and the
+broker-side order's own ``orderRef`` (set at placement time -- see
+``ibkr_paper_order_sender.py``) must independently match.
 
 Read-only throughout. No order is ever created, changed, cancelled, retried,
 or transmitted here, and no Live endpoint is ever contacted.
@@ -29,6 +31,11 @@ from typing import Callable, Iterable
 from ai_asset_platform.brokers.ibkr_commission_snapshot import (
     IbkrPaperCommissionSnapshot,
     preview_ibkr_paper_commission_snapshot,
+)
+from ai_asset_platform.brokers.ibkr_completed_order_evidence import (
+    IbkrCompletedOrderEvidence,
+    IbkrPaperCompletedOrderSnapshot,
+    preview_ibkr_paper_completed_orders,
 )
 from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     IbkrExecutionEvidence,
@@ -125,6 +132,7 @@ def verify_broker_provenance_for_strategy_fills(
     *,
     execution_snapshot: IbkrPaperExecutionSnapshot,
     commission_snapshot: IbkrPaperCommissionSnapshot,
+    completed_order_snapshot: IbkrPaperCompletedOrderSnapshot,
     local_commission_report: dict | None,
     account_currency: str,
     fx_rate_fetcher: FxRateFetcher,
@@ -142,16 +150,25 @@ def verify_broker_provenance_for_strategy_fills(
     the fill's local ``reference_price`` exactly, and, for any fill whose
     currency differs from ``account_currency``, the local
     ``fx_to_account_rate`` must equal an independently fetched broker
-    historical FX rate exactly. Missing, mismatched, or conflicting evidence
-    fails closed; nothing is guessed, back-filled, or tolerance-rounded
-    (other than the bounded, justified clock-skew tolerance above).
+    historical FX rate exactly. Every matched execution's broker-side order
+    must also carry an ``orderRef`` (IBKR's immutable, broker-persisted field,
+    set at order placement -- see ``ibkr_paper_order_sender.py``) equal to the
+    fill's own ``order_intent_id``. Missing, mismatched, or conflicting
+    evidence fails closed; nothing is guessed, back-filled, or
+    tolerance-rounded (other than the bounded, justified clock-skew tolerance
+    above).
 
     Checking identity (symbol/side/currency/quantity) alone is not enough: a
     local fill whose ``reference_price``, commission amount, timestamp, or FX
     rate was edited after the fact would still carry a matching exec_id and
     would otherwise pass unnoticed, silently corrupting the net-PnL evidence
     (and the promotion policy's time-based thresholds) this provenance check
-    exists to protect.
+    exists to protect. Nor is matching every field alone enough: without the
+    ``orderRef`` check, an entirely unrelated real Paper trade could be
+    relabeled locally with a ``signal-runner:`` intent and would pass this
+    check as long as its own true symbol/side/currency/quantity/price/
+    timestamp/commission happened to be copied correctly, since none of those
+    fields say anything about *why* the order was placed.
     """
     normalized_account_currency = str(account_currency).strip().upper()
     fills = [record for record in strategy_fills if isinstance(record, dict)]
@@ -161,6 +178,8 @@ def verify_broker_provenance_for_strategy_fills(
         blockers.append("Paper execution snapshot is not ready")
     if not commission_snapshot.ready:
         blockers.append("Paper commission snapshot is not ready")
+    if not completed_order_snapshot.ready:
+        blockers.append("Paper completed-order snapshot is not ready")
     if blockers:
         return BrokerProvenanceResult(False, tuple(blockers), 0, len(fills))
     if not fills:
@@ -196,12 +215,23 @@ def verify_broker_provenance_for_strategy_fills(
             continue
         executions_by_id[exec_id] = row
     commissions_by_id = {row.exec_id: row for row in commission_snapshot.commissions}
+    completed_orders_by_perm_id: dict[int, IbkrCompletedOrderEvidence] = {}
+    for row in completed_order_snapshot.orders:
+        previous = completed_orders_by_perm_id.get(row.perm_id)
+        if previous is not None and previous != row:
+            blockers.append(f"conflicting broker completed-order rows for perm_id={row.perm_id}")
+            continue
+        completed_orders_by_perm_id[row.perm_id] = row
 
     verified_fill_count = 0
     for position, record in enumerate(fills, start=1):
         ticker = str(record.get("ticker", "")).strip().upper()
         side = str(record.get("side", "")).strip().upper()
         currency = str(record.get("currency", "")).strip().upper()
+        order_intent_id = str(record.get("order_intent_id", "")).strip()
+        if not order_intent_id:
+            blockers.append(f"strategy fill #{position} is missing order_intent_id")
+            continue
         try:
             shares = Decimal(str(int(record.get("shares"))))
         except (TypeError, ValueError):
@@ -275,6 +305,22 @@ def verify_broker_provenance_for_strategy_fills(
                 continue
             if first_execution_time is None:
                 first_execution_time = execution.time
+            completed_order = completed_orders_by_perm_id.get(execution.perm_id)
+            if completed_order is None:
+                fill_blocked = True
+                blockers.append(
+                    f"strategy fill #{position} exec_id={exec_id} has no matching "
+                    "broker completed-order evidence to verify its order_intent_id"
+                )
+                continue
+            broker_order_ref = str(completed_order.order_ref or "").strip()
+            if not broker_order_ref or broker_order_ref != order_intent_id:
+                fill_blocked = True
+                blockers.append(
+                    f"strategy fill #{position} exec_id={exec_id} broker order "
+                    "orderRef does not match the local order_intent_id"
+                )
+                continue
             commission = commissions_by_id.get(exec_id)
             if commission is None:
                 fill_blocked = True
@@ -423,6 +469,7 @@ def collect_and_verify_broker_provenance(
     normalized_account_currency = str(account_currency or SETTINGS.account_currency)
     execution_snapshot = preview_ibkr_paper_execution_snapshot(timeout=timeout)
     commission_snapshot = preview_ibkr_paper_commission_snapshot(timeout=timeout)
+    completed_order_snapshot = preview_ibkr_paper_completed_orders(timeout=timeout)
 
     def _fetch_fx_rate(
         base_currency: str,
@@ -442,6 +489,7 @@ def collect_and_verify_broker_provenance(
         strategy_fills,
         execution_snapshot=execution_snapshot,
         commission_snapshot=commission_snapshot,
+        completed_order_snapshot=completed_order_snapshot,
         local_commission_report=local_commission_report,
         account_currency=normalized_account_currency,
         fx_rate_fetcher=_fetch_fx_rate,
