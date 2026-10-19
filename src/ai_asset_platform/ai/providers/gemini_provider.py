@@ -24,6 +24,7 @@ class GeminiProvider:
         self,
         *,
         model: str = "gemini-default",
+        api_key: str = "",
         request_function: GeminiRequestFunction | None = None,
     ) -> None:
         normalized_model = str(model or "").strip()
@@ -32,6 +33,14 @@ class GeminiProvider:
             raise ValueError("Geminiのモデル名を指定してください。")
 
         self.model = normalized_model
+        # Accepted for call-signature compatibility with create_provider()'s
+        # universal (model, api_key) call from signal_runner.py. No real
+        # Gemini HTTP client exists yet, so the key is not used here; without
+        # accepting it, selecting AI_PROVIDER=gemini with a configured
+        # GEMINI_API_KEY raised an unrelated TypeError one level up instead
+        # of reaching this class's own clear "not yet implemented" message
+        # below.
+        self.api_key = str(api_key or "").strip()
         self.request_function = request_function
 
     @staticmethod

@@ -93,6 +93,24 @@ def test_gemini_provider_rejects_invalid_response():
         provider.evaluate({"ticker": "7203.T"})
 
 
+def test_gemini_provider_accepts_api_key_without_crashing():
+    # Regression: create_provider() always calls providers with
+    # model=..., api_key=... (see signal_runner._create_configured_ai_provider).
+    # Before this fix, GeminiProvider.__init__ had no api_key parameter, so
+    # selecting AI_PROVIDER=gemini with a configured GEMINI_API_KEY raised an
+    # unrelated TypeError instead of reaching this class's own clear
+    # "communication not yet configured" message.
+    provider = create_provider("gemini", model="gemini-default", api_key="dummy-key")
+
+    assert provider.api_key == "dummy-key"
+
+    result = judge_with_ai({"ticker": "7203.T"}, provider=provider)
+
+    assert result.signal == "HOLD"
+    assert result.available is False
+    assert "Gemini通信機能が未設定" in result.reason
+
+
 def test_gemini_provider_is_registered():
     assert "gemini" in get_available_providers()
 
