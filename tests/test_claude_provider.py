@@ -93,6 +93,24 @@ def test_claude_provider_rejects_invalid_response():
         provider.evaluate({"ticker": "7203.T"})
 
 
+def test_claude_provider_accepts_api_key_without_crashing():
+    # Regression: create_provider() always calls providers with
+    # model=..., api_key=... (see signal_runner._create_configured_ai_provider).
+    # Before this fix, ClaudeProvider.__init__ had no api_key parameter, so
+    # selecting AI_PROVIDER=claude with a configured ANTHROPIC_API_KEY raised
+    # an unrelated TypeError instead of reaching this class's own clear
+    # "communication not yet configured" message.
+    provider = create_provider("claude", model="claude-default", api_key="dummy-key")
+
+    assert provider.api_key == "dummy-key"
+
+    result = judge_with_ai({"ticker": "7203.T"}, provider=provider)
+
+    assert result.signal == "HOLD"
+    assert result.available is False
+    assert "Claude通信機能が未設定" in result.reason
+
+
 def test_claude_provider_is_registered():
     assert "claude" in get_available_providers()
 
