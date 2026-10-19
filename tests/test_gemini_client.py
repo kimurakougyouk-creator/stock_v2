@@ -99,13 +99,13 @@ def test_successful_request_parses_inner_json_result():
 def test_api_key_is_sent_as_header_not_in_url():
     body = _gemini_envelope({"signal": "HOLD", "score": 50, "confidence": 0, "reason": "x"})
     opener, captured = _opener_returning(body)
-    client = GeminiClient(api_key="SECRET-KEY-VALUE", opener=opener)
+    client = GeminiClient(api_key="dummy-secret-key-value", opener=opener)
 
     client.request("gemini-1.5-flash", "system", {"prompt": "x"})
 
     sent_request = captured["request"]
-    assert sent_request.headers.get("X-goog-api-key") == "SECRET-KEY-VALUE"
-    assert "SECRET-KEY-VALUE" not in sent_request.full_url
+    assert sent_request.headers.get("X-goog-api-key") == "dummy-secret-key-value"
+    assert "dummy-secret-key-value" not in sent_request.full_url
 
 
 def test_http_error_is_raised_as_runtime_error_without_leaking_key():
@@ -114,12 +114,12 @@ def test_http_error_is_raised_as_runtime_error_without_leaking_key():
             request.full_url, 403, "Forbidden", {}, None
         )
 
-    client = GeminiClient(api_key="SECRET-KEY-VALUE", opener=_opener)
+    client = GeminiClient(api_key="dummy-secret-key-value", opener=_opener)
 
     with pytest.raises(RuntimeError) as excinfo:
         client.request("gemini-1.5-flash", "system", {"prompt": "x"})
 
-    assert "SECRET-KEY-VALUE" not in str(excinfo.value)
+    assert "dummy-secret-key-value" not in str(excinfo.value)
     assert "403" in str(excinfo.value)
 
 
