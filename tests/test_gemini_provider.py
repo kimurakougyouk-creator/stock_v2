@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from ai_asset_platform.ai import (
@@ -6,6 +8,31 @@ from ai_asset_platform.ai import (
     get_available_providers,
     judge_with_ai,
 )
+
+
+class _FakeHTTPResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_FakeHTTPResponse":
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        return False
+
+
+def _fake_opener_returning(result: dict):
+    body = json.dumps(
+        {"candidates": [{"content": {"parts": [{"text": json.dumps(result)}]}}]}
+    ).encode("utf-8")
+
+    def _opener(request, timeout):  # noqa: ANN001
+        return _FakeHTTPResponse(body)
+
+    return _opener
 
 
 def test_gemini_provider_uses_default_model():
@@ -98,17 +125,65 @@ def test_gemini_provider_accepts_api_key_without_crashing():
     # model=..., api_key=... (see signal_runner._create_configured_ai_provider).
     # Before this fix, GeminiProvider.__init__ had no api_key parameter, so
     # selecting AI_PROVIDER=gemini with a configured GEMINI_API_KEY raised an
-    # unrelated TypeError instead of reaching this class's own clear
-    # "communication not yet configured" message.
-    provider = create_provider("gemini", model="gemini-default", api_key="dummy-key")
+    # unrelated TypeError. A fake opener is injected so this never attempts a
+    # real network call (mock test, not a real-API test).
+    provider = create_provider(
+        "gemini",
+        model="gemini-default",
+        api_key="dummy-key",
+        opener=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not be called in this test")
+        ),
+    )
 
     assert provider.api_key == "dummy-key"
+    assert provider.gemini_client is not None
+
+
+def test_gemini_provider_without_api_key_stays_on_safe_hold_message():
+    provider = create_provider("gemini", model="gemini-default")
 
     result = judge_with_ai({"ticker": "7203.T"}, provider=provider)
 
     assert result.signal == "HOLD"
     assert result.available is False
     assert "Gemini通信機能が未設定" in result.reason
+
+
+def test_gemini_provider_with_api_key_calls_real_client_mocked():
+    # Mock test (no real network): confirms api_key actually wires up a
+    # functioning GeminiClient end to end through judge_with_ai().
+    opener = _fake_opener_returning(
+        {"signal": "SELL", "score": 20, "confidence": 88, "reason": "下落材料"}
+    )
+    provider = create_provider(
+        "gemini",
+        model="gemini-1.5-flash",
+        api_key="dummy-key",
+        opener=opener,
+    )
+
+    result = judge_with_ai({"ticker": "7203.T"}, provider=provider)
+
+    assert result.signal == "SELL"
+    assert result.score == 20.0
+    assert result.confidence == 88.0
+    assert result.available is True
+    assert result.provider == "gemini"
+
+
+def test_gemini_provider_explicit_request_function_overrides_real_client():
+    # An explicitly supplied request_function (e.g. for other tests) takes
+    # priority over building a real GeminiClient, even if api_key is set.
+    def fake_request(model, system_prompt, payload):
+        return {"signal": "HOLD", "score": 50, "confidence": 0, "reason": "x"}
+
+    provider = GeminiProvider(
+        api_key="dummy-key",
+        request_function=fake_request,
+    )
+
+    assert provider.gemini_client is None
 
 
 def test_gemini_provider_is_registered():

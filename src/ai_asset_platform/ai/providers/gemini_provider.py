@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from ..gemini_client import GeminiClient
+
 
 GeminiRequestFunction = Callable[
     [str, str, Mapping[str, Any]],
@@ -12,10 +14,11 @@ GeminiRequestFunction = Callable[
 
 class GeminiProvider:
     """
-    Google Geminiを利用するAIプロバイダーの基本クラス。
+    Google Geminiを利用するAIプロバイダー。
 
-    現段階ではGemini APIへ直接通信せず、
-    request_functionとして外部から通信処理を受け取る。
+    api_keyが指定された場合はGeminiClient(urllibのみを使う
+    REST実装、新規の外部パッケージ依存なし)を自動的に構築する。
+    request_functionを明示的に渡した場合はそれを優先する(テスト用)。
     """
 
     name = "gemini"
@@ -25,7 +28,9 @@ class GeminiProvider:
         *,
         model: str = "gemini-default",
         api_key: str = "",
+        timeout: float = 30.0,
         request_function: GeminiRequestFunction | None = None,
+        opener: Any | None = None,
     ) -> None:
         normalized_model = str(model or "").strip()
 
@@ -33,15 +38,18 @@ class GeminiProvider:
             raise ValueError("Geminiのモデル名を指定してください。")
 
         self.model = normalized_model
-        # Accepted for call-signature compatibility with create_provider()'s
-        # universal (model, api_key) call from signal_runner.py. No real
-        # Gemini HTTP client exists yet, so the key is not used here; without
-        # accepting it, selecting AI_PROVIDER=gemini with a configured
-        # GEMINI_API_KEY raised an unrelated TypeError one level up instead
-        # of reaching this class's own clear "not yet implemented" message
-        # below.
         self.api_key = str(api_key or "").strip()
+        self.timeout = float(timeout)
         self.request_function = request_function
+        self.gemini_client: GeminiClient | None = None
+
+        if self.request_function is None and self.api_key:
+            self.gemini_client = GeminiClient(
+                api_key=self.api_key,
+                timeout=self.timeout,
+                opener=opener,
+            )
+            self.request_function = self.gemini_client.request
 
     @staticmethod
     def build_system_prompt() -> str:
