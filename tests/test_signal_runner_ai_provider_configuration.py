@@ -45,10 +45,26 @@ def test_gemini_provider_is_constructed_when_configured(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AI_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "dummy-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-1.5-flash")
 
     provider = _create_configured_ai_provider()
 
     assert isinstance(provider, GeminiProvider)
+
+
+def test_gemini_provider_with_placeholder_model_fails_closed_to_none(monkeypatch, tmp_path):
+    # Regression for Codex P1 finding on PR #354: if the operator sets
+    # GEMINI_API_KEY but forgets GEMINI_MODEL, AISettings.gemini_model falls
+    # back to its own placeholder default ("gemini-default"), which is not a
+    # real model id. _create_configured_ai_provider() must not silently
+    # construct a client that would only fail later inside a real API call;
+    # it must fail closed to None here, exactly like "nothing configured".
+    _clear_ai_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-key")
+
+    assert _create_configured_ai_provider() is None
 
 
 def test_claude_provider_is_constructed_when_configured(monkeypatch, tmp_path):
