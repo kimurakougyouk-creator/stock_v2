@@ -11,6 +11,12 @@ GeminiRequestFunction = Callable[
     Mapping[str, Any],
 ]
 
+# AISettings.gemini_model's own default when GEMINI_MODEL is unset. It is
+# not a real Gemini model id; sending it to the API would 404, and
+# judge_with_ai() would silently swallow that into a generic HOLD, hiding
+# the misconfiguration from whoever set GEMINI_API_KEY expecting it to work.
+_PLACEHOLDER_MODEL = "gemini-default"
+
 
 class GeminiProvider:
     """
@@ -44,6 +50,12 @@ class GeminiProvider:
         self.gemini_client: GeminiClient | None = None
 
         if self.request_function is None and self.api_key:
+            if self.model == _PLACEHOLDER_MODEL:
+                raise ValueError(
+                    "GeminiのモデルIDをGEMINI_MODELで明示的に指定してください。"
+                    f"「{_PLACEHOLDER_MODEL}」は実在するモデルIDではなく、"
+                    "未設定時の既定値です。"
+                )
             self.gemini_client = GeminiClient(
                 api_key=self.api_key,
                 timeout=self.timeout,

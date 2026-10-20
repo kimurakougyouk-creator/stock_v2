@@ -129,7 +129,7 @@ def test_gemini_provider_accepts_api_key_without_crashing():
     # real network call (mock test, not a real-API test).
     provider = create_provider(
         "gemini",
-        model="gemini-default",
+        model="gemini-1.5-flash",
         api_key="dummy-key",
         opener=lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("must not be called in this test")
@@ -138,6 +138,26 @@ def test_gemini_provider_accepts_api_key_without_crashing():
 
     assert provider.api_key == "dummy-key"
     assert provider.gemini_client is not None
+
+
+def test_gemini_provider_rejects_placeholder_model_with_api_key():
+    # Regression for Codex P1 finding on PR #354: AISettings.gemini_model's
+    # own default ("gemini-default") is not a real Gemini model id. Without
+    # this check, setting only GEMINI_API_KEY (and forgetting GEMINI_MODEL)
+    # would silently send requests to a nonexistent model and fall back to
+    # HOLD via judge_with_ai()'s broad exception handling, hiding the
+    # misconfiguration instead of surfacing it clearly at construction time.
+    with pytest.raises(ValueError, match="GEMINI_MODEL"):
+        create_provider("gemini", model="gemini-default", api_key="dummy-key")
+
+
+def test_gemini_provider_placeholder_model_is_fine_without_api_key():
+    # The placeholder is only rejected once it would actually be used to
+    # build a real client; with no api_key, nothing is sent anywhere.
+    provider = create_provider("gemini", model="gemini-default")
+
+    assert provider.model == "gemini-default"
+    assert provider.gemini_client is None
 
 
 def test_gemini_provider_without_api_key_stays_on_safe_hold_message():
