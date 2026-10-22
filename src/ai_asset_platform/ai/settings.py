@@ -58,7 +58,13 @@ def _read_env_file(env_path: Path | None) -> dict[str, str]:
 
     values: dict[str, str] = {}
 
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    # "utf-8-sig" strips a leading UTF-8 BOM if present, falling back to
+    # plain utf-8 decoding otherwise. Windows tools commonly write a BOM
+    # here (e.g. PowerShell 5.1's `Out-File -Encoding utf8`), which would
+    # otherwise corrupt the first key's name (e.g. "﻿AI_PROVIDER"
+    # instead of "AI_PROVIDER"), silently falling back to defaults with
+    # no error.
+    for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
 
         if not line or line.startswith("#"):

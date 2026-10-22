@@ -136,6 +136,38 @@ def test_load_ai_settings_from_env_file(tmp_path, monkeypatch):
     assert settings.claude_model == "claude-test"
 
 
+def test_load_ai_settings_from_env_file_with_utf8_bom(tmp_path, monkeypatch):
+    # Regression: PowerShell 5.1's `Out-File -Encoding utf8` (the natural
+    # way a Windows operator would create a .env file) writes a leading
+    # UTF-8 BOM. Before this fix, plain utf-8 decoding left the BOM
+    # attached to the first key's name (e.g. "﻿AI_PROVIDER"), which
+    # silently failed to match "AI_PROVIDER" and fell back to the OpenAI
+    # default with has_api_key()=False -- with no error raised, this
+    # looked identical to "nothing configured" and hid a real operator
+    # mistake (observed live on 2026-10-22: AI_PROVIDER fell back to
+    # "openai" despite a correctly-filled-in GEMINI_* .env file).
+    for key in (
+        "AI_ENABLED",
+        "AI_PROVIDER",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_MODEL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    env_file = tmp_path / ".env"
+    content = "AI_PROVIDER=gemini\nGEMINI_MODEL=gemini-3.8-flash\nGEMINI_API_KEY=bom-regression-key\n"
+    env_file.write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
+
+    settings = load_ai_settings(env_file)
+
+    assert settings.provider == "gemini"
+    assert settings.gemini_model == "gemini-3.8-flash"
+    assert settings.gemini_api_key == "bom-regression-key"
+    assert settings.has_api_key() is True
+
+
 def test_environment_variable_overrides_env_file(
     tmp_path,
     monkeypatch,
