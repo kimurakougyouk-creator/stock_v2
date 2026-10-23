@@ -35,6 +35,45 @@ def isolate_signal_runner_decision_report(monkeypatch, tmp_path):
     )
 
 
+# TEST_DECISION_LOG_ISOLATION
+@pytest.fixture(autouse=True)
+def isolate_signal_runner_decision_log(monkeypatch, request):
+    """signal_runner経由のlog_decision書込みを本番ファイルから隔離する。
+
+    run_signal_scan()はティッカーごとに無条件でlog_decision()を呼ぶため、
+    これをモックしないテスト（test_signal_runner_time_stop.py,
+    test_signal_runner_final_decision.py）は本番のresults/decision_log.csv
+    へ "7203.T" / ai_provider="test" の行を直接書き込んでしまっていた
+    （2026-09-27以降、1227件中1182件がこのテスト汚染行だったことを確認）。
+
+    decision_logger.LOG_FILEをmonkeypatchする方式は、同じプロセス内で
+    test_decision_logger_package_migration.py::
+    test_importing_package_module_does_not_write_any_file が
+    該当パッケージをsys.modulesからpopして再importするため、
+    signal_runner.pyが最初にimportした時点の古いモジュール/関数オブジェクトと
+    後から生成される新しいモジュールオブジェクトが分裂し、どちらを
+    monkeypatchしてもsignal_runner側の呼び出しには反映されない場合がある
+    （実際にこの分裂により本番ファイルへの新たな書込みが発生することを
+    確認した）。そのため、呼び出し元であるsignal_runnerモジュール自身の
+    `log_decision`属性を直接差し替える、モジュール分裂に影響されない方式とする。
+    """
+
+    try:
+        import signal_runner
+    except ImportError:
+        return
+
+    if not hasattr(signal_runner, "log_decision"):
+        return
+
+    monkeypatch.setattr(
+        signal_runner,
+        "log_decision",
+        lambda **kwargs: None,
+        raising=False,
+    )
+
+
 @pytest.fixture(autouse=True)
 def isolate_signal_runner_daily_state(monkeypatch, request):
     """Keep signal-runner unit tests independent of durable daily order state."""
