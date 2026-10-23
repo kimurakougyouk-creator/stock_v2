@@ -1,8 +1,10 @@
+import os
 from pathlib import Path
 import subprocess
 
 
-STRICT_MONITOR = "python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"
+STRICT_MONITOR_MODULE = "ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"
+LEGACY_STRICT_MONITOR = f"python -m {STRICT_MONITOR_MODULE}"
 
 
 def test_readonly_autopilot_has_valid_bash_syntax():
@@ -27,7 +29,14 @@ def test_readonly_autopilot_installer_has_valid_bash_syntax():
 
 def test_readonly_autopilot_only_invokes_strict_readonly_monitor():
     script = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
-    assert STRICT_MONITOR in script
+    assert f'STRICT_MONITOR_MODULE="{STRICT_MONITOR_MODULE}"' in script
+    assert '-m "$STRICT_MONITOR_MODULE"' in script
+    assert '"$TRUSTED_PYTHON" -I -S "$ISOLATED_RUNNER"' in script
+    assert "AI_ASSET_REQUIRE_PINNED_IBAPI=1" in script
+    assert "scripts/run_isolated_venv_python.py" in script
+    assert LEGACY_STRICT_MONITOR not in script
+    assert "source .venv/bin/activate" not in script
+    assert "python scripts/verify_exact_checkout_import.py" not in script
     assert "bash ./ibkr_auto.sh" not in script
     assert "ibkr_operator_checkpoint" not in script
     assert "ibkr_overnight_whatif" not in script
@@ -68,7 +77,7 @@ def test_readonly_autopilot_requires_main_and_exact_pinned_head_before_monitor()
     head_at = script.index('current_head="$(git rev-parse HEAD')
     branch_block_at = script.index('if [[ "$current_branch" != "main" ]]')
     head_block_at = script.index('elif [[ "$current_head" != "$PINNED_HEAD" ]]')
-    monitor_at = script.index(STRICT_MONITOR)
+    monitor_at = script.index('          -m "$STRICT_MONITOR_MODULE"')
     assert branch_at < branch_block_at < monitor_at
     assert head_at < head_block_at < monitor_at
 
@@ -106,6 +115,11 @@ def test_readonly_autopilot_bounds_interval_and_log_growth():
 def test_installer_runs_only_readonly_autopilot_service():
     script = Path("install_ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
     assert "ibkr_readonly_autopilot.sh" in script
+    assert (
+        "ExecStart=/bin/bash --noprofile --norc -p "
+        "$REPO_DIR/ibkr_readonly_autopilot.sh"
+    ) in script
+    assert "ExecStart=/usr/bin/env bash" not in script
     assert "ibkr_auto_close_cycle_once.sh" not in script
     assert "YES_CLOSE_ONE_SPY_PAPER" not in script
     assert "UMask=0077" in script
@@ -124,9 +138,48 @@ def test_installer_runs_only_readonly_autopilot_service():
     assert "systemctl --user enable --now ibkr-readonly-autopilot.service" not in script
 
 
+def test_privileged_service_bash_ignores_bash_env_startup_hook(tmp_path):
+    marker = tmp_path / "bash-env-ran"
+    hook = tmp_path / "hostile-bash-env.sh"
+    hook.write_text(
+        f"printf hostile > {marker!s}\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["BASH_ENV"] = str(hook)
+
+    completed = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-p", "-c", "true"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not marker.exists()
+
+
+def test_autopilot_preserves_monitor_configuration_contract():
+    installer = Path("install_ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
+    autopilot = Path("ibkr_readonly_autopilot.sh").read_text(encoding="utf-8")
+
+    for name in (
+        "IBKR_PAPER_MONITOR_MAX_RUNTIME_AGE_HOURS",
+        "IBKR_PAPER_MONITOR_MAX_HISTORY_BYTES",
+        "IBKR_PAPER_MONITOR_EMAIL_ALERTS",
+        "IBKR_PAPER_MONITOR_EMAIL_COOLDOWN_HOURS",
+    ):
+        assert f"Environment={name}=" in installer
+
+    # The isolated Python invocation inherits the service's application
+    # environment; it does not replace it with an empty environment.
+    assert "/usr/bin/env -i" not in autopilot
+
+
 def test_paper_operations_monitor_once_wrapper_is_readonly():
     script = Path("ibkr_paper_operations_monitor_once.sh").read_text(encoding="utf-8")
-    assert STRICT_MONITOR in script
+    assert LEGACY_STRICT_MONITOR in script
     assert "tests/test_ibkr_paper_operations_monitor_strict.py" in script
     assert "RUN_VERIFIED_PAPER_ONLY" not in script
     assert "AI_ASSET_ENABLE_IBKR_PAPER" not in script
