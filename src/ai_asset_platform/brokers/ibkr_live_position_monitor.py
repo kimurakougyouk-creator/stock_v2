@@ -41,6 +41,8 @@ def audit_live_snapshots(
         raise ValueError("invalid expected_fingerprint")
     if max_age_seconds <= 0 or now.tzinfo is None:
         raise ValueError("invalid time settings")
+    if not isinstance(account, dict) or not isinstance(orders, dict):
+        raise ValueError("snapshots must be objects")
     if not isinstance(expected_positions, dict) or not expected_positions:
         raise ValueError("explicit expected positions required")
 
@@ -75,6 +77,8 @@ def audit_live_snapshots(
                     raise ValueError
                 if symbol in observed:
                     raise ValueError
+                if position.get("sec_type") != "STK" or position.get("currency") != "JPY":
+                    alerts.add("INSTRUMENT_MISMATCH")
                 observed[symbol] = qty
             except (KeyError, TypeError, ValueError):
                 alerts.add("INVALID_POSITIONS")
@@ -115,7 +119,7 @@ def main() -> int:
             expected_fingerprint=args.expected_fingerprint,
             expected_positions={args.expected_symbol: args.expected_quantity},
             now=datetime.now(timezone.utc), max_age_seconds=args.max_age_seconds)
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
         result = {"status": "ALERT", "alert_codes": ["INVALID_OR_MISSING_EVIDENCE"],
                   "order_sent": False, "live_order_sent": False}
     print(json.dumps(result, sort_keys=True))
