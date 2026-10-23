@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+import re
 from pathlib import Path
 
 import paper_trading_runner
@@ -32,6 +33,57 @@ DEFAULT_RUNTIME_HISTORY_PATH = Path(
     "results/ibkr_verified_paper_runtime_history.jsonl"
 )
 VERIFIED_SCOPE = {"AAPL": 1, "SPY": 1, "9432.T": 100}
+
+# Fixed, allow-listed classification values persisted for ai_reason_class.
+# The raw AIReason text (which may embed a provider's full HTTP error body,
+# exception text, or free-form model output) is never written to durable
+# history -- only one of these pre-approved labels is. This keeps the
+# append-only history file from becoming a new place external response
+# content (or, in principle, a future provider's less-careful exception
+# message) could leak into persisted evidence.
+AI_REASON_CLASS_OK = "OK"
+AI_REASON_CLASS_NOT_CONFIGURED = "NOT_CONFIGURED"
+AI_REASON_CLASS_HTTP_429 = "HTTP_429"
+AI_REASON_CLASS_HTTP_503 = "HTTP_503"
+AI_REASON_CLASS_HTTP_OTHER = "HTTP_OTHER"
+AI_REASON_CLASS_NETWORK_ERROR = "NETWORK_ERROR"
+AI_REASON_CLASS_INVALID_RESPONSE = "INVALID_RESPONSE"
+AI_REASON_CLASS_UNKNOWN_ERROR = "UNKNOWN_ERROR"
+
+_HTTP_STATUS_PATTERN = re.compile(r"HTTP\s*(\d{3})")
+
+
+def classify_ai_reason(reason: str, *, available: bool) -> str:
+    """Map a raw AI judge reason to a fixed, pre-approved label.
+
+    Only the returned label (never ``reason`` itself) is safe to persist in
+    durable history: this intentionally discards any embedded HTTP response
+    body, exception text, or free-form model output.
+    """
+    if available:
+        return AI_REASON_CLASS_OK
+
+    text = str(reason or "")
+
+    if "未設定" in text:
+        return AI_REASON_CLASS_NOT_CONFIGURED
+
+    status_match = _HTTP_STATUS_PATTERN.search(text)
+    if status_match:
+        code = status_match.group(1)
+        if code == "429":
+            return AI_REASON_CLASS_HTTP_429
+        if code == "503":
+            return AI_REASON_CLASS_HTTP_503
+        return AI_REASON_CLASS_HTTP_OTHER
+
+    if "形式が不正" in text or "応答形式" in text or "JSON" in text or "空の応答" in text:
+        return AI_REASON_CLASS_INVALID_RESPONSE
+
+    if "通信に失敗しました" in text:
+        return AI_REASON_CLASS_NETWORK_ERROR
+
+    return AI_REASON_CLASS_UNKNOWN_ERROR
 
 
 @dataclass(frozen=True)
@@ -98,6 +150,10 @@ def _final_decisions(records: list[dict]) -> tuple[dict, ...]:
                 "close": _json_scalar(record.get("Close")),
                 "ai_provider": str(record.get("AIProvider", "") or ""),
                 "ai_available": bool(record.get("AIAvailable", False)),
+                "ai_reason_class": classify_ai_reason(
+                    record.get("AIReason", ""),
+                    available=bool(record.get("AIAvailable", False)),
+                ),
             }
         )
     return tuple(decisions)

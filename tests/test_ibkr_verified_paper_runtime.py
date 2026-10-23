@@ -107,6 +107,7 @@ def test_clean_reconciliation_runs_one_verified_scan(monkeypatch):
             "close": None,
             "ai_provider": "",
             "ai_available": False,
+            "ai_reason_class": "UNKNOWN_ERROR",
         },
         {
             "ticker": "SPY",
@@ -116,6 +117,7 @@ def test_clean_reconciliation_runs_one_verified_scan(monkeypatch):
             "close": None,
             "ai_provider": "",
             "ai_available": False,
+            "ai_reason_class": "UNKNOWN_ERROR",
         },
         {
             "ticker": "9432.T",
@@ -125,7 +127,137 @@ def test_clean_reconciliation_runs_one_verified_scan(monkeypatch):
             "close": None,
             "ai_provider": "",
             "ai_available": False,
+            "ai_reason_class": "UNKNOWN_ERROR",
         },
+    )
+
+
+def _run_with_single_record(monkeypatch, record: dict) -> module.VerifiedPaperRuntimeResult:
+    _approve(monkeypatch)
+    monkeypatch.setattr(module, "audit_ibkr_reconciliation_evidence", lambda: _audit())
+    monkeypatch.setattr(
+        module.paper_trading_runner,
+        "run_paper_trading",
+        lambda: {
+            "records": [record],
+            "paper_orders": [],
+            "errors": [],
+            "execution_errors": [],
+        },
+    )
+    return module.run_verified_paper_runtime_once(settings=_settings())
+
+
+@pytest.mark.parametrize(
+    "ai_reason,ai_available,expected_class",
+    [
+        (
+            "AI評価中にエラーが発生したため、安全側でHOLDとします。"
+            "Gemini API通信に失敗しました: HTTP 503 "
+            '{"error": {"code": 503, "status": "UNAVAILABLE", '
+            '"message": "high demand, GEMINI_API_KEY=should-never-persist"}}',
+            False,
+            "HTTP_503",
+        ),
+        (
+            "AI評価中にエラーが発生したため、安全側でHOLDとします。"
+            "Gemini API通信に失敗しました: HTTP 429 "
+            '{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}',
+            False,
+            "HTTP_429",
+        ),
+        (
+            "AI評価中にエラーが発生したため、安全側でHOLDとします。"
+            "Gemini API通信に失敗しました: HTTP 500 "
+            '{"error": {"code": 500, "status": "INTERNAL"}}',
+            False,
+            "HTTP_OTHER",
+        ),
+        (
+            "AI評価中にエラーが発生したため、安全側でHOLDとします。"
+            "Gemini API通信に失敗しました: [Errno 11001] getaddrinfo failed",
+            False,
+            "NETWORK_ERROR",
+        ),
+        (
+            "AI評価結果の形式が不正なため、安全側でHOLDとします。",
+            False,
+            "INVALID_RESPONSE",
+        ),
+        (
+            "AIが未設定のため、安全側でHOLDとします。",
+            False,
+            "NOT_CONFIGURED",
+        ),
+        (
+            "AI評価中にエラーが発生したため、安全側でHOLDとします。"
+            "Traceback (most recent call last): ValueError: unexpected failure",
+            False,
+            "UNKNOWN_ERROR",
+        ),
+        (
+            "テクニカル指標から判断してRSIが過熱域にあるため弱含みと判断します。",
+            True,
+            "OK",
+        ),
+    ],
+)
+def test_ai_failure_reason_is_classified_not_copied_verbatim(
+    monkeypatch, ai_reason, ai_available, expected_class
+):
+    # Regression: before this fix, final_decisions discarded AIReason
+    # entirely, so only the latest run's overwritten results/latest_signals
+    # .xlsx retained AI-failure causes (503 vs 429 vs other) -- making past
+    # causes permanently untraceable. A second independent review (Codex/
+    # ChatGPT) then flagged that copying the raw AIReason text verbatim into
+    # the existing append-only history log would itself become a new leakage
+    # vector, since it may embed a provider's full HTTP error body or
+    # exception text. The fix classifies into one of a fixed, pre-approved
+    # set of labels and persists only that label -- never the raw text.
+    record = {
+        "Ticker": "AAPL",
+        "AIReason": ai_reason,
+        "AIProvider": "gemini",
+        "AIAvailable": ai_available,
+    }
+
+    result = _run_with_single_record(monkeypatch, record)
+
+    decision = result.final_decisions[0]
+    assert decision["ai_reason_class"] == expected_class
+    assert decision["ai_reason_class"] in {
+        module.AI_REASON_CLASS_OK,
+        module.AI_REASON_CLASS_NOT_CONFIGURED,
+        module.AI_REASON_CLASS_HTTP_429,
+        module.AI_REASON_CLASS_HTTP_503,
+        module.AI_REASON_CLASS_HTTP_OTHER,
+        module.AI_REASON_CLASS_NETWORK_ERROR,
+        module.AI_REASON_CLASS_INVALID_RESPONSE,
+        module.AI_REASON_CLASS_UNKNOWN_ERROR,
+    }
+    # No raw reason text, HTTP body, or secret-looking fragment ever reaches
+    # the persisted decision -- only the fixed classification label does.
+    serialized = json.dumps(decision, ensure_ascii=False)
+    assert "GEMINI_API_KEY" not in serialized
+    assert "high demand" not in serialized
+    assert "getaddrinfo" not in serialized
+    assert "RSI" not in serialized
+    assert "Traceback" not in serialized
+
+
+def test_classify_ai_reason_is_a_pure_fixed_value_mapper():
+    assert module.classify_ai_reason("", available=True) == "OK"
+    assert module.classify_ai_reason("anything at all", available=True) == "OK"
+    assert (
+        module.classify_ai_reason("AIが未設定のため、安全側でHOLDとします。", available=False)
+        == "NOT_CONFIGURED"
+    )
+    assert module.classify_ai_reason("HTTP 503 oops", available=False) == "HTTP_503"
+    assert module.classify_ai_reason("HTTP 429 oops", available=False) == "HTTP_429"
+    assert module.classify_ai_reason("HTTP 418 oops", available=False) == "HTTP_OTHER"
+    assert (
+        module.classify_ai_reason("completely unrecognized text", available=False)
+        == "UNKNOWN_ERROR"
     )
 
 
