@@ -12,7 +12,7 @@ def snapshots():
         endpoint_port=7496, account_fingerprint=FP,
         connected=True, ready=True, order_sent=False, live_order_sent=False,
     )
-    account = {**core, "positions": [{"symbol": "9432", "quantity": 100}]}
+    account = {**core, "positions": [{"symbol": "9432", "quantity": 100, "sec_type": "STK", "currency": "JPY", "exchange": "TSEJ"}]}
     orders = {**core, "orders": [], "open_order_count": 0, "cancel_sent": False}
     return account, orders
 
@@ -59,3 +59,18 @@ def test_reject_paper_and_write_flags():
     codes = audit(a, o)["alert_codes"]
     assert "INVALID_SOURCE" in codes
     assert "UNEXPECTED_WRITE_FLAG" in codes
+
+
+def test_wrong_instrument_fails_closed():
+    a, o = snapshots()
+    a["positions"][0]["sec_type"] = "OPT"
+    a["positions"][0]["currency"] = "USD"
+    assert "INSTRUMENT_MISMATCH" in audit(a, o)["alert_codes"]
+
+
+def test_non_object_evidence_rejected():
+    a, o = snapshots()
+    import pytest
+    with pytest.raises(ValueError, match="snapshots must be objects"):
+        audit_live_snapshots(None, o, expected_fingerprint=FP,
+            expected_positions={"9432": 100}, now=NOW)
