@@ -98,6 +98,7 @@ def _final_decisions(records: list[dict]) -> tuple[dict, ...]:
                 "close": _json_scalar(record.get("Close")),
                 "ai_provider": str(record.get("AIProvider", "") or ""),
                 "ai_available": bool(record.get("AIAvailable", False)),
+                "ai_reason": str(record.get("AIReason", "") or ""),
             }
         )
     return tuple(decisions)

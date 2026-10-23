@@ -107,6 +107,7 @@ def test_clean_reconciliation_runs_one_verified_scan(monkeypatch):
             "close": None,
             "ai_provider": "",
             "ai_available": False,
+            "ai_reason": "",
         },
         {
             "ticker": "SPY",
@@ -116,6 +117,7 @@ def test_clean_reconciliation_runs_one_verified_scan(monkeypatch):
             "close": None,
             "ai_provider": "",
             "ai_available": False,
+            "ai_reason": "",
         },
         {
             "ticker": "9432.T",
@@ -125,8 +127,47 @@ def test_clean_reconciliation_runs_one_verified_scan(monkeypatch):
             "close": None,
             "ai_provider": "",
             "ai_available": False,
+            "ai_reason": "",
         },
     )
+
+
+def test_ai_failure_reason_is_carried_into_final_decisions(monkeypatch):
+    # Regression: before this fix, the raw AI diagnostic text (e.g. an
+    # embedded Gemini HTTP 503 body) was discarded when building
+    # final_decisions, so only the latest run's overwritten
+    # results/latest_signals.xlsx retained it. That made past AI-failure
+    # causes (503 vs 429 vs other) permanently untraceable across runs.
+    # ai_reason now flows through into the existing append-only history log.
+    _approve(monkeypatch)
+    monkeypatch.setattr(module, "audit_ibkr_reconciliation_evidence", lambda: _audit())
+    failure_reason = (
+        "AI評価中にエラーが発生したため、安全側でHOLDとします。"
+        "Gemini API通信に失敗しました: HTTP 503 "
+        '{"error": {"code": 503, "status": "UNAVAILABLE"}}'
+    )
+    monkeypatch.setattr(
+        module.paper_trading_runner,
+        "run_paper_trading",
+        lambda: {
+            "records": [
+                {
+                    "Ticker": "AAPL",
+                    "AIReason": failure_reason,
+                    "AIProvider": "gemini",
+                    "AIAvailable": False,
+                }
+            ],
+            "paper_orders": [],
+            "errors": [],
+            "execution_errors": [],
+        },
+    )
+
+    result = module.run_verified_paper_runtime_once(settings=_settings())
+
+    assert result.final_decisions[0]["ai_reason"] == failure_reason
+    assert "GEMINI_API_KEY" not in result.final_decisions[0]["ai_reason"]
 
 
 def test_fail_closed_execution_error_is_reported(monkeypatch):
