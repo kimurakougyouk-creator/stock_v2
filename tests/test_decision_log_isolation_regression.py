@@ -136,11 +136,31 @@ def test_run_signal_scan_with_hold_technical_signal_does_not_touch_production_lo
         ),
     )
 
-    signal_runner.run_signal_scan(
+    # allow_orders=True would make run_signal_scan() require a
+    # AI_ASSET_RUNTIME_DEPENDENCY_SHA runtime-identity (see
+    # _strategy_parameters_sha's require_order_identity branch), which is
+    # unset in this test environment. run_signal_scan() catches that
+    # ValueError per-ticker and returns an error record *before* ever
+    # reaching log_decision() -- making the "file unchanged" assertion
+    # below pass vacuously regardless of whether this fix works. This
+    # HOLD-only scenario never creates an order, so allow_orders=False
+    # avoids that identity requirement while still reaching log_decision().
+    #
+    # Deliberately does NOT override signal_runner.log_decision here: doing
+    # so would make the real-file-untouched assertion below depend on this
+    # test's own override instead of on the autouse isolation fixture under
+    # test. Instead, records.append(record) runs unconditionally the line
+    # before log_decision() is called (signal_runner.py), so a successful,
+    # error-free record for the ticker proves the scan actually reached
+    # that call.
+    result = signal_runner.run_signal_scan(
         ["7203.T"],
-        allow_orders=True,
+        allow_orders=False,
         allow_email=False,
     )
+
+    assert result.get("errors") == []
+    assert len(result.get("records", [])) == 1
 
     if real_log_existed_before:
         assert REAL_LOG_FILE.read_bytes() == real_log_bytes_before
