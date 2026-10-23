@@ -170,8 +170,7 @@ def test_fresh_entrypoint_reuses_existing_acquisition_and_persist_functions(
     )
 
     # Freeze the audit clock to match the fixture timestamps at any CI run date.
-    real_datetime = module.datetime
-    class FixedDateTime:
+    class FixedDateTime(datetime):
         @staticmethod
         def now(tz):
             return NOW
