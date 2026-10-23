@@ -169,6 +169,14 @@ def test_fresh_entrypoint_reuses_existing_acquisition_and_persist_functions(
         fake_persist_orders,
     )
 
+    # Freeze the audit clock to match the fixture timestamps at any CI run date.
+    real_datetime = module.datetime
+    class FixedDateTime:
+        @staticmethod
+        def now(tz):
+            return NOW
+    monkeypatch.setattr(module, "datetime", FixedDateTime)
+
     result = module.run_live_position_monitor_once(
         expected_fingerprint=FP,
         expected_symbol="9432",
