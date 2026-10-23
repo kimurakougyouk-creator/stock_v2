@@ -89,3 +89,39 @@ def test_module_contains_no_order_mutation_or_preview_api():
     )
     for token in forbidden:
         assert token not in source
+
+
+def test_main_output_is_cp932_safe(monkeypatch, tmp_path):
+    # Regression: observed live on 2026-10-23. The header print used an
+    # em-dash, which raised UnicodeEncodeError on Windows' default
+    # Japanese console codepage (cp932) -- even though the read-only
+    # snapshot had already been fetched and persisted successfully just
+    # before that print, so a real operator or automated monitor run on a
+    # default Windows console would see only a crash/non-zero exit, not
+    # the read-only evidence that was actually captured.
+    import io
+
+    monkeypatch.setattr(
+        module,
+        "preview_ibkr_live_all_open_orders",
+        lambda: module.IbkrLiveAllOpenOrdersSnapshot(
+            attempted=True,
+            connected=True,
+            ready=True,
+            endpoint_port=7496,
+            orders=(),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "persist_live_all_open_orders",
+        lambda snapshot, *, report_path=module.DEFAULT_REPORT_PATH: None,
+    )
+    cp932_stdout = io.TextIOWrapper(
+        io.BytesIO(), encoding="cp932", errors="strict"
+    )
+    monkeypatch.setattr("sys.stdout", cp932_stdout)
+
+    exit_code = module.main()
+
+    assert exit_code == 0

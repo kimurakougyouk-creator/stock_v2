@@ -327,3 +327,45 @@ def test_module_contains_no_order_mutation_or_preview_api():
 def test_live_ports_remain_distinct_from_paper_ports():
     assert module.LIVE_GATEWAY_PORT == 4001
     assert module.LIVE_TWS_PORT == 7496
+
+
+def test_main_output_is_cp932_safe(monkeypatch):
+    # Regression: observed live on 2026-10-23. The header print used an
+    # em-dash, which raised UnicodeEncodeError on Windows' default
+    # Japanese console codepage (cp932) -- even though the read-only
+    # evidence had already been fetched and persisted successfully just
+    # before that print, so a real operator or automated monitor run on a
+    # default Windows console would see only a crash/non-zero exit, not
+    # the read-only evidence that was actually captured.
+    import io
+
+    monkeypatch.setattr(
+        module,
+        "resolve_ibkr_live_fx_evidence",
+        lambda **_: IbkrFxSnapshotResult(
+            connected=True,
+            endpoint_port=7496,
+            base_currency="USD",
+            quote_currency="JPY",
+            exchange=None,
+            bid=None,
+            ask=None,
+            rate=150.0,
+            source="ACCOUNT",
+            order_sent=False,
+            errors=(),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "persist_live_fx_evidence",
+        lambda result, *, report_path=module.DEFAULT_REPORT_PATH: None,
+    )
+    cp932_stdout = io.TextIOWrapper(
+        io.BytesIO(), encoding="cp932", errors="strict"
+    )
+    monkeypatch.setattr("sys.stdout", cp932_stdout)
+
+    exit_code = module.main()
+
+    assert exit_code == 0
