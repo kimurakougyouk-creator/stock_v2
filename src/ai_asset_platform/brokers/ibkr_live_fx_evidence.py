@@ -386,7 +386,7 @@ def main() -> int:
         quote_currency="JPY",
     )
     persist_live_fx_evidence(result)
-    print("===== IBKR LIVE FX EVIDENCE — READ ONLY =====")
+    print("===== IBKR LIVE FX EVIDENCE - READ ONLY =====")
     print("PAIR            : USD/JPY")
     print("READY           :", result.ready)
     print("ENDPOINT PORT   :", result.endpoint_port)

@@ -203,7 +203,7 @@ def persist_live_all_open_orders(
 def main() -> int:
     snapshot = preview_ibkr_live_all_open_orders()
     persist_live_all_open_orders(snapshot)
-    print("===== IBKR LIVE ALL OPEN ORDERS — READ ONLY =====")
+    print("===== IBKR LIVE ALL OPEN ORDERS - READ ONLY =====")
     print("ATTEMPTED       :", snapshot.attempted)
     print("CONNECTED       :", snapshot.connected)
     print("READY           :", snapshot.ready)
