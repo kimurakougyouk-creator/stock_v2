@@ -196,7 +196,13 @@ function Remove-StalePycacheArtifacts {
     # fail closed on.
     Get-ChildItem -LiteralPath $RepoDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    Get-ChildItem -LiteralPath $RepoDir -Recurse -Include "*.pyc", "*.pyo" -ErrorAction SilentlyContinue |
+    # -Include is silently ignored when combined with -LiteralPath in
+    # Windows PowerShell 5.1, which previously caused this to enumerate
+    # (and attempt to delete) every file AND directory under $RepoDir,
+    # including .venv/src/tests. -File plus an explicit extension check
+    # is immune to that bug.
+    Get-ChildItem -LiteralPath $RepoDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -eq ".pyc" -or $_.Extension -eq ".pyo" } |
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
