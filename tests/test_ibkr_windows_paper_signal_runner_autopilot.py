@@ -10,10 +10,10 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_windows_autopilot_only_invokes_signal_runner_and_market_session_check():
+def test_windows_autopilot_only_invokes_paper_trading_runner_and_market_session_check():
     script = _text(AUTOPILOT)
-    lower = script.lower()
-    assert "-m signal_runner" in script
+    assert "-m paper_trading_runner" in script
+    assert "-m signal_runner" not in script
     assert "evaluate_verified_market_session" in script
     assert "placeOrder(" not in script
     assert "ibkr_auto_close_cycle" not in script
@@ -25,7 +25,6 @@ def test_windows_autopilot_only_invokes_signal_runner_and_market_session_check()
 
 def test_windows_autopilot_never_enables_or_touches_live_trading():
     script = _text(AUTOPILOT)
-    lower = script.lower()
     assert "AI_ASSET_ENABLE_LIVE_TRADING" in script
     assert "AI_ASSET_LIVE_TRADING_UNLOCKED" in script
     # Both Live flag names only ever appear in the defensive refuse-to-run
@@ -58,7 +57,7 @@ def test_windows_autopilot_requires_main_pin_and_clean_source_before_runner():
     branch_block_at = script.index('if ($currentBranch -ne "main")')
     head_block_at = script.index('elseif ($currentHead -ne $PinnedHead)')
     clean_block_at = script.index('elseif (-not (Test-TrackedSourceClean))')
-    runner_at = script.index('-m signal_runner')
+    runner_at = script.index('-m paper_trading_runner')
     assert branch_at < branch_block_at < runner_at
     assert head_at < head_block_at < runner_at
     assert clean_block_at < runner_at
@@ -66,12 +65,12 @@ def test_windows_autopilot_requires_main_pin_and_clean_source_before_runner():
     assert "git diff --cached --quiet HEAD -- . ':(exclude)results/**' ':(exclude)data/**'" in script
 
 
-def test_windows_autopilot_skips_signal_runner_when_all_verified_tickers_closed():
+def test_windows_autopilot_skips_runner_when_all_verified_tickers_closed():
     script = _text(AUTOPILOT)
     session_check_at = script.index("evaluate_verified_market_session")
     market_open_at = script.index("$marketOpen = ")
     skip_at = script.index('"VERIFIED TICKER MARKET SESSION CLOSED')
-    runner_at = script.index('-m signal_runner')
+    runner_at = script.index('-m paper_trading_runner')
     assert session_check_at < market_open_at < skip_at < runner_at
 
 
@@ -85,17 +84,46 @@ def test_windows_autopilot_uses_windows_venv_and_bounded_loop():
     assert "Rotate-AutopilotLogIfNeeded" in script
 
 
-def test_windows_autopilot_self_expires_and_requires_fresh_approval_to_resume():
+def test_windows_autopilot_reads_persisted_deadline_and_never_writes_it():
     script = _text(AUTOPILOT)
-    assert "$MaxRuntimeHours -lt 1 -or $MaxRuntimeHours -gt 8760" in script
+    assert "$DeadlineFile" in script
+    assert "Get-ApprovalDeadlineUtc" in script
     assert "AUTOPILOT EXPIRED" in script
     assert "fresh explicit approval" in script
     assert "break" in script
+    # The autopilot script must never create or extend the deadline file
+    # itself (only Set-PrivatePinFile -Path $PinFile, never
+    # -Path $DeadlineFile) -- otherwise a restart could silently renew its
+    # own approval window.
+    assert "Set-PrivatePinFile -Path $DeadlineFile" not in script
+    # Refuses to start at all if the installer never staged a deadline.
+    deadline_missing_check_at = script.index(
+        'if (-not (Test-Path -LiteralPath $DeadlineFile -PathType Leaf))'
+    )
+    loop_at = script.index("while ($true)")
+    assert deadline_missing_check_at < loop_at
+
+
+def test_windows_autopilot_self_disables_task_on_expiry():
+    script = _text(AUTOPILOT)
+    assert 'Disable-ScheduledTask -TaskName $TaskName' in script
+    expired_at = script.index('"AUTOPILOT EXPIRED: approval deadline')
+    disable_at = script.index('Disable-ScheduledTask -TaskName $TaskName')
+    break_at = script.index("break", disable_at)
+    assert expired_at < disable_at < break_at
+
+
+def test_windows_installer_computes_and_persists_approval_deadline():
+    script = _text(INSTALLER)
+    assert "$MaxRuntimeHours" in script
+    assert "= 24" in script or "24\n" in script
+    assert "$MaxRuntimeHours -lt 1 -or $MaxRuntimeHours -gt 8760" in script
+    assert "$ApprovalDeadlineUtc = (Get-Date).ToUniversalTime().AddHours($MaxRuntimeHours)" in script
+    assert "Set-PrivatePinFile -Path $DeadlineFile -Value $ApprovalDeadlineUtc.ToString(\"o\")" in script
 
 
 def test_windows_installer_is_fail_closed_non_elevated_and_stages_disabled():
     script = _text(INSTALLER)
-    lower = script.lower()
     assert '$branch -ne "main"' in script
     assert "-RunLevel Limited" in script
     assert "-LogonType Interactive" in script
@@ -103,3 +131,5 @@ def test_windows_installer_is_fail_closed_non_elevated_and_stages_disabled():
     assert "if ($staged.State -ne \"Disabled\")" in script
     assert "-AtLogOn" in script
     assert "test_ibkr_windows_paper_signal_runner_autopilot.py" in script
+    assert "test_signal_runner_windows_source_sha.py" in script
+    assert "test_paper_trading_runner.py" in script

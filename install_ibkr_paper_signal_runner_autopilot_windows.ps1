@@ -13,6 +13,23 @@ $PinFile = if ($env:IBKR_PAPER_SIGNAL_AUTOPILOT_PIN_FILE) {
 } else {
     Join-Path $HOME ".config\ai-asset-platform\ibkr-paper-signal-runner-autopilot-pinned-head"
 }
+$DeadlineFile = if ($env:IBKR_PAPER_SIGNAL_AUTOPILOT_DEADLINE_FILE) {
+    [System.IO.Path]::GetFullPath($env:IBKR_PAPER_SIGNAL_AUTOPILOT_DEADLINE_FILE)
+} else {
+    Join-Path $HOME ".config\ai-asset-platform\ibkr-paper-signal-runner-autopilot-approval-deadline"
+}
+# 24-hour bounded trial window, per the user's explicit 2026-10-24 chat
+# instruction ("15分間隔・24時間の試験設定にしてください。14日間は承認しません。").
+# A longer window requires a fresh explicit approval and a different value
+# here, re-running this installer.
+$MaxRuntimeHours = if ($env:IBKR_PAPER_SIGNAL_AUTOPILOT_MAX_RUNTIME_HOURS) {
+    [double]$env:IBKR_PAPER_SIGNAL_AUTOPILOT_MAX_RUNTIME_HOURS
+} else {
+    24
+}
+if ($MaxRuntimeHours -lt 1 -or $MaxRuntimeHours -gt 8760) {
+    throw "BLOCKED: IBKR_PAPER_SIGNAL_AUTOPILOT_MAX_RUNTIME_HOURS must be from 1 to 8760. No Paper or Live order was sent."
+}
 $AutopilotScript = Join-Path $RepoDir "ibkr_paper_signal_runner_autopilot_windows.ps1"
 $PythonExe = Join-Path $RepoDir ".venv\Scripts\python.exe"
 
@@ -89,10 +106,13 @@ Write-Host "===== WINDOWS PAPER SIGNAL RUNNER AUTOPILOT TESTS ====="
     tests/test_ibkr_windows_paper_signal_runner_autopilot.py `
     tests/test_verified_market_session.py `
     tests/test_signal_runner.py `
+    tests/test_signal_runner_windows_source_sha.py `
     tests/test_ibkr_signal_runtime_endpoint.py `
     tests/test_ibkr_signal_runtime_fill_evidence.py `
     tests/test_ibkr_signal_runtime_fx_evidence.py `
-    tests/test_ibkr_signal_runtime_source_sha.py
+    tests/test_ibkr_signal_runtime_source_sha.py `
+    tests/test_paper_trading_runner.py `
+    tests/test_verified_paper_scan.py
 if ($LASTEXITCODE -ne 0) {
     throw "BLOCKED: Windows Paper signal runner autopilot tests failed. No Paper or Live order was sent."
 }
@@ -114,6 +134,14 @@ foreach ($scriptPath in @($AutopilotScript, $PSCommandPath)) {
 }
 
 Set-PrivatePinFile -Path $PinFile -Value $PinnedHead
+
+# Compute the absolute approval deadline once, now, at explicit install time.
+# The autopilot script only ever reads this file; it never writes or renews
+# it, so a crash restart, AtLogOn retrigger, or RestartOnFailure cannot
+# silently extend the approved window -- extending requires re-running this
+# installer, which re-validates main/clean-source/tests first.
+$ApprovalDeadlineUtc = (Get-Date).ToUniversalTime().AddHours($MaxRuntimeHours)
+Set-PrivatePinFile -Path $DeadlineFile -Value $ApprovalDeadlineUtc.ToString("o")
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 if (-not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) {
@@ -168,7 +196,8 @@ Write-Host "TASK NAME: $TaskName"
 Write-Host "TASK STATE: Disabled"
 Write-Host "PINNED AUDITED HEAD: $PinnedHead"
 Write-Host "INTERVAL: 900 seconds by default"
-Write-Host "MAX RUNTIME: 336 hours (14 days) by default; self-expires, requires fresh approval to resume"
+Write-Host "APPROVAL DEADLINE (UTC): $($ApprovalDeadlineUtc.ToString('o'))"
+Write-Host "MAX RUNTIME: $MaxRuntimeHours hours; persisted on disk, read-only to the autopilot process, self-expires and self-disables the task; requires re-running this installer for a fresh approval to resume"
 Write-Host "AUTO START AFTER ENABLE: current-user logon"
 Write-Host "AUTO RESTART AFTER ENABLE: enabled after process failure"
 Write-Host "ORDER API REQUEST SENT: False"

@@ -3,6 +3,7 @@ import subprocess
 
 import pandas as pd
 
+import signal_runner as signal_runner_module
 from signal_runner import (
     _capture_process_start_strategy_source_sha,
     _rank_signal_results,
@@ -12,9 +13,15 @@ from signal_runner import (
 from dashboard import build_dashboard_html
 
 
+# These two tests exercise the POSIX (bash-based) branch specifically; the
+# native-Windows branch has its own dedicated coverage in
+# tests/test_signal_runner_windows_source_sha.py. Force os.name so both tests
+# are deterministic on either host platform (signal_runner.py dispatches on
+# os.name since the Windows bootstrap was added).
 
 
 def test_process_start_source_capture_runs_clean_gate(monkeypatch):
+    monkeypatch.setattr(signal_runner_module.os, "name", "posix")
     captured = {}
 
     def fake_run(command, **kwargs):
@@ -43,6 +50,8 @@ def test_process_start_source_capture_runs_clean_gate(monkeypatch):
 
 
 def test_process_start_source_capture_rejects_bootstrap_sha_mismatch(monkeypatch):
+    monkeypatch.setattr(signal_runner_module.os, "name", "posix")
+
     def fake_run(command, **kwargs):
         return subprocess.CompletedProcess(
             command,

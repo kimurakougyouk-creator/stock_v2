@@ -5,18 +5,21 @@ $ErrorActionPreference = "Stop"
 # Fail-closed, time-boxed, Paper-only natural-strategy signal runner for
 # Windows. Mirrors ibkr_readonly_autopilot_windows.ps1's safety pattern
 # (pinned/clean main HEAD, bounded log, fail-closed on any ambiguity) but
-# runs the existing signal_runner module instead of the read-only monitor,
-# so natural Paper fills can actually start accumulating (Issue #255 /
-# COMPLETION_ROADMAP.md Phase 5 blocker: NO_NATURAL_STRATEGY_FILLS).
+# invokes the existing, already-guarded paper_trading_runner module instead
+# of the read-only monitor, so natural Paper fills can actually start
+# accumulating (Issue #255 / COMPLETION_ROADMAP.md Phase 5 blocker:
+# NO_NATURAL_STRATEGY_FILLS).
 #
 # This script can place IBKR Paper orders. It can NEVER place a Live order:
-# execute_approved_signal_via_ibkr_paper() only ever connects to the IBKR
-# Paper ports (4002/7497, ai_asset_platform.brokers.ibkr_config) and both
-# SETTINGS.enable_live_trading and SETTINGS.live_trading_unlocked default
-# False and are never set by this script. A defensive check below also
-# refuses to run at all if either Live flag is already present in the
-# ambient environment.
+# paper_trading_runner.run_paper_trading() itself refuses to run if either
+# SETTINGS.enable_live_trading or SETTINGS.live_trading_unlocked is true
+# (both default False), and execute_approved_signal_via_ibkr_paper() only
+# ever connects to the IBKR Paper ports (4002/7497,
+# ai_asset_platform.brokers.ibkr_config). Live is never set by this script,
+# and a defensive check below also refuses to run at all if either Live
+# flag is already present in the ambient environment.
 
+$TaskName = "stock_v2 Paper Signal Runner Autopilot"
 $RepoDir = if ($env:IBKR_REPO_DIR) {
     [System.IO.Path]::GetFullPath($env:IBKR_REPO_DIR)
 } else {
@@ -32,15 +35,20 @@ $MaxLogBytes = if ($env:IBKR_PAPER_SIGNAL_AUTOPILOT_MAX_LOG_BYTES) {
 } else {
     5242880
 }
-$MaxRuntimeHours = if ($env:IBKR_PAPER_SIGNAL_AUTOPILOT_MAX_RUNTIME_HOURS) {
-    [double]$env:IBKR_PAPER_SIGNAL_AUTOPILOT_MAX_RUNTIME_HOURS
-} else {
-    336
-}
 $PinFile = if ($env:IBKR_PAPER_SIGNAL_AUTOPILOT_PIN_FILE) {
     [System.IO.Path]::GetFullPath($env:IBKR_PAPER_SIGNAL_AUTOPILOT_PIN_FILE)
 } else {
     Join-Path $HOME ".config\ai-asset-platform\ibkr-paper-signal-runner-autopilot-pinned-head"
+}
+# Deliberately NOT self-renewed here. Only the installer writes this file
+# (computed once, at explicit human-approved install time, as an absolute
+# UTC deadline). A process restart, scheduler AtLogOn retrigger, or crash
+# loop re-reads the SAME stored deadline rather than resetting a fresh
+# per-process clock, so no restart can silently extend the approved window.
+$DeadlineFile = if ($env:IBKR_PAPER_SIGNAL_AUTOPILOT_DEADLINE_FILE) {
+    [System.IO.Path]::GetFullPath($env:IBKR_PAPER_SIGNAL_AUTOPILOT_DEADLINE_FILE)
+} else {
+    Join-Path $HOME ".config\ai-asset-platform\ibkr-paper-signal-runner-autopilot-approval-deadline"
 }
 $LogDir = Join-Path $RepoDir "results"
 $LogFile = Join-Path $LogDir "ibkr_paper_signal_runner_autopilot.log"
@@ -53,9 +61,6 @@ if ($IntervalSeconds -lt 30 -or $IntervalSeconds -gt 86400) {
 if ($MaxLogBytes -lt 1048576 -or $MaxLogBytes -gt 104857600) {
     throw "BLOCKED: IBKR_PAPER_SIGNAL_AUTOPILOT_MAX_LOG_BYTES must be from 1048576 to 104857600. No Paper or Live order was sent."
 }
-if ($MaxRuntimeHours -lt 1 -or $MaxRuntimeHours -gt 8760) {
-    throw "BLOCKED: IBKR_PAPER_SIGNAL_AUTOPILOT_MAX_RUNTIME_HOURS must be from 1 to 8760. No Paper or Live order was sent."
-}
 if (-not (Test-Path -LiteralPath $RepoDir -PathType Container)) {
     throw "BLOCKED: repository directory not found. No Paper or Live order was sent."
 }
@@ -64,6 +69,12 @@ if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
 }
 if ($env:AI_ASSET_ENABLE_LIVE_TRADING -or $env:AI_ASSET_LIVE_TRADING_UNLOCKED) {
     throw "BLOCKED: a Live trading flag is already present in the environment. No Paper or Live order was sent."
+}
+# Fail closed if the installer never staged an approval deadline. This
+# script never creates or extends this file itself -- only a fresh,
+# explicit installer run may.
+if (-not (Test-Path -LiteralPath $DeadlineFile -PathType Leaf)) {
+    throw "BLOCKED: no approval deadline file is staged. Re-run the installer to record a fresh explicit approval. No Paper or Live order was sent."
 }
 
 Set-Location -LiteralPath $RepoDir
@@ -133,6 +144,15 @@ function Add-AutopilotLog {
     $Lines | Add-Content -LiteralPath $LogFile -Encoding UTF8
 }
 
+function Get-ApprovalDeadlineUtc {
+    $raw = (Get-Content -LiteralPath $DeadlineFile -Raw).Trim()
+    try {
+        return [DateTime]::Parse($raw, $null, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    } catch {
+        return $null
+    }
+}
+
 $initialBranch = Get-GitSingleLine -Arguments @("branch", "--show-current")
 $initialHead = Get-GitSingleLine -Arguments @("rev-parse", "HEAD")
 if ($initialBranch -ne "main" -or $initialHead -notmatch '^[0-9a-f]{40}$') {
@@ -167,22 +187,36 @@ for ticker, result in zip(tickers, results):
 print("OPEN" if any(r.allowed for r in results) else "CLOSED")
 "@
 
-$StartTime = Get-Date
-
 while ($true) {
     try {
         Rotate-AutopilotLogIfNeeded
         $header = "===== $([DateTimeOffset]::Now.ToString('o')) IBKR PAPER SIGNAL RUNNER AUTOPILOT (WINDOWS) ====="
         Add-AutopilotLog -Lines @($header)
 
-        $elapsedHours = ((Get-Date) - $StartTime).TotalHours
-        if ($elapsedHours -ge $MaxRuntimeHours) {
+        if (-not (Test-Path -LiteralPath $DeadlineFile -PathType Leaf)) {
             Add-AutopilotLog -Lines @(
-                "AUTOPILOT EXPIRED: max runtime of $MaxRuntimeHours hours reached. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
-                "ORDER API REQUEST SENT: False",
-                "REAL ORDER SENT: False",
+                "AUTOPILOT EXPIRED: approval deadline file is missing. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
                 "LIVE ORDER SENT: False"
             )
+            try { Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null } catch {}
+            break
+        }
+        $deadlineUtc = Get-ApprovalDeadlineUtc
+        if ($null -eq $deadlineUtc) {
+            Add-AutopilotLog -Lines @(
+                "AUTOPILOT EXPIRED: approval deadline file is unreadable or malformed. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
+                "LIVE ORDER SENT: False"
+            )
+            try { Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null } catch {}
+            break
+        }
+        $nowUtc = (Get-Date).ToUniversalTime()
+        if ($nowUtc -ge $deadlineUtc) {
+            Add-AutopilotLog -Lines @(
+                "AUTOPILOT EXPIRED: approval deadline $($deadlineUtc.ToString('o')) UTC reached. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
+                "LIVE ORDER SENT: False"
+            )
+            try { Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null } catch {}
             break
         }
 
@@ -190,11 +224,11 @@ while ($true) {
         $currentHead = Get-GitSingleLine -Arguments @("rev-parse", "HEAD")
 
         if ($currentBranch -ne "main") {
-            Add-AutopilotLog -Lines @("AUTOPILOT SOURCE BLOCKED: local branch is '$currentBranch', expected 'main'. Signal runner was not executed.")
+            Add-AutopilotLog -Lines @("AUTOPILOT SOURCE BLOCKED: local branch is '$currentBranch', expected 'main'. Paper trading runner was not executed.")
         } elseif ($currentHead -ne $PinnedHead) {
             Add-AutopilotLog -Lines @("AUTOPILOT SOURCE BLOCKED: local HEAD $currentHead differs from pinned audited HEAD $PinnedHead. Rerun the tested installer after review.")
         } elseif (-not (Test-TrackedSourceClean)) {
-            Add-AutopilotLog -Lines @("AUTOPILOT SOURCE BLOCKED: tracked source differs from pinned HEAD outside runtime output directories. Signal runner was not executed.")
+            Add-AutopilotLog -Lines @("AUTOPILOT SOURCE BLOCKED: tracked source differs from pinned HEAD outside runtime output directories. Paper trading runner was not executed.")
         } elseif (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
             Add-AutopilotLog -Lines @("SKIP: .venv\Scripts\python.exe not found. No Paper or Live order was sent.")
         } else {
@@ -204,20 +238,28 @@ while ($true) {
             $marketOpen = ($sessionLines -contains "OPEN")
 
             if (-not $marketOpen) {
-                Add-AutopilotLog -Lines @("VERIFIED TICKER MARKET SESSION CLOSED: skip cycle. Signal runner was not executed.")
+                Add-AutopilotLog -Lines @("VERIFIED TICKER MARKET SESSION CLOSED: skip cycle. Paper trading runner was not executed.")
             } else {
-                $runnerOutput = & $PythonExe -m signal_runner 2>&1
+                # paper_trading_runner.run_paper_trading() is the existing,
+                # explicit, guarded Paper-order entry point: it refuses to run
+                # if either Live flag is set, restricts dispatch to the
+                # broker-verified ticker/quantity universe, and still passes
+                # every order through the shared risk gate (including the
+                # emergency-stop latch) and the verified market-session guard
+                # before any broker call.
+                $runnerOutput = & $PythonExe -m paper_trading_runner 2>&1
                 $runnerStatus = $LASTEXITCODE
                 $runnerLines = @($runnerOutput | ForEach-Object { $_.ToString() })
                 if ($runnerLines.Count -gt 0) {
                     Add-AutopilotLog -Lines $runnerLines
                 }
-                Add-AutopilotLog -Lines @("SIGNAL RUNNER EXIT CODE: $runnerStatus")
+                Add-AutopilotLog -Lines @("PAPER TRADING RUNNER EXIT CODE: $runnerStatus")
             }
         }
 
         Add-AutopilotLog -Lines @(
             "PINNED AUDITED HEAD: $PinnedHead",
+            "APPROVAL DEADLINE UTC: $($deadlineUtc.ToString('o'))",
             "LIVE ORDER SENT: False"
         )
     } catch {
