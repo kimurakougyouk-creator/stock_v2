@@ -113,6 +113,19 @@ def test_windows_autopilot_self_disables_task_on_expiry():
     assert expired_at < disable_at < break_at
 
 
+def test_windows_autopilot_disables_bytecode_writes_and_cleans_stale_caches():
+    script = _text(AUTOPILOT)
+    assert '$env:PYTHONDONTWRITEBYTECODE = "1"' in script
+    bytecode_env_at = script.index('$env:PYTHONDONTWRITEBYTECODE = "1"')
+    cleanup_def_at = script.index("function Remove-StalePycacheArtifacts")
+    cleanup_call_at = script.index("Remove-StalePycacheArtifacts", cleanup_def_at + 1)
+    runner_at = script.index("-m paper_trading_runner")
+    assert bytecode_env_at < cleanup_def_at < cleanup_call_at < runner_at
+    assert "__pycache__" in script
+    assert "*.pyc" in script
+    assert "*.pyo" in script
+
+
 def test_windows_installer_computes_and_persists_approval_deadline():
     script = _text(INSTALLER)
     assert "$MaxRuntimeHours" in script
@@ -120,6 +133,16 @@ def test_windows_installer_computes_and_persists_approval_deadline():
     assert "$MaxRuntimeHours -lt 1 -or $MaxRuntimeHours -gt 8760" in script
     assert "$ApprovalDeadlineUtc = (Get-Date).ToUniversalTime().AddHours($MaxRuntimeHours)" in script
     assert "Set-PrivatePinFile -Path $DeadlineFile -Value $ApprovalDeadlineUtc.ToString(\"o\")" in script
+
+
+def test_windows_installer_disables_bytecode_writes_and_cleans_stale_caches_before_tests():
+    script = _text(INSTALLER)
+    assert '$env:PYTHONDONTWRITEBYTECODE = "1"' in script
+    bytecode_env_at = script.index('$env:PYTHONDONTWRITEBYTECODE = "1"')
+    pytest_at = script.index("-m pytest")
+    assert bytecode_env_at < pytest_at
+    assert script.count("__pycache__") >= 2
+    assert script.count("*.pyc") >= 2
 
 
 def test_windows_installer_is_fail_closed_non_elevated_and_stages_disabled():

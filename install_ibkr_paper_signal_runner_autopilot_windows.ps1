@@ -101,6 +101,18 @@ if (-not (Test-TrackedSourceClean)) {
     throw "BLOCKED: tracked source differs from current main outside runtime outputs. No Paper or Live order was sent."
 }
 
+# PYTHONDONTWRITEBYTECODE prevents this test run itself from writing .pyc
+# caches that the autopilot's Windows source-SHA attestation would then
+# (correctly) fail closed on as ignored-but-importable artifacts. Clean any
+# pre-existing caches from earlier, unrelated python/pytest runs against
+# this checkout first, so the tree is genuinely clean before the autopilot
+# ever starts.
+$env:PYTHONDONTWRITEBYTECODE = "1"
+Get-ChildItem -LiteralPath $RepoDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath $RepoDir -Recurse -Include "*.pyc", "*.pyo" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 Write-Host "===== WINDOWS PAPER SIGNAL RUNNER AUTOPILOT TESTS ====="
 & $PythonExe -m pytest -q `
     tests/test_ibkr_windows_paper_signal_runner_autopilot.py `
@@ -116,6 +128,14 @@ Write-Host "===== WINDOWS PAPER SIGNAL RUNNER AUTOPILOT TESTS ====="
 if ($LASTEXITCODE -ne 0) {
     throw "BLOCKED: Windows Paper signal runner autopilot tests failed. No Paper or Live order was sent."
 }
+
+# Clean again after the test run itself, belt-and-suspenders: the autopilot
+# script performs this same cleanup every cycle regardless, but leaving the
+# tree clean here too means its very first cycle does not depend on that.
+Get-ChildItem -LiteralPath $RepoDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath $RepoDir -Recurse -Include "*.pyc", "*.pyo" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 # Parse both PowerShell files with the same Windows PowerShell parser used by
 # the scheduled task. Syntax errors block staging before any task changes.

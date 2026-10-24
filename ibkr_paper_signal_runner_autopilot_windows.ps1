@@ -177,6 +177,28 @@ if ($PinnedHead -notmatch '^[0-9a-f]{40}$') {
 # already present in the ambient environment.
 $env:AI_ASSET_ENABLE_IBKR_PAPER = "1"
 $env:PYTHONPATH = (Join-Path $RepoDir "src") + ";" + $RepoDir
+# Required for the Windows source-SHA attestation to ever pass: under normal
+# Python defaults, simply importing modules (including the market-session
+# check below, and paper_trading_runner's own import chain) writes .pyc
+# bytecode under __pycache__/, which _WINDOWS_AUDITED_PATHS treats as an
+# ignored-but-importable artifact and correctly fails closed on. Without
+# this, the very act of running this script would permanently block its own
+# next cycle's order dispatch.
+$env:PYTHONDONTWRITEBYTECODE = "1"
+
+function Remove-StalePycacheArtifacts {
+    # One-time (and ongoing, self-healing) cleanup of bytecode caches that
+    # predate PYTHONDONTWRITEBYTECODE being set here -- e.g. from the
+    # installer's own test run, or any manual pytest/python invocation
+    # against this checkout. These are always-regenerable build artifacts,
+    # never tracked source, so deleting them cannot weaken the attestation;
+    # it only removes the noise the attestation would otherwise (correctly)
+    # fail closed on.
+    Get-ChildItem -LiteralPath $RepoDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $RepoDir -Recurse -Include "*.pyc", "*.pyo" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
 
 $MarketSessionCheck = @"
 from ai_asset_platform.execution.verified_market_session import evaluate_verified_market_session
@@ -232,6 +254,7 @@ while ($true) {
         } elseif (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
             Add-AutopilotLog -Lines @("SKIP: .venv\Scripts\python.exe not found. No Paper or Live order was sent.")
         } else {
+            Remove-StalePycacheArtifacts
             $sessionOutput = & $PythonExe -c $MarketSessionCheck 2>&1
             $sessionLines = @($sessionOutput | ForEach-Object { $_.ToString() })
             Add-AutopilotLog -Lines $sessionLines
