@@ -12,9 +12,169 @@ _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _BOOTSTRAP_SOURCE_SHA_ENV = "AI_ASSET_BOOTSTRAP_STRATEGY_SOURCE_SHA"
 _RUNTIME_DEPENDENCY_SHA_ENV = "AI_ASSET_RUNTIME_DEPENDENCY_SHA"
 
+# Mirrors scripts/verify_strategy_source_clean.sh's AUDITED_PATHS exactly.
+# Keep both lists identical; this one backs the native-Windows bootstrap below
+# (that script relies on hardcoded Unix paths such as /usr/bin/git and
+# /bin/bash, which do not exist on native Windows).
+_WINDOWS_AUDITED_PATHS = (
+    "src",
+    ":(top,glob)*.py",
+    ":(top,glob)*.pyc",
+    ":(top,glob)*.pyo",
+    ":(top,glob)*.pyz",
+    ":(top,glob)*.so",
+    ":(top,glob)*.pyd",
+    ":(top,glob)*.dylib",
+    ":(top,glob)__pycache__/**",
+    ":(top,glob)*/__init__.py",
+    ":(top,glob)*/__init__.pyc",
+    ":(top,glob)*/__init__.pyo",
+    ":(top,glob)*/__init__*.so",
+    ":(top,glob)*/__init__*.pyd",
+    ":(top,glob)*/__init__*.dylib",
+    "tests",
+    "ai_asset_platform",
+    "ai_asset_platform.py",
+    "signal_runner.py",
+    "tickers.csv",
+    "config.py",
+    "requirements.txt",
+    "pyproject.toml",
+    "pytest.ini",
+    "start.sh",
+    "scripts/start_sanitized.sh",
+    "scripts/run.sh",
+    "scripts/verify_strategy_source_clean.sh",
+    "scripts/ensure_exact_checkout_runtime.sh",
+    "scripts/verify_exact_checkout_import.py",
+    "scripts/verify_live_ibapi_runtime.py",
+    "scripts/live_ibapi_manifest.json",
+    "scripts/load_start_env.py",
+    "scripts/run_isolated_venv_python.py",
+    "scripts/ibkr_verified_paper_runtime_once_sanitized.sh",
+    "scripts/ibkr_strategy_profitability_evidence_once_sanitized.sh",
+    "scripts/strategy_promotion_policy_once_sanitized.sh",
+    "ibkr_verified_paper_runtime_once.sh",
+    "ibkr_strategy_profitability_evidence_once.sh",
+    "strategy_promotion_policy_once.sh",
+    "config",
+    "sitecustomize.py",
+    "sitecustomize.pyc",
+    "usercustomize.py",
+    "usercustomize.pyc",
+)
+
+
+def _run_git_windows(arguments: list[str], *, repository_root: Path) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+
+
+def _capture_process_start_strategy_source_sha_windows(
+    repository_root: Path = Path("."),
+) -> str | None:
+    """Native-Windows equivalent of scripts/verify_strategy_source_clean.sh.
+
+    The bash script this mirrors hardcodes /usr/bin/git and /bin/bash, which
+    do not exist on native Windows, so it always fails closed (returns None)
+    there. This performs the same checks -- clean tracked/untracked audited
+    source, no root-level symlinks, no root module symlink shadows, no
+    assume-unchanged/skip-worktree index entries, no ignored-but-importable
+    artifacts -- using plain, PATH-resolved `git`, which works identically on
+    Windows and POSIX.
+    """
+    head = _run_git_windows(["rev-parse", "HEAD"], repository_root=repository_root)
+    if head is None or head.returncode != 0:
+        return None
+    sha = head.stdout.strip().lower()
+    if not _SOURCE_SHA_RE.fullmatch(sha):
+        return None
+
+    dirty = _run_git_windows(
+        ["status", "--porcelain=v1", "--untracked-files=all", "--", *_WINDOWS_AUDITED_PATHS],
+        repository_root=repository_root,
+    )
+    if dirty is None or dirty.returncode != 0 or dirty.stdout.strip():
+        return None
+
+    top_py = _run_git_windows(
+        ["ls-files", "--", ":(top,glob)*.py"], repository_root=repository_root
+    )
+    if top_py is None or top_py.returncode != 0:
+        return None
+    for module_path in top_py.stdout.splitlines():
+        module_path = module_path.strip()
+        if not module_path:
+            continue
+        stem = module_path[: -len(".py")] if module_path.endswith(".py") else module_path
+        candidate = repository_root / stem
+        if candidate.is_symlink():
+            return None
+
+    try:
+        root_entries = list(repository_root.iterdir())
+    except OSError:
+        return None
+    for entry in root_entries:
+        if entry.is_symlink():
+            return None
+
+    index_state = _run_git_windows(
+        ["ls-files", "-v", "--", *_WINDOWS_AUDITED_PATHS], repository_root=repository_root
+    )
+    if index_state is None or index_state.returncode != 0:
+        return None
+    for line in index_state.stdout.splitlines():
+        if not line:
+            continue
+        marker = line[0]
+        if marker == "S" or marker.islower():
+            return None
+
+    ignored = _run_git_windows(
+        [
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+            *_WINDOWS_AUDITED_PATHS,
+        ],
+        repository_root=repository_root,
+    )
+    if ignored is None or ignored.returncode != 0:
+        return None
+    for raw_path in ignored.stdout.splitlines():
+        raw_path = raw_path.strip()
+        if not raw_path:
+            continue
+        candidate = repository_root / raw_path
+        if candidate.is_symlink():
+            return None
+        lowered = raw_path.lower()
+        if lowered.endswith((".py", ".pyc", ".pyo", ".pyz", ".so", ".pyd", ".dylib")):
+            return None
+        if candidate.is_dir() and (
+            (candidate / "__init__.py").is_file()
+            or (candidate / "__init__.pyc").is_file()
+            or any(candidate.glob("__init__*.so"))
+        ):
+            return None
+
+    return sha
+
 
 def _capture_process_start_strategy_source_sha() -> str | None:
     """Attest clean strategy source before importing strategy/application modules."""
+    if os.name == "nt":
+        return _capture_process_start_strategy_source_sha_windows()
     clean_env = {
         "HOME": os.environ.get("HOME", ""),
         "USER": os.environ.get("USER", ""),
