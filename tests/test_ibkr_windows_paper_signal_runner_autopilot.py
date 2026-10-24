@@ -10,6 +10,20 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def test_pyc_cleanup_never_uses_literalpath_include_bug_pattern():
+    # -Include is silently ignored when combined with -LiteralPath in
+    # Windows PowerShell 5.1: Get-ChildItem -LiteralPath $dir -Recurse
+    # -Include "*.pyc" enumerates (and the following Remove-Item -Force
+    # then attempts to delete) every file AND directory under $dir,
+    # including .venv/src/tests. Both scripts must filter with -File plus
+    # an explicit extension check instead, which is immune to that bug.
+    for script in (_text(AUTOPILOT), _text(INSTALLER)):
+        assert '-Include "*.pyc"' not in script
+        assert '.Extension -eq ".pyc"' in script
+        assert '.Extension -eq ".pyo"' in script
+        assert "-Recurse -File -ErrorAction SilentlyContinue" in script
+
+
 def test_windows_autopilot_only_invokes_paper_trading_runner_and_market_session_check():
     script = _text(AUTOPILOT)
     assert "-m paper_trading_runner" in script
@@ -122,8 +136,8 @@ def test_windows_autopilot_disables_bytecode_writes_and_cleans_stale_caches():
     runner_at = script.index("-m paper_trading_runner")
     assert bytecode_env_at < cleanup_def_at < cleanup_call_at < runner_at
     assert "__pycache__" in script
-    assert "*.pyc" in script
-    assert "*.pyo" in script
+    assert '.Extension -eq ".pyc"' in script
+    assert '.Extension -eq ".pyo"' in script
 
 
 def test_windows_installer_computes_and_persists_approval_deadline():
@@ -142,7 +156,7 @@ def test_windows_installer_disables_bytecode_writes_and_cleans_stale_caches_befo
     pytest_at = script.index("-m pytest")
     assert bytecode_env_at < pytest_at
     assert script.count("__pycache__") >= 2
-    assert script.count("*.pyc") >= 2
+    assert script.count('.Extension -eq ".pyc"') >= 2
 
 
 def test_windows_installer_is_fail_closed_non_elevated_and_stages_disabled():
