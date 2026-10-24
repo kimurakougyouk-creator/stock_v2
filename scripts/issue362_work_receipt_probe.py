@@ -12,8 +12,8 @@ import sys
 REPO = "kimurakougyouk-creator/stock_v2"
 PR = 362
 SOURCE = 6378440980
-SHA_RE = re.compile(r"\\bhead=([0-9a-f]{40})\\b")
-SOURCE_RE = re.compile(r"\\bsource_comment_id=(\\d+)\\b")
+SHA_RE = re.compile(r"\bhead=([0-9a-f]{40})\b")
+SOURCE_RE = re.compile(r"\bsource_comment_id=(\d+)\b")
 
 
 def api(method, path, body=None):
