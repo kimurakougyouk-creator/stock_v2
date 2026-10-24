@@ -14,6 +14,7 @@ PR = 362
 SOURCE = 6378440980
 SHA_RE = re.compile(r"\bhead=([0-9a-f]{40})\b")
 SOURCE_RE = re.compile(r"\bsource_comment_id=(\d+)\b")
+RESULT_RE = re.compile(r"\bresult=([A-Z_]+)\b")
 
 
 def api(method, path, body=None):
