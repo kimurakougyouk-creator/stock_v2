@@ -26,10 +26,15 @@ def api(method, path, body=None):
     return json.loads(process.stdout)
 
 
+def _first_line(text):
+    lines = text.splitlines()
+    return lines[0] if lines else ""
+
+
 def receipt_matches(body, sha):
     if not isinstance(body, str):
         return False
-    first = body.splitlines()[0]
+    first = _first_line(body)
     src = SOURCE_RE.search(first)
     head = SHA_RE.search(first)
     return (
@@ -47,7 +52,7 @@ def run(post=False):
         raise ValueError("PR identity/state mismatch")
     if audit.get("id") != SOURCE:
         raise ValueError("wrong audit comment")
-    first = audit.get("body", "").splitlines()[0]
+    first = _first_line(audit.get("body") or "")
     if not first.startswith(f"WORK_AUDIT_RESULT_V1 repo={REPO} pr={PR} head="):
         raise ValueError("invalid audit header")
     match = SHA_RE.search(first)
