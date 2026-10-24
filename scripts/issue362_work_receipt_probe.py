@@ -37,11 +37,21 @@ def receipt_matches(body, sha):
     first = _first_line(body)
     src = SOURCE_RE.search(first)
     head = SHA_RE.search(first)
+    result = RESULT_RE.search(first)
     return (
         first.startswith(f"WORK_AUDIT_RECEIPT_V1 repo={REPO} pr={PR} ")
         and src is not None and int(src.group(1)) == SOURCE
         and head is not None and head.group(1) == sha
+        and result is not None and result.group(1) == "VERIFIED"
     )
+
+
+def _check_head(base, expected_sha):
+    live = api("GET", f"{base}/pulls/{PR}")
+    if (live.get("number") != PR or live.get("state") != "open"
+            or live.get("draft") is not True
+            or live.get("head", {}).get("sha") != expected_sha):
+        raise ValueError("PR changed during audit; fail closed")
 
 
 def run(post=False):
@@ -80,10 +90,12 @@ def run(post=False):
             f"source_comment_id={SOURCE} head={sha} result=VERIFIED\n\n"
             "Verified live GitHub audit record and PR HEAD using bounded local probe. "
             "Does not prove unattended Claude execution.")
+    _check_head(base, sha)  # Revalidate as close to posting as possible.
     saved = api("POST", f"{base}/issues/{PR}/comments", body)
     check = api("GET", f"{base}/issues/comments/{saved['id']}")
     if check.get("body") != body:
         raise RuntimeError("receipt read-back mismatch")
+    _check_head(base, sha)  # Never confirm a stale audit after a push.
     print(f"RECEIPT_POSTED id={saved['id']} head={sha}")
 
 
