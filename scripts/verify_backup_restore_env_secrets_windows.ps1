@@ -13,12 +13,31 @@
 # scripts in this repository (dot-sourced directly, never
 # reimplemented). It touches only disposable dummy files under a
 # fresh, randomly-named directory in $env:TEMP, and removes that
-# directory when it finishes. It never touches the repository's own
-# .env or any real secret.
+# directory when it finishes. It never writes to, or reads a real
+# secret from, the repository's own .env file.
+#
+# Independent audit follow-up V3 (PR #365, Work comment 6397370183):
+# an earlier revision of this harness had four real quality gaps this
+# round fixes: (1) junction-creation checks trusted `cmd /c mklink`
+# blindly, so a failed mklink and a genuinely-rejected BackupPath were
+# indistinguishable -- both were just "an exception was thrown" to the
+# same try/catch; (2) the owner-only-ACL check only counted access
+# rules (`Access.Count -eq 1`), never verifying the one rule was
+# actually Allow/FullControl/non-inherited/for the current identity;
+# (3) a SKIP path returned $true, which Invoke-Check counted as a PASS
+# -- indistinguishable in the summary from a real pass; (4) the Gemini
+# check ran verify_gemini_env_key_windows.ps1 against the REAL
+# repository checkout, which requires a real .env there and reads it
+# through the real settings loader, directly contradicting this
+# harness's own "never touches a real secret" claim and making the
+# check's outcome depend on whatever .env happens to already be on the
+# machine running it. All four are fixed below.
 #
 # Usage: powershell.exe -File scripts\verify_backup_restore_env_secrets_windows.ps1
-# Exit code 0 = every check passed. Non-zero = at least one failed;
-# the failing check names are printed to stderr as well as stdout.
+# Exit code 0 = every check passed (or was explicitly skipped with a
+# stated reason). Non-zero = at least one check failed; the failing
+# check names are printed to stderr as well as stdout. SKIP is never
+# counted toward "passed".
 
 Set-StrictMode -Off
 $ErrorActionPreference = "Stop"
@@ -36,20 +55,122 @@ if (-not (Test-Path -LiteralPath $BackupRestoreScript -PathType Leaf)) {
 $results = New-Object System.Collections.Generic.List[object]
 
 function Invoke-Check {
+    # Status is one of PASS / FAIL / SKIP. A scriptblock that returns
+    # the exact string "SKIP" is recorded as SKIP (never counted as a
+    # pass); returning $false or throwing is FAIL; anything else is
+    # PASS. Keeping SKIP a distinct status (independent audit V3,
+    # Work comment 6397370183) is the point: an earlier revision had a
+    # skip path return $true, making a genuinely-skipped check
+    # indistinguishable from a real pass in the summary totals.
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][scriptblock]$Body
     )
     try {
         $outcome = & $Body
-        if ($outcome -eq $false) {
-            $results.Add([pscustomobject]@{ Name = $Name; Pass = $false; Detail = "assertion returned false" })
+        if ($outcome -is [string] -and $outcome -eq "SKIP") {
+            $results.Add([pscustomobject]@{ Name = $Name; Status = "SKIP"; Detail = "" })
+        } elseif ($outcome -eq $false) {
+            $results.Add([pscustomobject]@{ Name = $Name; Status = "FAIL"; Detail = "assertion returned false" })
         } else {
-            $results.Add([pscustomobject]@{ Name = $Name; Pass = $true; Detail = "" })
+            $results.Add([pscustomobject]@{ Name = $Name; Status = "PASS"; Detail = "" })
         }
     } catch {
-        $results.Add([pscustomobject]@{ Name = $Name; Pass = $false; Detail = $_.Exception.Message })
+        $results.Add([pscustomobject]@{ Name = $Name; Status = "FAIL"; Detail = $_.Exception.Message })
     }
+}
+
+function New-VerifiedJunction {
+    # Independent audit follow-up V3 (PR #365, Work comment
+    # 6397370183): an earlier revision called `cmd /c mklink /J`
+    # directly inside each check's own try/catch, so a FAILED mklink
+    # (wrong privilege, bad path, anything) and Backup-EnvSecrets
+    # correctly REJECTING the resulting path were both just "an
+    # exception happened" to the same catch block -- indistinguishable
+    # successes. This helper is called OUTSIDE that inner try/catch in
+    # every check that needs a junction: it verifies mklink's own exit
+    # code AND that the resulting item genuinely carries the
+    # ReparsePoint attribute, and throws (a prerequisite failure,
+    # reported by Invoke-Check as its own FAIL, never confused with an
+    # expected safety rejection) if either check fails.
+    param(
+        [Parameter(Mandatory = $true)][string]$Junction,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+    if (Test-Path -LiteralPath $Junction) {
+        cmd /c rmdir "$Junction" | Out-Null
+    }
+    cmd /c mklink /J "$Junction" "$Target" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "PREREQUISITE FAILED: mklink /J exited $LASTEXITCODE creating junction '$Junction' -> '$Target'"
+    }
+    if (-not (Test-Path -LiteralPath $Junction)) {
+        throw "PREREQUISITE FAILED: '$Junction' does not exist immediately after mklink reported success"
+    }
+    $item = Get-Item -LiteralPath $Junction -Force
+    if (-not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "PREREQUISITE FAILED: '$Junction' was created but is not a reparse point -- mklink /J did not actually produce a junction"
+    }
+}
+
+function Test-IsPrivateOwnerOnlyAcl {
+    # Independent audit follow-up V3 (PR #365, Work comment
+    # 6397370183): an earlier revision only checked
+    # `(Get-Acl ...).Access.Count -eq 1` -- true for exactly one rule
+    # of ANY kind, including e.g. a stray Deny rule or a rule for the
+    # wrong identity. This verifies the one rule actually is what
+    # Set-PrivateFileAcl is supposed to produce: Allow, FullControl,
+    # not inherited, and for the current Windows identity specifically.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $rules = @((Get-Acl -LiteralPath $Path).Access)
+    if ($rules.Count -ne 1) { return $false }
+    $rule = $rules[0]
+    if ($rule.IsInherited) { return $false }
+    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { return $false }
+    if ($rule.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { return $false }
+    try {
+        $ruleSid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+    } catch {
+        return $false
+    }
+    return $ruleSid -eq $identity
+}
+
+function Add-DenyWriteAcl {
+    # Injects a real, OS-enforced Deny rule for the current identity on
+    # $Path (CreateFiles/Write/Delete/WriteData), used to force a
+    # genuine failure inside the real Backup-EnvSecrets/Restore-
+    # EnvSecrets functions (independent audit V3, Work comment
+    # 6397370183, point 1: no existing check exercised an actual
+    # ACL/move failure path through the real functions, only the bare
+    # Move-Item primitive in isolation).
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $Path
+    $denyRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $identity,
+        ([System.Security.AccessControl.FileSystemRights]"CreateFiles,Write,Delete,WriteData"),
+        [System.Security.AccessControl.AccessControlType]::Deny
+    )
+    $acl.AddAccessRule($denyRule)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Remove-DenyWriteAcl {
+    # Cleanup counterpart to Add-DenyWriteAcl. Must run before this
+    # harness's own final recursive delete of $TestRoot, or that
+    # delete would fail against the very Deny rule this function
+    # removes.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $Path
+    foreach ($rule in @($acl.Access)) {
+        if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny) {
+            $acl.RemoveAccessRule($rule) | Out-Null
+        }
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
 $TestRoot = Join-Path $env:TEMP ("stock_v2_backup_restore_verify_" + [System.IO.Path]::GetRandomFileName())
@@ -71,8 +192,8 @@ try {
         -not (Get-Content -LiteralPath $Backup -Raw).Contains("harness-verification")
     }
 
-    Invoke-Check "restored_file_acl_has_exactly_one_rule" {
-        (Get-Acl -LiteralPath $Restored).Access.Count -eq 1
+    Invoke-Check "restored_file_has_owner_only_full_control_acl" {
+        Test-IsPrivateOwnerOnlyAcl -Path $Restored
     }
 
     Invoke-Check "backup_rejects_source_equals_backup_path" {
@@ -94,20 +215,22 @@ try {
         $realDir = Join-Path $TestRoot "realtarget1"
         New-Item -ItemType Directory -Path $realDir -Force | Out-Null
         $junction = Join-Path $TestRoot "junction1"
-        if (Test-Path -LiteralPath $junction) { cmd /c rmdir "$junction" | Out-Null }
-        cmd /c mklink /J "$junction" "$realDir" | Out-Null
+        New-VerifiedJunction -Junction $junction -Target $realDir
         $target = Join-Path $junction "via-junction.backup"
-        try { Backup-EnvSecrets -SourcePath $Source -BackupPath $target; $false } catch { $true }
+        $rejected = $false
+        try { Backup-EnvSecrets -SourcePath $Source -BackupPath $target } catch { $rejected = $true }
+        $rejected
     }
 
     Invoke-Check "backup_rejects_junction_one_level_above_immediate_parent" {
         $realDir = Join-Path $TestRoot "realtarget2"
         New-Item -ItemType Directory -Path $realDir -Force | Out-Null
         $junction = Join-Path $TestRoot "junction2"
-        if (Test-Path -LiteralPath $junction) { cmd /c rmdir "$junction" | Out-Null }
-        cmd /c mklink /J "$junction" "$realDir" | Out-Null
+        New-VerifiedJunction -Junction $junction -Target $realDir
         $target = Join-Path $junction "sub\env.backup"
-        try { Backup-EnvSecrets -SourcePath $Source -BackupPath $target; $false } catch { $true }
+        $rejected = $false
+        try { Backup-EnvSecrets -SourcePath $Source -BackupPath $target } catch { $rejected = $true }
+        $rejected
     }
 
     Invoke-Check "backup_leaves_unrelated_file_at_old_fixed_temp_name_untouched" {
@@ -196,43 +319,161 @@ try {
         (Get-Content -LiteralPath $unrelated -Raw) -ne "IMPORTANT_UNRELATED_USER_DATA_2"
     }
 
+    Invoke-Check "backup_fails_closed_when_the_backup_directory_denies_write" {
+        # Independent audit follow-up V3 (PR #365, Work comment
+        # 6397370183, point 1): no prior check exercised a genuine
+        # ACL/move failure through the REAL Backup-EnvSecrets function
+        # (only the bare Move-Item primitive, in isolation, was
+        # checked). This injects a real, OS-enforced Deny rule on the
+        # backup directory so the function's own temp-file creation
+        # genuinely fails, and verifies it fails closed: an existing
+        # backup at that path is left byte-for-byte intact, and no
+        # stray temp file is left behind.
+        $denyDir = Join-Path $TestRoot "deny_write_backup_dir"
+        New-Item -ItemType Directory -Path $denyDir -Force | Out-Null
+        $slot = Join-Path $denyDir "slot.backup"
+        Backup-EnvSecrets -SourcePath $Source -BackupPath $slot -Force
+        $beforeHash = (Get-FileHash -LiteralPath $slot -Algorithm SHA256).Hash
+        Add-DenyWriteAcl -Path $denyDir
+        $threw = $false
+        try {
+            Backup-EnvSecrets -SourcePath $Source -BackupPath $slot -Force
+        } catch {
+            $threw = $true
+        } finally {
+            Remove-DenyWriteAcl -Path $denyDir
+        }
+        $afterHash = (Get-FileHash -LiteralPath $slot -Algorithm SHA256).Hash
+        $noLeftoverTemp = -not (Get-ChildItem -LiteralPath $denyDir -Filter ".envsecrets-*" -Force -ErrorAction SilentlyContinue)
+        $threw -and ($beforeHash -eq $afterHash) -and $noLeftoverTemp
+    }
+
+    Invoke-Check "restore_fails_closed_when_the_destination_directory_denies_write" {
+        # Restore-EnvSecrets counterpart to the check above.
+        $denyDir = Join-Path $TestRoot "deny_write_restore_dir"
+        New-Item -ItemType Directory -Path $denyDir -Force | Out-Null
+        $dest = Join-Path $denyDir "restored_denied.env"
+        Add-DenyWriteAcl -Path $denyDir
+        $threw = $false
+        try {
+            Restore-EnvSecrets -BackupPath $Backup -DestinationPath $dest
+        } catch {
+            $threw = $true
+        } finally {
+            Remove-DenyWriteAcl -Path $denyDir
+        }
+        $noPartialOutput = -not (Test-Path -LiteralPath $dest)
+        $noLeftoverTemp = -not (Get-ChildItem -LiteralPath $denyDir -Filter ".envsecrets-*" -Force -ErrorAction SilentlyContinue)
+        $threw -and $noPartialOutput -and $noLeftoverTemp
+    }
+
+    Invoke-Check "backup_default_move_never_corrupts_destination_under_concurrent_creation" {
+        # Independent audit follow-up V3 (PR #365, Work comment
+        # 6397370183, point 1): best-effort concurrency probe against
+        # the REAL Backup-EnvSecrets function (not just the Move-Item
+        # primitive in isolation). A background job races to create
+        # BackupPath the instant it sees this function's own exclusive
+        # temp file appear -- i.e. as close to the final Move-Item as
+        # this harness can get from outside the function -- over
+        # several attempts. Who wins a given attempt is inherently
+        # nondeterministic, so this does not assert a specific winner;
+        # it asserts the safety property that must hold regardless:
+        # the destination is never left truncated, partial, or
+        # garbled, only ever the racer's untouched sentinel content or
+        # this tool's own valid, fully-written ciphertext.
+        $raceDir = Join-Path $TestRoot "race_dir"
+        New-Item -ItemType Directory -Path $raceDir -Force | Out-Null
+        $allClean = $true
+        for ($i = 0; $i -lt 6; $i++) {
+            $slot = Join-Path $raceDir ("race_slot_" + $i + ".backup")
+            $sentinel = "RACER_SENTINEL_$i"
+            $job = Start-Job -ScriptBlock {
+                param($dir, $path, $content)
+                $deadline = (Get-Date).AddSeconds(3)
+                while ((Get-Date) -lt $deadline) {
+                    $tempFound = Get-ChildItem -LiteralPath $dir -Filter ".envsecrets-*" -Force -ErrorAction SilentlyContinue
+                    if ($tempFound) {
+                        Set-Content -LiteralPath $path -Value $content -Encoding utf8 -NoNewline -ErrorAction SilentlyContinue
+                        break
+                    }
+                }
+            } -ArgumentList $raceDir, $slot, $sentinel
+            try {
+                Backup-EnvSecrets -SourcePath $Source -BackupPath $slot
+            } catch {
+                # Expected outcome when the racer creates $slot first.
+            }
+            Wait-Job $job -Timeout 5 | Out-Null
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $slot -PathType Leaf) {
+                $content = Get-Content -LiteralPath $slot -Raw
+                $isSentinel = $content -eq $sentinel
+                $isValidBackup = $false
+                if (-not $isSentinel) {
+                    try {
+                        $secure = ConvertTo-SecureString -String $content -ErrorAction Stop
+                        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+                        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+                        $isValidBackup = $true
+                    } catch {
+                        $isValidBackup = $false
+                    }
+                }
+                if (-not ($isSentinel -or $isValidBackup)) {
+                    $allClean = $false
+                }
+            }
+        }
+        $allClean
+    }
+
     if (Test-Path -LiteralPath $VerifyGeminiScript -PathType Leaf) {
-        Invoke-Check "verify_gemini_env_key_leaves_unrelated_file_at_old_fixed_temp_script_path_untouched" {
-            # Codex (PR #365 comment 4370214392): this check plants its
-            # sentinel directly in the real checkout (the old fixed
-            # path verify_gemini_env_key_windows.ps1 used to use), not
-            # under $TestRoot. An earlier version unconditionally
-            # Set-Content'd and later deleted that fixed path -- which,
-            # if the operator's real checkout already had an unrelated
-            # file there, would reproduce exactly the fixed-name
-            # overwrite/delete bug this whole PR exists to prevent. The
-            # sentinel is now created exclusively (FileMode.CreateNew):
-            # if that path already exists for any reason, this check is
-            # skipped rather than touching it, and cleanup only ever
-            # removes the file this run itself just created.
-            $oldFixedTemp = Join-Path $RepoRoot "_verify_gemini_env_key_tmp.py"
-            $sentinelFs = $null
-            try {
-                $sentinelFs = [System.IO.File]::Open($oldFixedTemp, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
-            } catch [System.IO.IOException] {
-                Write-Host "SKIP  verify_gemini_env_key_leaves_unrelated_file_at_old_fixed_temp_script_path_untouched -- $oldFixedTemp already exists in the real checkout; not touching it"
-                return $true
+        $dummyRepoSrc = Join-Path $RepoRoot "src"
+        $dummyRepoVenv = Join-Path $RepoRoot ".venv"
+        if ((Test-Path -LiteralPath $dummyRepoSrc -PathType Container) -and (Test-Path -LiteralPath $dummyRepoVenv -PathType Container)) {
+            Invoke-Check "verify_gemini_env_key_isolated_dummy_repo_leaves_unrelated_file_untouched" {
+                # Independent audit follow-up V3 (PR #365, Work comment
+                # 6397370183, point 4): an earlier revision ran
+                # verify_gemini_env_key_windows.ps1 against the REAL
+                # repository checkout, which requires a real .env there
+                # and reads it through the real settings loader --
+                # contradicting this harness's own "never touches a
+                # real secret" claim and making the outcome depend on
+                # whatever .env happens to already exist on the machine
+                # running it. This isolates the same check into a
+                # disposable dummy repo under $TestRoot: its own
+                # placeholder .env this harness fully owns, with src/
+                # and .venv LINKED (junctioned, not copied) from the
+                # real checkout via $env:IBKR_REPO_DIR, so the genuine
+                # production settings-loader code still runs end to
+                # end, just against a .env this harness created and
+                # disposes of, never the repository's real one.
+                # load_ai_settings() checks
+                # Path.cwd()/".env" BEFORE the project-root fallback
+                # (src/ai_asset_platform/ai/settings.py), so the dummy
+                # .env is found first and the real one is never reached.
+                $dummyRepo = Join-Path $TestRoot "dummy_gemini_repo"
+                New-Item -ItemType Directory -Path $dummyRepo -Force | Out-Null
+                New-VerifiedJunction -Junction (Join-Path $dummyRepo "src") -Target $dummyRepoSrc
+                New-VerifiedJunction -Junction (Join-Path $dummyRepo ".venv") -Target $dummyRepoVenv
+                "GEMINI_API_KEY=dummy-harness-placeholder`nGEMINI_MODEL=gemini-dummy-harness-model" |
+                    Set-Content -LiteralPath (Join-Path $dummyRepo ".env") -Encoding utf8 -NoNewline
+                $oldFixedTemp = Join-Path $dummyRepo "_verify_gemini_env_key_tmp.py"
+                "UNRELATED_PY_CONTENT" | Set-Content -LiteralPath $oldFixedTemp -Encoding utf8 -NoNewline
+                $before = (Get-FileHash -LiteralPath $oldFixedTemp -Algorithm SHA256).Hash
+                $env:IBKR_REPO_DIR = $dummyRepo
+                try {
+                    & $VerifyGeminiScript 2>&1 | Out-Null
+                } finally {
+                    Remove-Item Env:\IBKR_REPO_DIR -ErrorAction SilentlyContinue
+                }
+                $after = (Get-FileHash -LiteralPath $oldFixedTemp -Algorithm SHA256).Hash
+                $before -eq $after
             }
-            $writer = New-Object System.IO.StreamWriter($sentinelFs, (New-Object System.Text.UTF8Encoding($false)))
-            $writer.Write("IMPORTANT_UNRELATED_PY_CONTENT")
-            $writer.Flush()
-            $writer.Dispose()
-            $before = (Get-FileHash -LiteralPath $oldFixedTemp -Algorithm SHA256).Hash
-            Push-Location $RepoRoot
-            try {
-                & $VerifyGeminiScript 2>&1 | Out-Null
-            } finally {
-                Pop-Location
+        } else {
+            Invoke-Check "verify_gemini_env_key_isolated_dummy_repo_leaves_unrelated_file_untouched" {
+                "SKIP"
             }
-            $after = (Get-FileHash -LiteralPath $oldFixedTemp -Algorithm SHA256).Hash
-            $survived = $before -eq $after
-            Remove-Item -LiteralPath $oldFixedTemp -Force -ErrorAction SilentlyContinue
-            $survived
         }
     }
 } finally {
@@ -243,17 +484,19 @@ try {
 
 Write-Host ""
 Write-Host "=== backup_restore_env_secrets_windows.ps1 verification harness ==="
-$failCount = 0
+Write-Host ("PowerShell version: {0}" -f $PSVersionTable.PSVersion.ToString())
+$passCount = @($results | Where-Object { $_.Status -eq "PASS" }).Count
+$failCount = @($results | Where-Object { $_.Status -eq "FAIL" }).Count
+$skipCount = @($results | Where-Object { $_.Status -eq "SKIP" }).Count
 foreach ($r in $results) {
-    if ($r.Pass) {
-        Write-Host ("PASS  " + $r.Name)
-    } else {
-        $failCount++
-        Write-Host ("FAIL  " + $r.Name + "  -- " + $r.Detail) -ForegroundColor Red
+    switch ($r.Status) {
+        "PASS" { Write-Host ("PASS  " + $r.Name) }
+        "SKIP" { Write-Host ("SKIP  " + $r.Name) }
+        "FAIL" { Write-Host ("FAIL  " + $r.Name + "  -- " + $r.Detail) -ForegroundColor Red }
     }
 }
 Write-Host ""
-Write-Host ("Total: {0} passed, {1} failed (of {2})" -f ($results.Count - $failCount), $failCount, $results.Count)
+Write-Host ("Total: {0} passed, {1} failed, {2} skipped (of {3})" -f $passCount, $failCount, $skipCount, $results.Count)
 
 if ($failCount -gt 0) {
     exit 1
