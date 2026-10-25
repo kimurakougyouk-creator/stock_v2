@@ -69,20 +69,48 @@ if (-not ("EnvSecretsVerifyHarness.MoveRaceHelper" -as [type])) {
     # that the rename is a single atomic filesystem operation (Win32
     # MoveFileEx without MOVEFILE_REPLACE_EXISTING), never a separate
     # check-then-act two .NET could let two callers interleave.
+    #
+    # Codex follow-up (PR #365 comment 4370910725, P2): Task.Run alone
+    # does not guarantee simultaneous start. On a cold/constrained
+    # thread pool, the first task can finish its whole Move before a
+    # second contender has even begun running, so every "loser" fails
+    # sequentially against an already-existing destination -- the
+    # assertions would still pass, but concurrent contention would
+    # never actually have happened. RunRace now raises the thread
+    # pool's minimum worker count to accommodate every contender
+    # without the pool's gradual ramp-up delay, then uses a
+    # CountdownEvent so every contender signals it has actually
+    # started and is blocked immediately before the move, and a
+    # ManualResetEventSlim that releases all of them in the same
+    # instant only once every one of them has reached that point --
+    # never fewer. AllContendersReady in the result reports whether
+    # that readiness handshake itself completed (it must, for the
+    # proof to mean anything); the PowerShell check below treats a
+    # readiness failure as a hard FAIL, not a silent pass.
     Add-Type -Namespace EnvSecretsVerifyHarness -Name MoveRaceHelper -MemberDefinition @'
 public class MoveRaceResult {
     public int SuccessCount;
     public bool DestExists;
     public string DestContent;
+    public bool AllContendersReady;
 }
 
 public static System.Object RunRace(string[] sources, string destination) {
+    int n = sources.Length;
+    int workerThreads, completionThreads;
+    System.Threading.ThreadPool.GetMinThreads(out workerThreads, out completionThreads);
+    System.Threading.ThreadPool.SetMinThreads(System.Math.Max(workerThreads, n + 4), completionThreads);
+
     int successCount = 0;
     object lockObj = new object();
-    System.Threading.Tasks.Task[] tasks = new System.Threading.Tasks.Task[sources.Length];
-    for (int i = 0; i < sources.Length; i++) {
+    System.Threading.CountdownEvent readyGate = new System.Threading.CountdownEvent(n);
+    System.Threading.ManualResetEventSlim startGate = new System.Threading.ManualResetEventSlim(false);
+    System.Threading.Tasks.Task[] tasks = new System.Threading.Tasks.Task[n];
+    for (int i = 0; i < n; i++) {
         string src = sources[i];
         tasks[i] = System.Threading.Tasks.Task.Run(() => {
+            readyGate.Signal();
+            startGate.Wait();
             try {
                 System.IO.File.Move(src, destination);
                 lock (lockObj) { successCount++; }
@@ -91,13 +119,17 @@ public static System.Object RunRace(string[] sources, string destination) {
             }
         });
     }
+    bool allReady = readyGate.Wait(System.TimeSpan.FromSeconds(10));
+    startGate.Set();
     System.Threading.Tasks.Task.WaitAll(tasks);
+
     var result = new MoveRaceResult();
     result.SuccessCount = successCount;
     result.DestExists = System.IO.File.Exists(destination);
     if (result.DestExists) {
         result.DestContent = System.IO.File.ReadAllText(destination);
     }
+    result.AllContendersReady = allReady;
     return result;
 }
 '@
@@ -544,6 +576,7 @@ try {
         $moveRaceAttempts = 30
         $allTrialsClean = $true
         $anyTrialHadExactlyOneWinner = $true
+        $allTrialsHadEveryContenderReady = $true
         for ($trial = 0; $trial -lt 5; $trial++) {
             if (Test-Path -LiteralPath $moveRaceDest) { Remove-Item -LiteralPath $moveRaceDest -Force }
             $sourcePaths = New-Object string[] $moveRaceAttempts
@@ -553,6 +586,7 @@ try {
                 $sourcePaths[$i] = $p
             }
             $raceResult = [EnvSecretsVerifyHarness.MoveRaceHelper]::RunRace($sourcePaths, $moveRaceDest)
+            if (-not $raceResult.AllContendersReady) { $allTrialsHadEveryContenderReady = $false }
             if ($raceResult.SuccessCount -ne 1) { $anyTrialHadExactlyOneWinner = $false }
             if ($raceResult.DestExists) {
                 $matchesOneCompleteAttempt = $false
@@ -567,7 +601,7 @@ try {
                 $allTrialsClean = $false
             }
         }
-        $allTrialsClean -and $anyTrialHadExactlyOneWinner
+        $allTrialsClean -and $anyTrialHadExactlyOneWinner -and $allTrialsHadEveryContenderReady
     }
 
     if (Test-Path -LiteralPath $VerifyGeminiScript -PathType Leaf) {

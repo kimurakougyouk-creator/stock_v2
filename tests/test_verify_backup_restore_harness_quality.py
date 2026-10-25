@@ -151,6 +151,35 @@ def test_atomic_move_race_fires_deterministically_via_in_process_dotnet_tasks():
     check_body = script[check_start:check_end]
     assert "RunRace" in check_body
     assert "SuccessCount -ne 1" in check_body
+    assert "AllContendersReady" in check_body
+
+
+def test_atomic_move_race_uses_a_readiness_gate_not_bare_task_run():
+    # Codex follow-up (PR #365 comment 4370910725, P2): Task.Run alone
+    # does not guarantee simultaneous start -- on a cold/constrained
+    # thread pool, the first task can finish its whole move before a
+    # second contender has even begun, so every "loser" fails
+    # sequentially against an already-existing destination without
+    # concurrent contention ever having happened, yet the assertions
+    # would still pass. The helper must raise the thread pool's
+    # minimum worker count, use a CountdownEvent so every contender
+    # confirms it has actually started before any of them proceeds,
+    # and a start gate that releases them all in the same instant only
+    # once every one has reached that point; a failed readiness
+    # handshake must be a hard FAIL, not silently ignored.
+    script = _text()
+    helper_start = script.index("public static System.Object RunRace")
+    helper_end = script.index("'@", helper_start)
+    helper_body = script[helper_start:helper_end]
+    assert "CountdownEvent" in helper_body
+    assert "ManualResetEventSlim" in helper_body
+    assert "SetMinThreads" in helper_body
+    assert "AllContendersReady" in helper_body
+    check_start = script.index('Invoke-Check "move_item_without_force_is_atomic_under_true_concurrent_contention"')
+    check_end = script.index("\n    }\n", check_start)
+    check_body = script[check_start:check_end]
+    assert "AllContendersReady" in check_body
+    assert "allTrialsHadEveryContenderReady" in check_body
 
 
 def test_results_counts_use_array_subexpression_to_avoid_single_item_unwrap():
