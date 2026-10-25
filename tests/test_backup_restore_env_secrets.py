@@ -45,7 +45,52 @@ def test_backup_restore_env_secrets_applies_owner_only_acl():
     assert "function Set-PrivateFileAcl" in script
     assert "FileSystemRights]::FullControl" in script
     assert "Set-PrivateFileAcl -Path $BackupPath" in script
-    assert "Set-PrivateFileAcl -Path $DestinationPath" in script
+    assert "Set-PrivateFileAcl -Path $temp" in script
+
+
+def test_restore_env_secrets_does_not_double_apply_acl_after_move():
+    # Reproduced directly: applying Set-PrivateFileAcl a second time on
+    # $DestinationPath after Move-Item (on top of the already-applied
+    # $temp ACL that Move-Item, a same-volume rename, carries over
+    # unchanged) throws PrivilegeNotHeldException: SeSecurityPrivilege on
+    # a plain non-elevated account. Only the single pre-write application
+    # on $temp is correct and safe.
+    script = _text()
+    restore_start = script.index("function Restore-EnvSecrets")
+    restore_body = script[restore_start:]
+    assert "Set-PrivateFileAcl -Path $DestinationPath" not in restore_body
+
+
+def test_backup_restore_env_secrets_resolves_paths_against_current_location():
+    # Codex P2 (PR #365 review comment 4369875882): .NET file APIs resolve
+    # a relative path against the PROCESS working directory, which can
+    # differ from PowerShell's own current location (Set-Location) --
+    # silently reading/writing the wrong file. Every caller-supplied path
+    # must be resolved to an absolute path (anchored at PowerShell's own
+    # current location) before any .NET file call.
+    script = _text()
+    assert "function Resolve-ToAbsolutePath" in script
+    assert "$SourcePath = Resolve-ToAbsolutePath -Path $SourcePath" in script
+    assert "$BackupPath = Resolve-ToAbsolutePath -Path $BackupPath" in script
+    assert "$DestinationPath = Resolve-ToAbsolutePath -Path $DestinationPath" in script
+    assert "(Get-Location).Path" in script
+
+
+def test_restore_env_secrets_applies_acl_before_writing_plaintext():
+    # Codex P2 (PR #365 review comment 4369875884): applying the
+    # owner-only ACL only AFTER writing decrypted bytes (or only after
+    # the move) leaves a window where the plaintext secret sits in a file
+    # with inherited, potentially broader permissions. The temp file must
+    # be created and ACL-restricted BEFORE any decrypted byte is written
+    # into it.
+    script = _text()
+    restore_start = script.index("function Restore-EnvSecrets")
+    restore_body = script[restore_start:]
+    create_at = restore_body.index('New-Item -ItemType File -Path $temp -Force')
+    acl_at = restore_body.index('Set-PrivateFileAcl -Path $temp')
+    write_at = restore_body.index('[System.IO.File]::WriteAllBytes($temp, $plainBytes)')
+    move_at = restore_body.index('Move-Item -LiteralPath $temp -Destination $DestinationPath -Force')
+    assert create_at < acl_at < write_at < move_at
 
 
 def test_backup_restore_env_secrets_is_not_wired_into_any_scheduled_task():

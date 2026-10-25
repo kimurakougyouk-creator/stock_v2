@@ -21,10 +21,33 @@ $ErrorActionPreference = "Stop"
 # install_ibkr_paper_signal_runner_autopilot_windows.ps1, whose owner-
 # only-FullControl pattern this script mirrors.
 
+function Resolve-ToAbsolutePath {
+    # [System.IO.File]/[System.IO.Path] .NET APIs resolve a relative path
+    # against the process's current directory, which can silently differ
+    # from PowerShell's own current location (Set-Location) depending on
+    # host/invocation. Resolving explicitly against (Get-Location).Path
+    # before any .NET file call removes that ambiguity for every path
+    # this script touches.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
+}
+
 function Set-PrivateFileAcl {
+    # Build the ACL object from Get-Acl (the file's own existing security
+    # descriptor) rather than a blank `New-Object FileSecurity`. A blank
+    # object does not know which ACL sections (owner/access/audit) are
+    # already present, and .NET can then attempt to also write the audit
+    # (SACL) section on Set-Acl, which throws
+    # PrivilegeNotHeldException: SeSecurityPrivilege for a normal,
+    # non-elevated account -- reproduced directly against a file created
+    # moments earlier by New-Item in this same script. Starting from
+    # Get-Acl avoids touching the audit section at all.
     param([Parameter(Mandatory = $true)][string]$Path)
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl = Get-Acl -LiteralPath $Path
     $acl.SetOwner($identity)
     $acl.SetAccessRuleProtection($true, $false)
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -47,6 +70,8 @@ function Backup-EnvSecrets {
         [Parameter(Mandatory = $true)][string]$SourcePath,
         [Parameter(Mandatory = $true)][string]$BackupPath
     )
+    $SourcePath = Resolve-ToAbsolutePath -Path $SourcePath
+    $BackupPath = Resolve-ToAbsolutePath -Path $BackupPath
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
         throw "BLOCKED: source file not found: $SourcePath"
     }
@@ -89,6 +114,8 @@ function Restore-EnvSecrets {
         [Parameter(Mandatory = $true)][string]$DestinationPath,
         [switch]$Force
     )
+    $BackupPath = Resolve-ToAbsolutePath -Path $BackupPath
+    $DestinationPath = Resolve-ToAbsolutePath -Path $DestinationPath
     if (-not (Test-Path -LiteralPath $BackupPath -PathType Leaf)) {
         throw "BLOCKED: backup file not found: $BackupPath"
     }
@@ -113,9 +140,20 @@ function Restore-EnvSecrets {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
     $temp = "$DestinationPath.tmp"
+    # Create the temp file and lock its ACL down to owner-only BEFORE any
+    # decrypted byte is written into it, so there is no window where the
+    # plaintext secret sits in a file with inherited (possibly broader)
+    # permissions. Move-Item within the same volume is a rename, which
+    # never changes a file's security descriptor, so the ACL already set
+    # on $temp carries over to $DestinationPath unchanged -- applying
+    # Set-PrivateFileAcl a second time on the same underlying file after
+    # the move is not just redundant, it was reproduced to throw
+    # PrivilegeNotHeldException: SeSecurityPrivilege on a plain
+    # (non-elevated) account when re-protecting an already-protected ACL.
+    New-Item -ItemType File -Path $temp -Force | Out-Null
+    Set-PrivateFileAcl -Path $temp
     [System.IO.File]::WriteAllBytes($temp, $plainBytes)
     Move-Item -LiteralPath $temp -Destination $DestinationPath -Force
-    Set-PrivateFileAcl -Path $DestinationPath
     Write-Host "Restored to: $DestinationPath (content not displayed)"
 }
 
