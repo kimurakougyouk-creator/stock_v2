@@ -86,11 +86,82 @@ def test_restore_env_secrets_applies_acl_before_writing_plaintext():
     script = _text()
     restore_start = script.index("function Restore-EnvSecrets")
     restore_body = script[restore_start:]
-    create_at = restore_body.index('New-Item -ItemType File -Path $temp -Force')
+    create_at = restore_body.index('$temp = New-ExclusiveTempFilePath -Directory $parent')
     acl_at = restore_body.index('Set-PrivateFileAcl -Path $temp')
     write_at = restore_body.index('[System.IO.File]::WriteAllBytes($temp, $plainBytes)')
     move_at = restore_body.index('Move-Item -LiteralPath $temp -Destination $DestinationPath -Force')
     assert create_at < acl_at < write_at < move_at
+
+
+def test_temp_files_are_allocated_exclusively_not_at_a_fixed_name():
+    # Work independent-audit finding (PR #365 comment 6394617380, P1): an
+    # earlier revision used a FIXED-NAME temp file ("$BackupPath.tmp" /
+    # "$DestinationPath.tmp") created with -Force, so an unrelated,
+    # important pre-existing file at that exact path would be silently
+    # truncated/replaced -- even when the real destination did not exist
+    # or was empty. Every temp file must now come from
+    # New-ExclusiveTempFilePath, which uses FileMode.CreateNew (fails
+    # instead of overwriting anything that already exists) under a fresh
+    # random name, and the old fixed-name pattern must not reappear.
+    script = _text()
+    assert "function New-ExclusiveTempFilePath" in script
+    assert "[System.IO.FileMode]::CreateNew" in script
+    code_lines = [
+        line for line in script.splitlines()
+        if not line.strip().startswith("#")
+    ]
+    code_only = "\n".join(code_lines)
+    assert '"$BackupPath.tmp"' not in code_only
+    assert '"$DestinationPath.tmp"' not in code_only
+    assert 'New-Item -ItemType File -Path $temp -Force' not in code_only
+    backup_start = script.index("function Backup-EnvSecrets")
+    backup_body = script[backup_start:script.index("function Restore-EnvSecrets")]
+    assert "$temp = New-ExclusiveTempFilePath -Directory $parent" in backup_body
+    restore_start = script.index("function Restore-EnvSecrets")
+    restore_body = script[restore_start:]
+    assert "$temp = New-ExclusiveTempFilePath -Directory $parent" in restore_body
+
+
+def test_backup_rejects_source_and_backup_path_collision():
+    # Work independent-audit finding (P1): without this check,
+    # Backup-EnvSecrets -SourcePath X -BackupPath X would read X, then
+    # Move-Item -Force the resulting ciphertext onto X itself, replacing
+    # the original plaintext .env with its own encrypted backup.
+    script = _text()
+    backup_start = script.index("function Backup-EnvSecrets")
+    backup_body = script[backup_start:script.index("function Restore-EnvSecrets")]
+    assert "Test-SamePath -PathA $SourcePath -PathB $BackupPath" in backup_body
+    assert "SourcePath and BackupPath must not be the same file" in backup_body
+
+
+def test_restore_rejects_backup_and_destination_path_collision():
+    script = _text()
+    restore_start = script.index("function Restore-EnvSecrets")
+    restore_body = script[restore_start:]
+    assert "Test-SamePath -PathA $BackupPath -PathB $DestinationPath" in restore_body
+    assert "BackupPath and DestinationPath must not be the same file" in restore_body
+
+
+def test_same_path_detection_also_covers_hardlink_and_reparse_point_aliases():
+    # Work independent-audit finding (P1): a path-string comparison alone
+    # misses a hardlink, or a symlink/junction, that makes two different-
+    # looking paths refer to the same underlying file.
+    # GetFileInformationByHandle's (VolumeSerialNumber, FileIndex) pair
+    # identifies the actual file regardless of which path or link was
+    # used to open it, and Assert-NotReparsePoint additionally refuses to
+    # operate on any path (or parent directory) that is itself a
+    # symlink/junction.
+    script = _text()
+    assert "function Get-FileIdentityKey" in script
+    assert "GetFileInformationByHandle" in script
+    assert "function Assert-NotReparsePoint" in script
+    assert "ReparsePoint" in script
+    for fn in ("Backup-EnvSecrets", "Restore-EnvSecrets"):
+        start = script.index(f"function {fn}")
+        end_markers = [m for m in ("function Backup-EnvSecrets", "function Restore-EnvSecrets", "if ($MyInvocation") if m != f"function {fn}"]
+        end = min(script.index(m, start + 1) for m in end_markers if script.find(m, start + 1) != -1)
+        body = script[start:end]
+        assert "Assert-NotReparsePoint" in body
 
 
 def test_set_private_file_acl_purges_existing_explicit_access_rules():

@@ -15,11 +15,136 @@ $ErrorActionPreference = "Stop"
 # writes to an explicit, caller-chosen destination path; it never
 # silently overwrites the live .env.
 #
+# Independent-audit follow-up (PR #365 comment 6394617380): an earlier
+# revision used a FIXED-NAME temp file ("$BackupPath.tmp" /
+# "$DestinationPath.tmp") created with -Force, and did not check whether
+# SourcePath/BackupPath (or BackupPath/DestinationPath) resolved to the
+# same underlying file. That meant: (a) calling Backup-EnvSecrets with
+# SourcePath equal to BackupPath could replace the original plaintext
+# .env with its own ciphertext via Move-Item -Force; (b) an unrelated,
+# important file that happened to already sit at the fixed temp path
+# was silently truncated/replaced, even when the real destination did
+# not exist or was empty; (c) a symlink/junction/hardlink alias was not
+# checked at all. This revision fixes all three: every temp file is
+# allocated with FileMode.CreateNew (fails instead of overwriting if
+# anything already exists at that name) under a fresh random suffix, so
+# it can never alias a pre-existing file; SourcePath/BackupPath and
+# BackupPath/DestinationPath are rejected outright when they name the
+# same file (by normalized path OR by on-disk file identity, which also
+# catches a hardlink or a symlink/junction pointing at the same target);
+# and every path this script touches (including parent directories) is
+# rejected if it is itself a reparse point, so a planted junction cannot
+# silently redirect a write elsewhere.
+#
 # This script is not wired into any Scheduled Task and does not run on
 # its own. Invoke it manually: for a precedent-aligned ACL-restricted
 # private backup file, see Set-PrivatePinFile in
 # install_ibkr_paper_signal_runner_autopilot_windows.ps1, whose owner-
 # only-FullControl pattern this script mirrors.
+
+if (-not ("EnvSecretsWin32.NativeMethods" -as [type])) {
+    Add-Type -Namespace EnvSecretsWin32 -Name NativeMethods -UsingNamespace Microsoft.Win32.SafeHandles -MemberDefinition @'
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct BY_HANDLE_FILE_INFORMATION
+{
+    public uint FileAttributes;
+    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+    public uint VolumeSerialNumber;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    public uint NumberOfLinks;
+    public uint FileIndexHigh;
+    public uint FileIndexLow;
+}
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetFileInformationByHandle(SafeFileHandle hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+'@
+}
+
+function Get-FileIdentityKey {
+    # Returns a string identifying the actual on-disk file (volume serial
+    # + file index), not just its path string. Two different path
+    # strings that are hardlinked to the same file, or a symlink/
+    # junction whose target is the other path, resolve to the SAME
+    # identity key here -- [System.IO.File]::Open follows reparse points
+    # through to their target by default, so this also catches a
+    # symlink-based alias without any extra code. Returns $null if the
+    # path does not exist or identity cannot be read (fails closed: the
+    # caller must not treat $null as "safe, definitely different").
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $info = New-Object EnvSecretsWin32.NativeMethods+BY_HANDLE_FILE_INFORMATION
+        $ok = [EnvSecretsWin32.NativeMethods]::GetFileInformationByHandle($fs.SafeFileHandle, [ref] $info)
+        if (-not $ok) { return $null }
+        return "{0}-{1}-{2}" -f $info.VolumeSerialNumber, $info.FileIndexHigh, $info.FileIndexLow
+    } catch {
+        return $null
+    } finally {
+        if ($fs) { $fs.Close() }
+    }
+}
+
+function Test-SamePath {
+    # True if PathA and PathB name the same underlying file: either the
+    # same normalized path string, or (when both exist) the same on-disk
+    # file identity, which also covers a hardlink or symlink/junction
+    # alias between two different-looking paths.
+    param(
+        [Parameter(Mandatory = $true)][string]$PathA,
+        [Parameter(Mandatory = $true)][string]$PathB
+    )
+    if ([string]::Equals($PathA, $PathB, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    $idA = Get-FileIdentityKey -Path $PathA
+    $idB = Get-FileIdentityKey -Path $PathB
+    if ($null -ne $idA -and $null -ne $idB -and $idA -eq $idB) {
+        return $true
+    }
+    return $false
+}
+
+function Assert-NotReparsePoint {
+    # Refuses to operate on a path that is itself a symlink/junction
+    # (including a parent directory used as a junction), so a planted
+    # reparse point cannot silently redirect a read or write to an
+    # unintended location. Only checks paths that currently exist --
+    # a destination that does not exist yet is not a reparse point.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "BLOCKED: refusing to operate through a reparse point (symlink/junction): $Path"
+    }
+}
+
+function New-ExclusiveTempFilePath {
+    # Allocates a brand-new, randomly-named file in $Directory using
+    # FileMode.CreateNew, which throws instead of succeeding if anything
+    # already exists at that path. This is the opposite of the earlier
+    # fixed-name "$X.tmp" + -Force pattern: the returned path is
+    # guaranteed, by construction, to have been empty and nonexistent
+    # the instant before this call created it, so nothing pre-existing
+    # can ever be silently overwritten through it.
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    for ($attempt = 0; $attempt -lt 25; $attempt++) {
+        $candidate = Join-Path $Directory (".envsecrets-" + [System.IO.Path]::GetRandomFileName())
+        try {
+            $fs = [System.IO.File]::Open($candidate, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+            $fs.Close()
+            return $candidate
+        } catch [System.IO.IOException] {
+            continue
+        }
+    }
+    throw "BLOCKED: could not allocate a unique temporary file in $Directory"
+}
 
 function Resolve-ToAbsolutePath {
     # [System.IO.File]/[System.IO.Path] .NET APIs resolve a relative path
@@ -33,6 +158,15 @@ function Resolve-ToAbsolutePath {
         return [System.IO.Path]::GetFullPath($Path)
     }
     return [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
+}
+
+function Get-ParentDirectoryPath {
+    param([Parameter(Mandatory = $true)][string]$AbsolutePath)
+    $parent = Split-Path -Parent $AbsolutePath
+    if (-not $parent) {
+        $parent = [System.IO.Path]::GetPathRoot($AbsolutePath)
+    }
+    return $parent
 }
 
 function Set-PrivateFileAcl {
@@ -86,6 +220,11 @@ function Backup-EnvSecrets {
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
         throw "BLOCKED: source file not found: $SourcePath"
     }
+    Assert-NotReparsePoint -Path $SourcePath
+    Assert-NotReparsePoint -Path $BackupPath
+    if (Test-SamePath -PathA $SourcePath -PathB $BackupPath) {
+        throw "BLOCKED: SourcePath and BackupPath must not be the same file: $SourcePath"
+    }
     $plainBytes = [System.IO.File]::ReadAllBytes($SourcePath)
     try {
         $plainBase64 = [Convert]::ToBase64String($plainBytes)
@@ -98,17 +237,22 @@ function Backup-EnvSecrets {
         # here because this script never persists plaintext to disk.
         $plainBase64 = $null
     }
-    $parent = Split-Path -Parent $BackupPath
-    if ($parent) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $parent = Get-ParentDirectoryPath -AbsolutePath $BackupPath
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    Assert-NotReparsePoint -Path $parent
+    $temp = New-ExclusiveTempFilePath -Directory $parent
+    try {
+        [System.IO.File]::WriteAllText(
+            $temp,
+            $cipherText,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Move-Item -LiteralPath $temp -Destination $BackupPath -Force
+    } finally {
+        if (Test-Path -LiteralPath $temp) {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        }
     }
-    $temp = "$BackupPath.tmp"
-    [System.IO.File]::WriteAllText(
-        $temp,
-        $cipherText,
-        (New-Object System.Text.UTF8Encoding($false))
-    )
-    Move-Item -LiteralPath $temp -Destination $BackupPath -Force
     Set-PrivateFileAcl -Path $BackupPath
     Write-Host "Backed up (DPAPI-encrypted, current user+machine only): $BackupPath"
 }
@@ -130,11 +274,16 @@ function Restore-EnvSecrets {
     if (-not (Test-Path -LiteralPath $BackupPath -PathType Leaf)) {
         throw "BLOCKED: backup file not found: $BackupPath"
     }
+    Assert-NotReparsePoint -Path $BackupPath
+    Assert-NotReparsePoint -Path $DestinationPath
     if ((Test-Path -LiteralPath $DestinationPath -PathType Leaf) -and -not $Force) {
         $existing = Get-Item -LiteralPath $DestinationPath
         if ($existing.Length -gt 0) {
             throw "BLOCKED: $DestinationPath already exists and is non-empty. Pass -Force to overwrite."
         }
+    }
+    if (Test-SamePath -PathA $BackupPath -PathB $DestinationPath) {
+        throw "BLOCKED: BackupPath and DestinationPath must not be the same file: $BackupPath"
     }
     $cipherText = Get-Content -LiteralPath $BackupPath -Raw
     $secure = ConvertTo-SecureString -String $cipherText
@@ -146,25 +295,32 @@ function Restore-EnvSecrets {
     }
     $plainBytes = [Convert]::FromBase64String($plainBase64)
     $plainBase64 = $null
-    $parent = Split-Path -Parent $DestinationPath
-    if ($parent) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-    $temp = "$DestinationPath.tmp"
-    # Create the temp file and lock its ACL down to owner-only BEFORE any
-    # decrypted byte is written into it, so there is no window where the
-    # plaintext secret sits in a file with inherited (possibly broader)
-    # permissions. Move-Item within the same volume is a rename, which
-    # never changes a file's security descriptor, so the ACL already set
-    # on $temp carries over to $DestinationPath unchanged -- applying
-    # Set-PrivateFileAcl a second time on the same underlying file after
-    # the move is not just redundant, it was reproduced to throw
+    $parent = Get-ParentDirectoryPath -AbsolutePath $DestinationPath
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    Assert-NotReparsePoint -Path $parent
+    # The temp file is allocated fresh by New-ExclusiveTempFilePath (see
+    # its own comment) instead of a fixed "$DestinationPath.tmp" name, so
+    # it can never alias an unrelated pre-existing file. Its ACL is
+    # locked down to owner-only BEFORE any decrypted byte is written
+    # into it, so there is no window where the plaintext secret sits in
+    # a file with inherited (possibly broader) permissions. Move-Item
+    # within the same volume is a rename, which never changes a file's
+    # security descriptor, so the ACL already set on $temp carries over
+    # to $DestinationPath unchanged -- applying Set-PrivateFileAcl a
+    # second time on the same underlying file after the move is not just
+    # redundant, it was reproduced to throw
     # PrivilegeNotHeldException: SeSecurityPrivilege on a plain
     # (non-elevated) account when re-protecting an already-protected ACL.
-    New-Item -ItemType File -Path $temp -Force | Out-Null
-    Set-PrivateFileAcl -Path $temp
-    [System.IO.File]::WriteAllBytes($temp, $plainBytes)
-    Move-Item -LiteralPath $temp -Destination $DestinationPath -Force
+    $temp = New-ExclusiveTempFilePath -Directory $parent
+    try {
+        Set-PrivateFileAcl -Path $temp
+        [System.IO.File]::WriteAllBytes($temp, $plainBytes)
+        Move-Item -LiteralPath $temp -Destination $DestinationPath -Force
+    } finally {
+        if (Test-Path -LiteralPath $temp) {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        }
+    }
     Write-Host "Restored to: $DestinationPath (content not displayed)"
 }
 

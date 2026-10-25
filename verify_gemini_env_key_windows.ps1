@@ -2,9 +2,11 @@
 # Run this after pasting the real GEMINI_API_KEY into .env with a text
 # editor (never into chat). It never prints the key itself -- only
 # whether settings loaded a non-empty key, and (if -LiveCheck is passed)
-# whether Gemini actually accepted it, which makes one real,
-# read-only API call to Google's Gemini endpoint (no trading action,
-# no broker involved).
+# whether Gemini actually accepted it. -LiveCheck makes one real network
+# call to Google's Gemini generateContent endpoint -- no trading action
+# and no broker involved, but it is a genuine external API call, not a
+# cost-free local check, and is never made unless -LiveCheck is passed
+# explicitly.
 param(
     [switch]$LiveCheck
 )
@@ -53,7 +55,30 @@ if "--live-check" in sys.argv and settings.gemini_api_key:
         print("live_check: FAILED -", type(exc).__name__, "-", str(exc)[:200])
 '@
 
-$tempScript = Join-Path $RepoDir "_verify_gemini_env_key_tmp.py"
+# Allocate the temp script with FileMode.CreateNew under a fresh random
+# name rather than a fixed name written with unconditional -Force /
+# WriteAllText. An earlier revision used a fixed name
+# ("_verify_gemini_env_key_tmp.py") and unconditionally overwrote, then
+# unconditionally deleted, whatever file already sat at that exact path
+# -- destroying any unrelated file someone happened to have there.
+# CreateNew throws instead of succeeding if anything already exists at
+# the chosen name, so this script can only ever write to, and later
+# delete, a file it is certain it just created itself.
+$tempScript = $null
+for ($attempt = 0; $attempt -lt 25; $attempt++) {
+    $candidate = Join-Path $RepoDir (".verify-gemini-" + [System.IO.Path]::GetRandomFileName() + ".py")
+    try {
+        $fs = [System.IO.File]::Open($candidate, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+        $fs.Close()
+        $tempScript = $candidate
+        break
+    } catch [System.IO.IOException] {
+        continue
+    }
+}
+if (-not $tempScript) {
+    throw "BLOCKED: could not allocate a unique temporary script file in $RepoDir"
+}
 [System.IO.File]::WriteAllText($tempScript, $script, (New-Object System.Text.UTF8Encoding($false)))
 try {
     Push-Location $RepoDir
