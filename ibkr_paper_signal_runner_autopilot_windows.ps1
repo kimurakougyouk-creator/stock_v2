@@ -256,6 +256,10 @@ function Remove-StalePycacheArtifacts {
         if (-not $isAllowed) {
             continue
         }
+        # Ignore every non-cache entry even when git marks it ignored.
+        $isBytecode = $normalized.EndsWith('.pyc') -or $normalized.EndsWith('.pyo')
+        $isCacheDir = ($normalized -match '(^|/)__pycache__$')
+        if (-not ($isBytecode -or $isCacheDir)) { continue }
         $full = Join-Path $RepoDir $normalized
         $item = Get-Item -LiteralPath $full -ErrorAction SilentlyContinue
         if (-not $item) {
@@ -267,7 +271,11 @@ function Remove-StalePycacheArtifacts {
         }
         try {
             if ($item.PSIsContainer) {
-                Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+                # Never recursively remove a cache directory containing any data.
+                if (-not $isCacheDir) { continue }
+                $children = @(Get-ChildItem -LiteralPath $full -Force -ErrorAction Stop)
+                if ($children.Count -ne 0) { continue }
+                Remove-Item -LiteralPath $full -Force -ErrorAction Stop
             } else {
                 Remove-Item -LiteralPath $full -Force -ErrorAction Stop
             }
