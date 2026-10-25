@@ -35,8 +35,15 @@ def test_backup_restore_env_secrets_never_echoes_plaintext():
 
 
 def test_restore_env_secrets_refuses_to_silently_overwrite_existing_destination():
+    # Codex-connector follow-up suggestion (comment 6395064684), adopted
+    # after independent review: protects even a zero-byte pre-existing
+    # destination, not just a non-empty one -- an operator's own
+    # placeholder file deserves the same protection.
     script = _text()
-    assert "already exists and is non-empty" in script
+    restore_start = script.index("function Restore-EnvSecrets")
+    restore_body = script[restore_start:]
+    assert "already exists" in restore_body
+    assert ".Length -gt 0" not in restore_body
     assert "[switch]$Force" in script
 
 
@@ -44,8 +51,52 @@ def test_backup_restore_env_secrets_applies_owner_only_acl():
     script = _text()
     assert "function Set-PrivateFileAcl" in script
     assert "FileSystemRights]::FullControl" in script
-    assert "Set-PrivateFileAcl -Path $BackupPath" in script
-    assert "Set-PrivateFileAcl -Path $temp" in script
+    backup_body = script[script.index("function Backup-EnvSecrets"):script.index("function Restore-EnvSecrets")]
+    restore_body = script[script.index("function Restore-EnvSecrets"):]
+    assert "Set-PrivateFileAcl -Path $temp" in backup_body
+    assert "Set-PrivateFileAcl -Path $temp" in restore_body
+
+
+def test_backup_env_secrets_applies_acl_before_writing_ciphertext():
+    # Codex-connector follow-up suggestion (comment 6395064684), adopted
+    # after independent review: Backup-EnvSecrets' temp file should be
+    # ACL-locked before the DPAPI ciphertext is written into it, the
+    # same ordering already used by Restore-EnvSecrets for the
+    # plaintext secret.
+    script = _text()
+    backup_start = script.index("function Backup-EnvSecrets")
+    backup_body = script[backup_start:script.index("function Restore-EnvSecrets")]
+    create_at = backup_body.index('$temp = New-ExclusiveTempFilePath -Directory $parent')
+    acl_at = backup_body.index('Set-PrivateFileAcl -Path $temp')
+    write_at = backup_body.index('[System.IO.File]::WriteAllText(')
+    move_at = backup_body.index('Move-Item -LiteralPath $temp -Destination $BackupPath -Force')
+    assert create_at < acl_at < write_at < move_at
+    # Backup-EnvSecrets' final move intentionally keeps -Force: taking a
+    # fresh backup is expected to refresh whatever backup already sits
+    # at BackupPath, unlike Restore-EnvSecrets' destination which may be
+    # a live .env.
+    assert backup_body.count('Move-Item -LiteralPath $temp -Destination $BackupPath -Force') == 1
+
+
+def test_restore_env_secrets_default_move_is_not_forced_toctou_guard():
+    # Codex-connector follow-up suggestion (comment 6395064684), adopted
+    # after independent review: the up-front existing-destination check
+    # only catches a collision that already existed at check time. A
+    # competing process could still create DestinationPath between that
+    # check and the final move. The default (non -Force) path must omit
+    # -Force on the final Move-Item too, so PowerShell itself refuses to
+    # overwrite a file that appeared in that window, instead of the
+    # script silently winning the race.
+    script = _text()
+    restore_start = script.index("function Restore-EnvSecrets")
+    restore_body = script[restore_start:]
+    assert "if ($Force) {" in restore_body
+    move_lines = [
+        line.strip() for line in restore_body.splitlines()
+        if "Move-Item -LiteralPath $temp -Destination $DestinationPath" in line
+    ]
+    assert "Move-Item -LiteralPath $temp -Destination $DestinationPath -Force" in move_lines
+    assert "Move-Item -LiteralPath $temp -Destination $DestinationPath" in move_lines
 
 
 def test_restore_env_secrets_does_not_double_apply_acl_after_move():

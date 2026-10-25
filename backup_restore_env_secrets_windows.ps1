@@ -254,8 +254,19 @@ function Backup-EnvSecrets {
     $parent = Get-ParentDirectoryPath -AbsolutePath $BackupPath
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     Assert-NotReparsePoint -Path $parent
+    # Lock the temp file's ACL to owner-only BEFORE writing the DPAPI
+    # ciphertext into it, mirroring Restore-EnvSecrets' own ordering.
+    # The ciphertext is bound to this user+machine and cannot be
+    # decrypted elsewhere, but it should still not sit -- even
+    # momentarily -- in a file with inherited, possibly broader, local
+    # read permissions. Move-Item within the same volume is a rename,
+    # so this ACL carries over to $BackupPath unchanged; re-applying it
+    # a second time afterward is unnecessary and was already shown
+    # (Restore-EnvSecrets' own history) to throw
+    # PrivilegeNotHeldException on an already-protected ACL.
     $temp = New-ExclusiveTempFilePath -Directory $parent
     try {
+        Set-PrivateFileAcl -Path $temp
         [System.IO.File]::WriteAllText(
             $temp,
             $cipherText,
@@ -267,7 +278,6 @@ function Backup-EnvSecrets {
             Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
         }
     }
-    Set-PrivateFileAcl -Path $BackupPath
     Write-Host "Backed up (DPAPI-encrypted, current user+machine only): $BackupPath"
 }
 
@@ -275,8 +285,9 @@ function Restore-EnvSecrets {
     <#
       Decrypts $BackupPath and writes the recovered plaintext to
       $DestinationPath. Never prints the decrypted content. Refuses to
-      overwrite an existing, non-empty $DestinationPath unless -Force is
-      passed, so this can never silently clobber a live .env.
+      overwrite an existing $DestinationPath -- including a zero-byte
+      one, which could be an operator's own placeholder -- unless
+      -Force is passed, so this can never silently clobber a live .env.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$BackupPath,
@@ -291,10 +302,7 @@ function Restore-EnvSecrets {
     Assert-NotReparsePoint -Path $BackupPath
     Assert-NotReparsePoint -Path $DestinationPath
     if ((Test-Path -LiteralPath $DestinationPath -PathType Leaf) -and -not $Force) {
-        $existing = Get-Item -LiteralPath $DestinationPath
-        if ($existing.Length -gt 0) {
-            throw "BLOCKED: $DestinationPath already exists and is non-empty. Pass -Force to overwrite."
-        }
+        throw "BLOCKED: $DestinationPath already exists. Pass -Force to overwrite."
     }
     if (Test-SamePath -PathA $BackupPath -PathB $DestinationPath) {
         throw "BLOCKED: BackupPath and DestinationPath must not be the same file: $BackupPath"
@@ -329,7 +337,18 @@ function Restore-EnvSecrets {
     try {
         Set-PrivateFileAcl -Path $temp
         [System.IO.File]::WriteAllBytes($temp, $plainBytes)
-        Move-Item -LiteralPath $temp -Destination $DestinationPath -Force
+        # Only pass -Force on this final move when the caller explicitly
+        # passed -Force. Otherwise, the existing-destination check above
+        # already rejected a DestinationPath that existed at that
+        # moment, but between that check and this move another process
+        # could still have created one (TOCTOU). Omitting -Force here
+        # makes Move-Item itself refuse to overwrite in that case,
+        # rather than silently winning the race.
+        if ($Force) {
+            Move-Item -LiteralPath $temp -Destination $DestinationPath -Force
+        } else {
+            Move-Item -LiteralPath $temp -Destination $DestinationPath
+        }
     } finally {
         if (Test-Path -LiteralPath $temp) {
             Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
