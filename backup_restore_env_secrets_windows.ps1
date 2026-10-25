@@ -48,8 +48,19 @@ function Set-PrivateFileAcl {
     param([Parameter(Mandatory = $true)][string]$Path)
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $acl = Get-Acl -LiteralPath $Path
-    $acl.SetOwner($identity)
     $acl.SetAccessRuleProtection($true, $false)
+    # SetAccessRuleProtection only drops INHERITED rules; it does nothing
+    # to explicit rules Get-Acl already carried over from the file's
+    # existing ACL. If a predictable temp-file path was pre-created (by a
+    # leftover prior run, or a hostile local principal) with its own
+    # explicit grant before this script touches it, that grant would
+    # otherwise survive AddAccessRule unchanged. Purge every existing
+    # explicit rule first so the only rule left is the one this function
+    # adds below, regardless of what the file's ACL looked like before.
+    foreach ($existingRule in @($acl.Access)) {
+        $acl.RemoveAccessRule($existingRule) | Out-Null
+    }
+    $acl.SetOwner($identity)
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
         $identity,
         [System.Security.AccessControl.FileSystemRights]::FullControl,

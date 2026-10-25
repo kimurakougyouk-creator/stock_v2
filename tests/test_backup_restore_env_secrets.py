@@ -93,6 +93,24 @@ def test_restore_env_secrets_applies_acl_before_writing_plaintext():
     assert create_at < acl_at < write_at < move_at
 
 
+def test_set_private_file_acl_purges_existing_explicit_access_rules():
+    # Codex P2 (PR #365 review comment 4369916153): SetAccessRuleProtection
+    # only drops INHERITED rules; it leaves any explicit rule Get-Acl
+    # already carried over from the file's existing ACL untouched, and
+    # AddAccessRule only adds -- it never removes. If a predictable temp
+    # file path was pre-created (leftover run, or a hostile local
+    # principal) with its own explicit grant, that grant would otherwise
+    # survive unchanged. Every existing rule must be purged before adding
+    # the single owner-only rule.
+    script = _text()
+    acl_start = script.index("function Set-PrivateFileAcl")
+    acl_body = script[acl_start:script.index("function Backup-EnvSecrets")]
+    purge_at = acl_body.index("RemoveAccessRule($existingRule)")
+    add_at = acl_body.index("$acl.AddAccessRule($rule)")
+    assert purge_at < add_at
+    assert "@($acl.Access)" in acl_body
+
+
 def test_backup_restore_env_secrets_is_not_wired_into_any_scheduled_task():
     # This is a manually-invoked recovery tool, not a new standing
     # automation layer: it must not appear in either autopilot script's
