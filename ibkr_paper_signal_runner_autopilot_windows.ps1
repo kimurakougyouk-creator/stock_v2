@@ -194,16 +194,91 @@ function Remove-StalePycacheArtifacts {
     # never tracked source, so deleting them cannot weaken the attestation;
     # it only removes the noise the attestation would otherwise (correctly)
     # fail closed on.
-    Get-ChildItem -LiteralPath $RepoDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    # -Include is silently ignored when combined with -LiteralPath in
-    # Windows PowerShell 5.1, which previously caused this to enumerate
-    # (and attempt to delete) every file AND directory under $RepoDir,
-    # including .venv/src/tests. -File plus an explicit extension check
-    # is immune to that bug.
-    Get-ChildItem -LiteralPath $RepoDir -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -eq ".pyc" -or $_.Extension -eq ".pyo" } |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+    #
+    # 2026-10-25 incident: the prior implementation scanned the ENTIRE
+    # repository root (Get-ChildItem -LiteralPath $RepoDir -Recurse ...),
+    # including .venv/.env/results, relying only on a PowerShell filter
+    # (-Include, then -File + an extension check after PR #364) to narrow
+    # what Remove-Item actually received. The -Include form had a Windows
+    # PowerShell 5.1 bug (silently ignored when combined with -LiteralPath)
+    # that made it enumerate, and then delete, every file and directory
+    # under $RepoDir -- deleting .env and most of .venv for real on this
+    # machine. PR #364's -File fix closed that specific enumeration bug,
+    # but the design still handed a repo-root-rooted recursive scan to
+    # Remove-Item, so a different future filter mistake could reopen the
+    # same class of damage. This version never passes $RepoDir itself to
+    # anything recursive: it asks git -- not a PowerShell path filter --
+    # which untracked files are ignored-and-present under the exact same
+    # fixed, narrow path set the Windows source-SHA attestation itself
+    # audits (src/, tests/, and the repository's own top-level files), and
+    # deletes only those, one named path at a time, re-checked against the
+    # same allowlist before every deletion, mirroring the explicit-
+    # allowlist pattern already used by live_pilot_operational_once.ps1's
+    # own pycache purge. .venv, .env, and results/ are never named in this
+    # pathspec, so they cannot appear in its output regardless of any
+    # filter bug, present or future.
+    # --directory makes git report an ignored __pycache__ directory as a
+    # single collapsed entry (e.g. "src/__pycache__/") instead of expanding
+    # its individual files. This matters because once this function (or a
+    # prior run of it) has already deleted the *files* inside such a
+    # directory, the directory itself becomes empty -- and git never
+    # tracks or reports empty directories at all, ignored or not, so a
+    # files-only query would silently stop seeing it forever. --directory
+    # closes that gap by letting git name the directory itself.
+    $cacheCandidates = & git -C $RepoDir ls-files --others --ignored --exclude-standard --directory -- `
+        src `
+        tests `
+        ":(top,glob)__pycache__" `
+        ":(top,glob)*.pyc" `
+        ":(top,glob)*.pyo" `
+        2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return
+    }
+    foreach ($relativePath in $cacheCandidates) {
+        if (-not $relativePath) { continue }
+        $normalized = ($relativePath -replace '\\', '/').TrimEnd('/')
+        # Defense in depth: re-verify every path against the same fixed
+        # allowlist implied by the git pathspec above, regardless of what
+        # git actually returned, before this function ever touches disk.
+        $isAllowed = (
+            $normalized -like "src/*" -or
+            $normalized -like "tests/*" -or
+            $normalized -eq "__pycache__" -or
+            $normalized -like "__pycache__/*" -or
+            (
+                $normalized -notmatch '/' -and (
+                    $normalized.EndsWith(".pyc") -or
+                    $normalized.EndsWith(".pyo")
+                )
+            )
+        )
+        if (-not $isAllowed) {
+            continue
+        }
+        $full = Join-Path $RepoDir $normalized
+        $item = Get-Item -LiteralPath $full -ErrorAction SilentlyContinue
+        if (-not $item) {
+            continue
+        }
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            # Never follow or delete through a reparse point/symlink.
+            continue
+        }
+        try {
+            if ($item.PSIsContainer) {
+                Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+            } else {
+                Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+            }
+        } catch {
+            # Fail open on cleanup only: a stray cache file/dir that could
+            # not be removed just means the next attestation correctly
+            # fails closed on it, exactly as today -- never escalate a
+            # cleanup failure into a wider deletion attempt.
+            continue
+        }
+    }
 }
 
 $MarketSessionCheck = @"
