@@ -159,6 +159,23 @@ function New-ExclusiveTempFilePath {
     }
     throw "BLOCKED: could not allocate a unique temporary file in $Directory"
 }
+# Known, accepted residual limitation (Work independent audit, PR #365
+# comment 6395349716): this function closes its CreateNew handle and
+# returns a path string; every later step (Set-PrivateFileAcl,
+# WriteAllBytes/WriteAllText, Move-Item) reopens that path by name
+# rather than holding one handle for the whole operation. In a
+# directory writable by OTHER local principals, a narrow window exists
+# between each close and the next reopen in which that path could in
+# principle be deleted and replaced (e.g. with a symlink) by another
+# process on the same machine. This script's existing collision,
+# hardlink, and reparse-point checks close the "wrong file ends up
+# being read/written" class of attack; they do not make the
+# create-ACL-write-move sequence itself a single atomic operation, and
+# this script does not claim that it does. The documented usage
+# pattern -- $BackupPath/$DestinationPath under the operator's own user
+# profile (e.g. "$HOME\.config\ai-asset-platform\env.backup"), never a
+# directory shared with other local accounts -- is the actual mitigation
+# this script relies on, not code in this function.
 
 function Resolve-ToAbsolutePath {
     # [System.IO.File]/[System.IO.Path] .NET APIs resolve a relative path
