@@ -27,6 +27,30 @@ def test_backup_rejects_overwriting_an_unrelated_existing_file_without_force():
     assert "does not look like a previous backup" in backup_body
 
 
+def test_backup_revalidates_immediately_before_the_move_to_close_toctou_window():
+    # Work independent audit, PR #365 comment 6395349716 follow-up: the
+    # up-front Test-IsOwnPriorBackup check (at function entry, before
+    # SourcePath is even read) left a window -- everything from reading
+    # SourcePath through encrypting and writing the temp file -- during
+    # which a competing process could replace BackupPath with something
+    # else. The default (non -Force) path must re-validate immediately
+    # before the final move, and only pass -Force on that move when
+    # BackupPath still exists and still validates; otherwise the move
+    # itself must go through unforced, so a file that appeared in the
+    # last instant is rejected natively instead of silently replaced.
+    script = _text()
+    backup_start = script.index("function Backup-EnvSecrets")
+    backup_body = script[backup_start:script.index("function Restore-EnvSecrets")]
+    assert "if ($Force) {" in backup_body
+    assert backup_body.count("Test-IsOwnPriorBackup -Path $BackupPath") == 2
+    move_lines = [
+        line.strip() for line in backup_body.splitlines()
+        if "Move-Item -LiteralPath $temp -Destination $BackupPath" in line
+    ]
+    assert "Move-Item -LiteralPath $temp -Destination $BackupPath -Force" in move_lines
+    assert "Move-Item -LiteralPath $temp -Destination $BackupPath" in move_lines
+
+
 def test_is_own_prior_backup_never_logs_or_returns_the_decrypted_value():
     script = _text()
     fn_start = script.index("function Test-IsOwnPriorBackup")
@@ -99,13 +123,14 @@ def test_backup_env_secrets_applies_acl_before_writing_ciphertext():
     create_at = backup_body.index('$temp = New-ExclusiveTempFilePath -Directory $parent')
     acl_at = backup_body.index('Set-PrivateFileAcl -Path $temp')
     write_at = backup_body.index('[System.IO.File]::WriteAllText(')
-    move_at = backup_body.index('Move-Item -LiteralPath $temp -Destination $BackupPath -Force')
+    move_at = backup_body.index('if ($Force) {')
     assert create_at < acl_at < write_at < move_at
-    # Backup-EnvSecrets' final move intentionally keeps -Force: taking a
-    # fresh backup is expected to refresh whatever backup already sits
-    # at BackupPath, unlike Restore-EnvSecrets' destination which may be
-    # a live .env.
-    assert backup_body.count('Move-Item -LiteralPath $temp -Destination $BackupPath -Force') == 1
+    # Backup-EnvSecrets' move is allowed to replace an existing
+    # BackupPath (taking a fresh backup is expected to refresh whatever
+    # backup already sits there, unlike Restore-EnvSecrets' destination
+    # which may be a live .env) -- but only after re-validating it is
+    # still one of this tool's own prior backups immediately beforehand
+    # (see test_backup_revalidates_immediately_before_the_move_to_close_toctou_window).
 
 
 def test_restore_env_secrets_default_move_is_not_forced_toctou_guard():

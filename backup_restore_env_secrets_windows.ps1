@@ -331,7 +331,31 @@ function Backup-EnvSecrets {
             $cipherText,
             (New-Object System.Text.UTF8Encoding($false))
         )
-        Move-Item -LiteralPath $temp -Destination $BackupPath -Force
+        if ($Force) {
+            Move-Item -LiteralPath $temp -Destination $BackupPath -Force
+        } else {
+            # Work independent audit, PR #365 comment 6395349716
+            # follow-up: the earlier check (above, before SourcePath was
+            # even read) validated BackupPath once, but a competing
+            # process could in principle have replaced it with
+            # something else during the encrypt/temp-write work that
+            # happened in between. Re-validating immediately before
+            # this move shrinks that window to essentially this one
+            # call. If BackupPath exists here, it must still be one of
+            # this tool's own prior backups, or this aborts without
+            # touching it; if it does not exist, Move-Item itself (no
+            # -Force) natively rejects anything a competing process
+            # created in the last instant, instead of silently
+            # overwriting it.
+            if (Test-Path -LiteralPath $BackupPath -PathType Leaf) {
+                if (-not (Test-IsOwnPriorBackup -Path $BackupPath)) {
+                    throw "BLOCKED: $BackupPath changed to a file that is not one of this tool's own prior backups between the initial check and the write. Pass -Force to overwrite it anyway."
+                }
+                Move-Item -LiteralPath $temp -Destination $BackupPath -Force
+            } else {
+                Move-Item -LiteralPath $temp -Destination $BackupPath
+            }
+        }
     } finally {
         if (Test-Path -LiteralPath $temp) {
             Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue

@@ -178,6 +178,24 @@ try {
         (Get-Content -LiteralPath $unrelated -Raw) -ne "IMPORTANT_UNRELATED_USER_DATA_2"
     }
 
+    Invoke-Check "backup_rejects_a_real_backup_slot_swapped_for_an_unrelated_file_without_force" {
+        # Work independent audit, PR #365 comment 6395349716 follow-up:
+        # a validated real backup slot could, in principle, be replaced
+        # by a competing process with an unrelated file before the
+        # final move. Simulate that by swapping a real backup slot's
+        # content for an unrelated file, then confirming
+        # Backup-EnvSecrets still refuses to overwrite it without
+        # -Force (the up-front and pre-move re-validation both see the
+        # same swapped, non-own-backup content).
+        $slot2 = Join-Path $TestRoot "swap_test_slot.backup"
+        Backup-EnvSecrets -SourcePath $Source -BackupPath $slot2
+        "SWAPPED_BY_SOMEONE_ELSE" | Set-Content -LiteralPath $slot2 -Encoding utf8 -NoNewline -Force
+        $rejected = $false
+        try { Backup-EnvSecrets -SourcePath $Source -BackupPath $slot2 } catch { $rejected = $true }
+        $intact = (Get-Content -LiteralPath $slot2 -Raw) -eq "SWAPPED_BY_SOMEONE_ELSE"
+        $rejected -and $intact
+    }
+
     if (Test-Path -LiteralPath $VerifyGeminiScript -PathType Leaf) {
         Invoke-Check "verify_gemini_env_key_leaves_unrelated_file_at_old_fixed_temp_script_path_untouched" {
             # Codex (PR #365 comment 4370214392): this check plants its
