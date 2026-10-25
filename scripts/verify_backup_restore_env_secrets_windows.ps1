@@ -381,30 +381,63 @@ try {
         # the destination is never left truncated, partial, or
         # garbled, only ever the racer's untouched sentinel content or
         # this tool's own valid, fully-written ciphertext.
+        #
+        # Codex follow-up (PR #365 comment 4370837902): the previous
+        # revision started the background job and immediately called
+        # Backup-EnvSecrets with no handshake, so on a machine where
+        # Start-Job's own process-spawn latency exceeds how long the
+        # whole backup takes, the job could start polling only AFTER
+        # Backup-EnvSecrets had already finished -- never observing
+        # the temp file, never writing its sentinel, and every attempt
+        # would then "pass" without the race ever actually happening.
+        # This now (a) makes the main thread wait for the job to
+        # signal it is alive and about to enter its poll loop before
+        # calling Backup-EnvSecrets, narrowing that gap, and (b) has
+        # each job report back whether it actually wrote its sentinel;
+        # if not even one of the attempts genuinely raced, this
+        # reports SKIP rather than a PASS that proved nothing.
         $raceDir = Join-Path $TestRoot "race_dir"
         New-Item -ItemType Directory -Path $raceDir -Force | Out-Null
         $allClean = $true
-        for ($i = 0; $i -lt 6; $i++) {
+        $raceAttempts = 6
+        $participatedCount = 0
+        for ($i = 0; $i -lt $raceAttempts; $i++) {
             $slot = Join-Path $raceDir ("race_slot_" + $i + ".backup")
             $sentinel = "RACER_SENTINEL_$i"
+            $readyFlag = Join-Path $raceDir ("ready_" + $i + ".flag")
             $job = Start-Job -ScriptBlock {
-                param($dir, $path, $content)
+                param($dir, $path, $content, $readyFlag)
+                New-Item -ItemType File -Path $readyFlag -Force | Out-Null
                 $deadline = (Get-Date).AddSeconds(3)
                 while ((Get-Date) -lt $deadline) {
                     $tempFound = Get-ChildItem -LiteralPath $dir -Filter ".envsecrets-*" -Force -ErrorAction SilentlyContinue
                     if ($tempFound) {
                         Set-Content -LiteralPath $path -Value $content -Encoding utf8 -NoNewline -ErrorAction SilentlyContinue
-                        break
+                        return $true
                     }
                 }
-            } -ArgumentList $raceDir, $slot, $sentinel
+                return $false
+            } -ArgumentList $raceDir, $slot, $sentinel, $readyFlag
+            $readyDeadline = (Get-Date).AddSeconds(10)
+            while (-not (Test-Path -LiteralPath $readyFlag) -and (Get-Date) -lt $readyDeadline) {
+                Start-Sleep -Milliseconds 5
+            }
+            Remove-Item -LiteralPath $readyFlag -Force -ErrorAction SilentlyContinue
             try {
                 Backup-EnvSecrets -SourcePath $Source -BackupPath $slot
             } catch {
                 # Expected outcome when the racer creates $slot first.
             }
             Wait-Job $job -Timeout 5 | Out-Null
+            $racerWrote = $false
+            $jobOutput = Receive-Job $job -ErrorAction SilentlyContinue
+            if ($jobOutput -is [array]) {
+                if ($jobOutput[-1] -eq $true) { $racerWrote = $true }
+            } elseif ($jobOutput -eq $true) {
+                $racerWrote = $true
+            }
             Remove-Job $job -Force -ErrorAction SilentlyContinue
+            if ($racerWrote) { $participatedCount++ }
             if (Test-Path -LiteralPath $slot -PathType Leaf) {
                 $content = Get-Content -LiteralPath $slot -Raw
                 $isSentinel = $content -eq $sentinel
@@ -424,7 +457,14 @@ try {
                 }
             }
         }
-        $allClean
+        if (-not $allClean) {
+            $false
+        } elseif ($participatedCount -eq 0) {
+            Write-Host ("SKIP  backup_default_move_never_corrupts_destination_under_concurrent_creation -- the racer never observed the temp file in time across {0} attempts on this machine; the race was never actually exercised" -f $raceAttempts)
+            "SKIP"
+        } else {
+            $true
+        }
     }
 
     if (Test-Path -LiteralPath $VerifyGeminiScript -PathType Leaf) {

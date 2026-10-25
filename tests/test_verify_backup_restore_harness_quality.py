@@ -111,6 +111,29 @@ def test_backup_and_restore_failure_injection_checks_exercise_real_functions():
         assert "Remove-DenyWriteAcl" in check_body
 
 
+def test_race_check_tracks_whether_the_racer_actually_participated():
+    # Codex follow-up (PR #365 comment 4370837902): the previous
+    # revision started the background job and immediately called
+    # Backup-EnvSecrets with no handshake, so on a machine where job
+    # startup latency exceeded how long the whole backup took, the
+    # job could finish its deadline having never observed the temp
+    # file -- every attempt would then "pass" without the race ever
+    # actually happening. The job must report back whether it wrote
+    # its sentinel, and if not even one attempt genuinely raced, the
+    # check must report SKIP rather than a PASS that proved nothing.
+    script = _text()
+    check_start = script.index('Invoke-Check "backup_default_move_never_corrupts_destination_under_concurrent_creation"')
+    check_end = script.index("\n    }\n", check_start)
+    check_body = script[check_start:check_end]
+    assert "$readyFlag" in check_body
+    assert "return $true" in check_body
+    assert "return $false" in check_body
+    assert "Receive-Job" in check_body
+    assert "$participatedCount" in check_body
+    assert "$participatedCount -eq 0" in check_body
+    assert '"SKIP"' in check_body
+
+
 def test_results_counts_use_array_subexpression_to_avoid_single_item_unwrap():
     # PowerShell's Where-Object unwraps a single matching result to a
     # bare object instead of a one-element array, so `.Count` throws
