@@ -218,16 +218,53 @@ function Set-PrivateFileAcl {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Test-IsOwnPriorBackup {
+    # Work independent audit, PR #365 comment 6395349716 (P2): an
+    # earlier revision let Backup-EnvSecrets silently replace ANY
+    # pre-existing file at BackupPath via Move-Item -Force, with no
+    # check at all on what that file actually was. Convenience (always
+    # refreshing the backup slot without needing -Force) does not
+    # justify destroying a caller's unrelated file if BackupPath was
+    # mis-specified. This returns $true only when $Path's content is
+    # itself a DPAPI-protected SecureString blob this user+machine can
+    # decrypt -- i.e. a previous backup this same tool actually
+    # produced -- so a genuine backup slot can still be refreshed
+    # without -Force, while any other existing file cannot. The
+    # decrypted value is never inspected, logged, or returned; only
+    # whether decryption succeeded matters.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $existingCipherText = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($existingCipherText)) { return $false }
+        $secure = ConvertTo-SecureString -String $existingCipherText -ErrorAction Stop
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try {
+            [void][System.Runtime.InteropServices.Marshal]::PtrToStringUni($bstr)
+        } finally {
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Backup-EnvSecrets {
     <#
       Encrypts $SourcePath (default: .env) with DPAPI, bound to the
       current Windows user + machine, and writes the ciphertext to
       $BackupPath. Never writes or logs the plaintext anywhere except
-      reading $SourcePath itself into memory.
+      reading $SourcePath itself into memory. If BackupPath already
+      exists, it is only replaced without -Force when it is itself a
+      previous backup this same tool produced (verified by successfully
+      decrypting it); any other existing file at BackupPath requires
+      explicit -Force, so a mis-specified BackupPath can never silently
+      destroy an unrelated file.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$SourcePath,
-        [Parameter(Mandatory = $true)][string]$BackupPath
+        [Parameter(Mandatory = $true)][string]$BackupPath,
+        [switch]$Force
     )
     $SourcePath = Resolve-ToAbsolutePath -Path $SourcePath
     $BackupPath = Resolve-ToAbsolutePath -Path $BackupPath
@@ -238,6 +275,11 @@ function Backup-EnvSecrets {
     Assert-NotReparsePoint -Path $BackupPath
     if (Test-SamePath -PathA $SourcePath -PathB $BackupPath) {
         throw "BLOCKED: SourcePath and BackupPath must not be the same file: $SourcePath"
+    }
+    if ((Test-Path -LiteralPath $BackupPath -PathType Leaf) -and -not $Force) {
+        if (-not (Test-IsOwnPriorBackup -Path $BackupPath)) {
+            throw "BLOCKED: $BackupPath already exists and does not look like a previous backup created by this tool under the current user/machine (it may be an unrelated file). Pass -Force to overwrite it anyway."
+        }
     }
     $plainBytes = [System.IO.File]::ReadAllBytes($SourcePath)
     try {

@@ -9,6 +9,36 @@ def _text() -> str:
     return SCRIPT.read_text(encoding="utf-8")
 
 
+def test_backup_rejects_overwriting_an_unrelated_existing_file_without_force():
+    # Work independent audit, PR #365 comment 6395349716 (P2): an
+    # earlier revision let Backup-EnvSecrets silently replace ANY
+    # pre-existing file at BackupPath via Move-Item -Force -- no check
+    # at all on what that file actually was. A mis-specified BackupPath
+    # could destroy an unrelated important file. Backup-EnvSecrets must
+    # now validate that an existing BackupPath is itself a previous
+    # backup this tool produced (via Test-IsOwnPriorBackup) before
+    # refreshing it without -Force; anything else requires -Force.
+    script = _text()
+    assert "function Test-IsOwnPriorBackup" in script
+    backup_start = script.index("function Backup-EnvSecrets")
+    backup_body = script[backup_start:script.index("function Restore-EnvSecrets")]
+    assert "[switch]$Force" in backup_body
+    assert "Test-IsOwnPriorBackup -Path $BackupPath" in backup_body
+    assert "does not look like a previous backup" in backup_body
+
+
+def test_is_own_prior_backup_never_logs_or_returns_the_decrypted_value():
+    script = _text()
+    fn_start = script.index("function Test-IsOwnPriorBackup")
+    fn_body = script[fn_start:script.index("function Backup-EnvSecrets")]
+    assert "ConvertTo-SecureString -String $existingCipherText" in fn_body
+    for line in fn_body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Write-Host") or stripped.startswith("return "):
+            assert "PtrToStringUni" not in stripped
+            assert "bstr" not in stripped.lower() or "void" in stripped.lower()
+
+
 def test_backup_restore_env_secrets_uses_dpapi_not_a_hardcoded_key():
     # Recurrence-prevention follow-up to the 2026-10-25 .env loss incident:
     # the repo had no backup for .env at all. This script must encrypt with
