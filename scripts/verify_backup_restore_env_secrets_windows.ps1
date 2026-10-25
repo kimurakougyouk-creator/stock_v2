@@ -180,8 +180,30 @@ try {
 
     if (Test-Path -LiteralPath $VerifyGeminiScript -PathType Leaf) {
         Invoke-Check "verify_gemini_env_key_leaves_unrelated_file_at_old_fixed_temp_script_path_untouched" {
+            # Codex (PR #365 comment 4370214392): this check plants its
+            # sentinel directly in the real checkout (the old fixed
+            # path verify_gemini_env_key_windows.ps1 used to use), not
+            # under $TestRoot. An earlier version unconditionally
+            # Set-Content'd and later deleted that fixed path -- which,
+            # if the operator's real checkout already had an unrelated
+            # file there, would reproduce exactly the fixed-name
+            # overwrite/delete bug this whole PR exists to prevent. The
+            # sentinel is now created exclusively (FileMode.CreateNew):
+            # if that path already exists for any reason, this check is
+            # skipped rather than touching it, and cleanup only ever
+            # removes the file this run itself just created.
             $oldFixedTemp = Join-Path $RepoRoot "_verify_gemini_env_key_tmp.py"
-            "IMPORTANT_UNRELATED_PY_CONTENT" | Set-Content -LiteralPath $oldFixedTemp -Encoding utf8 -NoNewline
+            $sentinelFs = $null
+            try {
+                $sentinelFs = [System.IO.File]::Open($oldFixedTemp, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+            } catch [System.IO.IOException] {
+                Write-Host "SKIP  verify_gemini_env_key_leaves_unrelated_file_at_old_fixed_temp_script_path_untouched -- $oldFixedTemp already exists in the real checkout; not touching it"
+                return $true
+            }
+            $writer = New-Object System.IO.StreamWriter($sentinelFs, (New-Object System.Text.UTF8Encoding($false)))
+            $writer.Write("IMPORTANT_UNRELATED_PY_CONTENT")
+            $writer.Flush()
+            $writer.Dispose()
             $before = (Get-FileHash -LiteralPath $oldFixedTemp -Algorithm SHA256).Hash
             Push-Location $RepoRoot
             try {
