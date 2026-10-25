@@ -111,16 +111,30 @@ function Test-SamePath {
 }
 
 function Assert-NotReparsePoint {
-    # Refuses to operate on a path that is itself a symlink/junction
-    # (including a parent directory used as a junction), so a planted
-    # reparse point cannot silently redirect a read or write to an
-    # unintended location. Only checks paths that currently exist --
-    # a destination that does not exist yet is not a reparse point.
+    # Refuses to operate through a path, OR ANY OF ITS EXISTING ANCESTOR
+    # DIRECTORIES up to the filesystem root, that is a symlink/junction.
+    # Codex (PR #365 comment 4370003131): checking only the leaf and its
+    # immediate parent misses a junction higher up the chain -- e.g.
+    # C:\alias is a junction and the real path is C:\alias\sub\file --
+    # the leaf's own attributes never reveal that ancestor junction, so
+    # a later Move-Item/Get-Content would still silently follow it to
+    # wherever the junction points. This walks every existing level from
+    # $Path itself up to the root, skipping any level that does not
+    # exist yet (a destination not yet created is not a reparse point),
+    # and still continues past it to check what, if anything, exists
+    # further up.
     param([Parameter(Mandatory = $true)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-        throw "BLOCKED: refusing to operate through a reparse point (symlink/junction): $Path"
+    $current = $Path
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "BLOCKED: refusing to operate through a reparse point (symlink/junction): $current"
+            }
+        }
+        $next = Split-Path -Parent $current
+        if (-not $next -or $next -eq $current) { break }
+        $current = $next
     }
 }
 

@@ -142,6 +142,24 @@ def test_restore_rejects_backup_and_destination_path_collision():
     assert "BackupPath and DestinationPath must not be the same file" in restore_body
 
 
+def test_assert_not_reparse_point_walks_the_full_ancestor_chain():
+    # Codex (PR #365 comment 4370003131): checking only the leaf and its
+    # immediate parent directory misses a junction higher up the chain
+    # (e.g. C:\alias is a junction and the real path is
+    # C:\alias\sub\file -- the leaf's own attributes never reveal that
+    # ancestor junction). The walk must continue past non-existent
+    # levels up to the filesystem root, not stop at the first missing
+    # or first-checked level.
+    script = _text()
+    acl_start = script.index("function Assert-NotReparsePoint")
+    body = script[acl_start:script.index("function New-ExclusiveTempFilePath")]
+    assert "while ($current)" in body
+    assert "Split-Path -Parent $current" in body
+    # Must not return/stop immediately just because the leaf itself does
+    # not exist yet -- it has to keep walking upward regardless.
+    assert "if (-not (Test-Path -LiteralPath $Path)) { return }" not in body
+
+
 def test_same_path_detection_also_covers_hardlink_and_reparse_point_aliases():
     # Work independent-audit finding (P1): a path-string comparison alone
     # misses a hardlink, or a symlink/junction, that makes two different-
