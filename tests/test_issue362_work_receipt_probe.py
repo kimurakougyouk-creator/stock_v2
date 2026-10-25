@@ -97,7 +97,10 @@ def test_run_is_read_only_by_default_even_with_no_existing_receipt(monkeypatch):
         raise AssertionError(f"unexpected api call: {method} {path}")
 
     monkeypatch.setattr(probe, "api", fake_api)
-    probe.run(post=False)
+    # Codex (discussion_r4372484911): call with no argument at all, so this
+    # test exercises the actual default rather than an explicit post=False
+    # that would still pass even if the default flipped to True.
+    probe.run()
     post_calls = [c for c in calls if c[0] == "POST"]
     assert post_calls == []
 
@@ -144,12 +147,50 @@ def test_run_propagates_communication_failure_without_posting(monkeypatch):
     assert all(c[0] != "POST" for c in calls)
 
 
-def test_run_revalidates_head_immediately_before_and_after_posting(monkeypatch):
+def test_run_rejects_before_posting_when_head_changes_before_pre_post_check(monkeypatch):
+    # Codex (discussion_r4372484918): changing HEAD only on the 3rd
+    # pulls/362 fetch (the post-post check) proves that check works, but
+    # does not establish that the PRE-post _check_head() call actually
+    # runs, and runs BEFORE the POST -- moving that call to right after
+    # the POST would still pass such a test. This moves the HEAD change
+    # to the 2nd fetch (the pre-post check) instead and asserts that no
+    # POST ever happens, which only holds if the pre-post check is both
+    # real and ordered before the write.
+    import issue362_work_receipt_probe as probe
+
+    calls = []
+    pr_head_calls = {"count": 0}
+
+    def fake_api(method, path, body=None):
+        calls.append((method, path, body))
+        if path == f"repos/{REPO}/pulls/362":
+            pr_head_calls["count"] += 1
+            # 1st fetch (top of run()) sees the original SHA; the HEAD
+            # "moves" starting from the 2nd fetch (the pre-post check).
+            sha = SHA if pr_head_calls["count"] < 2 else "c" * 40
+            return _pr_fixture(sha)
+        if path == f"repos/{REPO}/issues/comments/{SOURCE}":
+            return _audit_fixture(SHA)
+        if path.startswith(f"repos/{REPO}/issues/362/comments") and method == "GET":
+            return []
+        raise AssertionError(f"unexpected api call: {method} {path}")
+
+    monkeypatch.setattr(probe, "api", fake_api)
+    with pytest.raises(ValueError, match="changed"):
+        probe.run(post=True)
+    post_calls = [c for c in calls if c[0] == "POST"]
+    assert post_calls == []
+
+
+def test_run_rejects_after_posting_when_head_changes_before_readback_confirms(monkeypatch):
     # _check_head is called once right before the POST and once right
     # after the read-back confirms -- if the PR's HEAD moved in between
     # (a push landed mid-run), the second check must still catch it even
     # though the first one passed, rather than confirming a now-stale
-    # receipt as valid.
+    # receipt as valid. Exactly one POST must have already happened by
+    # the time this is detected (the write itself is not prevented, only
+    # the final confirmation), unlike the pre-post case above where the
+    # change is caught before any POST occurs at all.
     import issue362_work_receipt_probe as probe
 
     calls = []
