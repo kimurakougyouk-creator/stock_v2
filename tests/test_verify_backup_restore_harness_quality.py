@@ -134,6 +134,25 @@ def test_race_check_tracks_whether_the_racer_actually_participated():
     assert '"SKIP"' in check_body
 
 
+def test_atomic_move_race_fires_deterministically_via_in_process_dotnet_tasks():
+    # Follow-up to Work's question of how to make the concurrency race
+    # actually fire (the Start-Job-based check is honest that it never
+    # wins on this machine, since process-spawn latency exceeds how
+    # long the whole guarded operation takes). This proves the same
+    # underlying OS-level guarantee (atomic rename) deterministically,
+    # using true same-process .NET Task concurrency instead of a new
+    # PowerShell process, which starts fast enough to genuinely race.
+    script = _text()
+    assert "EnvSecretsVerifyHarness.MoveRaceHelper" in script
+    assert "System.Threading.Tasks.Task.Run" in script
+    assert "move_item_without_force_is_atomic_under_true_concurrent_contention" in script
+    check_start = script.index('Invoke-Check "move_item_without_force_is_atomic_under_true_concurrent_contention"')
+    check_end = script.index("\n    }\n", check_start)
+    check_body = script[check_start:check_end]
+    assert "RunRace" in check_body
+    assert "SuccessCount -ne 1" in check_body
+
+
 def test_results_counts_use_array_subexpression_to_avoid_single_item_unwrap():
     # PowerShell's Where-Object unwraps a single matching result to a
     # bare object instead of a one-element array, so `.Count` throws

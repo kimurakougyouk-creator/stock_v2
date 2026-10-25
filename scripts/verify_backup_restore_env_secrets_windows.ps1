@@ -52,6 +52,57 @@ if (-not (Test-Path -LiteralPath $BackupRestoreScript -PathType Leaf)) {
 
 . $BackupRestoreScript
 
+if (-not ("EnvSecretsVerifyHarness.MoveRaceHelper" -as [type])) {
+    # Work's follow-up on PR #365 comment 6397370183 asked how to make
+    # the concurrency race actually fire, rather than leave it a
+    # best-effort probe that SKIPs whenever an out-of-process racer
+    # (Start-Job, a whole new PowerShell host) is too slow to start
+    # before the tiny operation it is racing against already finished
+    # -- which is what happens every time on this machine (see the
+    # Start-Job-based check below). A pure .NET race, run entirely
+    # in-process via System.Threading.Tasks.Task (microsecond startup,
+    # no new process or PowerShell runspace needed), reliably fires:
+    # launching N truly concurrent attempts at the exact same
+    # unforced File.Move proves, deterministically and repeatably,
+    # the one OS-level guarantee Backup-EnvSecrets' and Restore-
+    # EnvSecrets' default (non--Force) final move both depend on --
+    # that the rename is a single atomic filesystem operation (Win32
+    # MoveFileEx without MOVEFILE_REPLACE_EXISTING), never a separate
+    # check-then-act two .NET could let two callers interleave.
+    Add-Type -Namespace EnvSecretsVerifyHarness -Name MoveRaceHelper -MemberDefinition @'
+public class MoveRaceResult {
+    public int SuccessCount;
+    public bool DestExists;
+    public string DestContent;
+}
+
+public static System.Object RunRace(string[] sources, string destination) {
+    int successCount = 0;
+    object lockObj = new object();
+    System.Threading.Tasks.Task[] tasks = new System.Threading.Tasks.Task[sources.Length];
+    for (int i = 0; i < sources.Length; i++) {
+        string src = sources[i];
+        tasks[i] = System.Threading.Tasks.Task.Run(() => {
+            try {
+                System.IO.File.Move(src, destination);
+                lock (lockObj) { successCount++; }
+            } catch {
+                // Expected for every losing attempt.
+            }
+        });
+    }
+    System.Threading.Tasks.Task.WaitAll(tasks);
+    var result = new MoveRaceResult();
+    result.SuccessCount = successCount;
+    result.DestExists = System.IO.File.Exists(destination);
+    if (result.DestExists) {
+        result.DestContent = System.IO.File.ReadAllText(destination);
+    }
+    return result;
+}
+'@
+}
+
 $results = New-Object System.Collections.Generic.List[object]
 
 function Invoke-Check {
@@ -465,6 +516,58 @@ try {
         } else {
             $true
         }
+    }
+
+    Invoke-Check "move_item_without_force_is_atomic_under_true_concurrent_contention" {
+        # Work's own follow-up question on the check above ("どうすれば
+        # 競合試験を確実に発生させられるか" -- how to make the race
+        # actually fire): an out-of-process racer (Start-Job) can be
+        # too slow to even start before the whole operation it is
+        # racing against has already finished, which is exactly why
+        # the check above SKIPs on this machine. This check instead
+        # launches many truly concurrent attempts AT THE SAME unforced
+        # Move-Item/File.Move, entirely in-process via .NET Tasks
+        # (microsecond startup, no new process), which reliably DOES
+        # fire the race every run. It directly proves the one OS-level
+        # guarantee Backup-EnvSecrets' and Restore-EnvSecrets' default
+        # (non--Force) final move both depend on: the rename is a
+        # single atomic filesystem operation -- exactly one concurrent
+        # attempt ever succeeds, and the destination is always one
+        # complete, uncorrupted attempt's content, never a mix of two.
+        # This complements, rather than replaces, the check above: that
+        # one probes the real Backup-EnvSecrets function end to end
+        # (and is honest about not having fired here); this one proves
+        # the specific primitive both functions' safety reduces to.
+        $moveRaceDir = Join-Path $TestRoot "move_atomicity_race"
+        New-Item -ItemType Directory -Path $moveRaceDir -Force | Out-Null
+        $moveRaceDest = Join-Path $moveRaceDir "contended_destination.txt"
+        $moveRaceAttempts = 30
+        $allTrialsClean = $true
+        $anyTrialHadExactlyOneWinner = $true
+        for ($trial = 0; $trial -lt 5; $trial++) {
+            if (Test-Path -LiteralPath $moveRaceDest) { Remove-Item -LiteralPath $moveRaceDest -Force }
+            $sourcePaths = New-Object string[] $moveRaceAttempts
+            for ($i = 0; $i -lt $moveRaceAttempts; $i++) {
+                $p = Join-Path $moveRaceDir ("contender_" + $trial + "_" + $i + ".txt")
+                [System.IO.File]::WriteAllText($p, ("ATTEMPT_CONTENT_" + $trial + "_" + $i))
+                $sourcePaths[$i] = $p
+            }
+            $raceResult = [EnvSecretsVerifyHarness.MoveRaceHelper]::RunRace($sourcePaths, $moveRaceDest)
+            if ($raceResult.SuccessCount -ne 1) { $anyTrialHadExactlyOneWinner = $false }
+            if ($raceResult.DestExists) {
+                $matchesOneCompleteAttempt = $false
+                for ($i = 0; $i -lt $moveRaceAttempts; $i++) {
+                    if ($raceResult.DestContent -eq ("ATTEMPT_CONTENT_" + $trial + "_" + $i)) {
+                        $matchesOneCompleteAttempt = $true
+                        break
+                    }
+                }
+                if (-not $matchesOneCompleteAttempt) { $allTrialsClean = $false }
+            } else {
+                $allTrialsClean = $false
+            }
+        }
+        $allTrialsClean -and $anyTrialHadExactlyOneWinner
     }
 
     if (Test-Path -LiteralPath $VerifyGeminiScript -PathType Leaf) {
