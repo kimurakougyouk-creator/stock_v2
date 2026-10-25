@@ -235,48 +235,28 @@ function Set-PrivateFileAcl {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
-function Test-IsOwnPriorBackup {
-    # Work independent audit, PR #365 comment 6395349716 (P2): an
-    # earlier revision let Backup-EnvSecrets silently replace ANY
-    # pre-existing file at BackupPath via Move-Item -Force, with no
-    # check at all on what that file actually was. Convenience (always
-    # refreshing the backup slot without needing -Force) does not
-    # justify destroying a caller's unrelated file if BackupPath was
-    # mis-specified. This returns $true only when $Path's content is
-    # itself a DPAPI-protected SecureString blob this user+machine can
-    # decrypt -- i.e. a previous backup this same tool actually
-    # produced -- so a genuine backup slot can still be refreshed
-    # without -Force, while any other existing file cannot. The
-    # decrypted value is never inspected, logged, or returned; only
-    # whether decryption succeeded matters.
-    param([Parameter(Mandatory = $true)][string]$Path)
-    try {
-        $existingCipherText = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
-        if ([string]::IsNullOrWhiteSpace($existingCipherText)) { return $false }
-        $secure = ConvertTo-SecureString -String $existingCipherText -ErrorAction Stop
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try {
-            [void][System.Runtime.InteropServices.Marshal]::PtrToStringUni($bstr)
-        } finally {
-            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-        }
-        return $true
-    } catch {
-        return $false
-    }
-}
-
 function Backup-EnvSecrets {
     <#
       Encrypts $SourcePath (default: .env) with DPAPI, bound to the
       current Windows user + machine, and writes the ciphertext to
       $BackupPath. Never writes or logs the plaintext anywhere except
-      reading $SourcePath itself into memory. If BackupPath already
-      exists, it is only replaced without -Force when it is itself a
-      previous backup this same tool produced (verified by successfully
-      decrypting it); any other existing file at BackupPath requires
-      explicit -Force, so a mis-specified BackupPath can never silently
-      destroy an unrelated file.
+      reading $SourcePath itself into memory. An existing BackupPath is
+      never overwritten unless the caller explicitly passes -Force --
+      there is no attempt to auto-detect whether it "looks like" a
+      previous backup. Work independent audit (PR #365 comment
+      6395349716, final round): an earlier revision tried to allow a
+      no--Force refresh when BackupPath already decrypted as a DPAPI
+      blob (Test-IsOwnPriorBackup), re-checked immediately before the
+      move to shrink the TOCTOU window. Both problems Work raised were
+      real: (1) any DPAPI SecureString blob for the current user+machine
+      decrypts successfully, not only one this tool produced, so the
+      check could not actually prove "this is my own prior backup"; and
+      (2) re-checking closer to the move narrows a check-then-act race
+      but does not remove it. Removing the heuristic entirely removes
+      both problems at once: BackupPath now follows exactly the same
+      rule Restore-EnvSecrets already uses for DestinationPath --
+      existing + no -Force is always rejected, full stop -- so there is
+      no conditional overwrite decision left to race on.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$SourcePath,
@@ -294,9 +274,7 @@ function Backup-EnvSecrets {
         throw "BLOCKED: SourcePath and BackupPath must not be the same file: $SourcePath"
     }
     if ((Test-Path -LiteralPath $BackupPath -PathType Leaf) -and -not $Force) {
-        if (-not (Test-IsOwnPriorBackup -Path $BackupPath)) {
-            throw "BLOCKED: $BackupPath already exists and does not look like a previous backup created by this tool under the current user/machine (it may be an unrelated file). Pass -Force to overwrite it anyway."
-        }
+        throw "BLOCKED: $BackupPath already exists. Pass -Force to overwrite."
     }
     $plainBytes = [System.IO.File]::ReadAllBytes($SourcePath)
     try {
@@ -331,30 +309,18 @@ function Backup-EnvSecrets {
             $cipherText,
             (New-Object System.Text.UTF8Encoding($false))
         )
+        # Only pass -Force on this final move when the caller explicitly
+        # passed -Force (same TOCTOU guard Restore-EnvSecrets already
+        # uses for DestinationPath). The up-front check above already
+        # rejected an existing BackupPath at that moment, but a
+        # competing process could still have created one between that
+        # check and this move; omitting -Force here makes Move-Item
+        # itself refuse to overwrite in that case, rather than silently
+        # winning the race.
         if ($Force) {
             Move-Item -LiteralPath $temp -Destination $BackupPath -Force
         } else {
-            # Work independent audit, PR #365 comment 6395349716
-            # follow-up: the earlier check (above, before SourcePath was
-            # even read) validated BackupPath once, but a competing
-            # process could in principle have replaced it with
-            # something else during the encrypt/temp-write work that
-            # happened in between. Re-validating immediately before
-            # this move shrinks that window to essentially this one
-            # call. If BackupPath exists here, it must still be one of
-            # this tool's own prior backups, or this aborts without
-            # touching it; if it does not exist, Move-Item itself (no
-            # -Force) natively rejects anything a competing process
-            # created in the last instant, instead of silently
-            # overwriting it.
-            if (Test-Path -LiteralPath $BackupPath -PathType Leaf) {
-                if (-not (Test-IsOwnPriorBackup -Path $BackupPath)) {
-                    throw "BLOCKED: $BackupPath changed to a file that is not one of this tool's own prior backups between the initial check and the write. Pass -Force to overwrite it anyway."
-                }
-                Move-Item -LiteralPath $temp -Destination $BackupPath -Force
-            } else {
-                Move-Item -LiteralPath $temp -Destination $BackupPath
-            }
+            Move-Item -LiteralPath $temp -Destination $BackupPath
         }
     } finally {
         if (Test-Path -LiteralPath $temp) {

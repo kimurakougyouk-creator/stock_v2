@@ -163,11 +163,29 @@ try {
         $rejected -and $intact
     }
 
-    Invoke-Check "backup_refresh_of_a_real_backup_slot_succeeds_without_force" {
+    Invoke-Check "backup_rejects_refreshing_an_existing_backup_slot_without_force" {
+        # Work independent audit, PR #365 comment 6395349716, final
+        # round: an earlier revision let a real backup slot (one this
+        # tool itself had produced) be refreshed without -Force, based
+        # on a heuristic that decrypted successfully for ANY DPAPI blob
+        # under the current user+machine -- not proof the file was
+        # actually one of this tool's own prior backups. That heuristic
+        # is now removed entirely: refreshing ANY existing BackupPath,
+        # including one this tool produced moments earlier, requires
+        # explicit -Force, exactly like Restore-EnvSecrets already
+        # requires for DestinationPath.
         $slot = Join-Path $TestRoot "refresh_slot.backup"
         Backup-EnvSecrets -SourcePath $Source -BackupPath $slot
-        Start-Sleep -Milliseconds 50
+        $rejected = $false
+        try { Backup-EnvSecrets -SourcePath $Source -BackupPath $slot } catch { $rejected = $true }
+        $rejected -and (Test-Path -LiteralPath $slot)
+    }
+
+    Invoke-Check "backup_force_refreshes_an_existing_backup_slot" {
+        $slot = Join-Path $TestRoot "refresh_slot_force.backup"
         Backup-EnvSecrets -SourcePath $Source -BackupPath $slot
+        Start-Sleep -Milliseconds 50
+        Backup-EnvSecrets -SourcePath $Source -BackupPath $slot -Force
         Test-Path -LiteralPath $slot
     }
 
@@ -176,24 +194,6 @@ try {
         "IMPORTANT_UNRELATED_USER_DATA_2" | Set-Content -LiteralPath $unrelated -Encoding utf8 -NoNewline
         Backup-EnvSecrets -SourcePath $Source -BackupPath $unrelated -Force
         (Get-Content -LiteralPath $unrelated -Raw) -ne "IMPORTANT_UNRELATED_USER_DATA_2"
-    }
-
-    Invoke-Check "backup_rejects_a_real_backup_slot_swapped_for_an_unrelated_file_without_force" {
-        # Work independent audit, PR #365 comment 6395349716 follow-up:
-        # a validated real backup slot could, in principle, be replaced
-        # by a competing process with an unrelated file before the
-        # final move. Simulate that by swapping a real backup slot's
-        # content for an unrelated file, then confirming
-        # Backup-EnvSecrets still refuses to overwrite it without
-        # -Force (the up-front and pre-move re-validation both see the
-        # same swapped, non-own-backup content).
-        $slot2 = Join-Path $TestRoot "swap_test_slot.backup"
-        Backup-EnvSecrets -SourcePath $Source -BackupPath $slot2
-        "SWAPPED_BY_SOMEONE_ELSE" | Set-Content -LiteralPath $slot2 -Encoding utf8 -NoNewline -Force
-        $rejected = $false
-        try { Backup-EnvSecrets -SourcePath $Source -BackupPath $slot2 } catch { $rejected = $true }
-        $intact = (Get-Content -LiteralPath $slot2 -Raw) -eq "SWAPPED_BY_SOMEONE_ELSE"
-        $rejected -and $intact
     }
 
     if (Test-Path -LiteralPath $VerifyGeminiScript -PathType Leaf) {
