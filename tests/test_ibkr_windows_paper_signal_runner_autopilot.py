@@ -33,6 +33,40 @@ def test_pyc_cleanup_never_uses_literalpath_include_bug_pattern():
         assert "ReparsePoint" in script
 
 
+def test_pyc_cleanup_never_deletes_by_path_prefix_alone():
+    # Codex P1 (PR #365 review comment 4369141645): the git pathspec `--
+    # src tests ...` matches by directory PREFIX, so git can hand back any
+    # ignored-and-untracked path under src/ or tests/ -- not only cache
+    # files -- e.g. a stray secret, image, or backup directory that
+    # happens to be gitignored. Each candidate must be independently
+    # re-validated by its own name/suffix (literally ".pyc"/".pyo", or a
+    # directory literally named "__pycache__"), never accepted merely
+    # because it lives under the allowed src/tests prefix.
+    for script in (_text(AUTOPILOT), _text(INSTALLER)):
+        assert "$isBytecode" in script
+        assert "$isCacheDir" in script
+        assert "'(^|/)__pycache__$'" in script
+        assert "if (-not ($isBytecode -or $isCacheDir)) { continue }" in script
+
+
+def test_pyc_cleanup_only_recurse_deletes_a_pycache_dir_whose_entire_contents_are_bytecode():
+    # A __pycache__-named directory is only ever recursively removed after
+    # its full contents are independently verified to be nothing but
+    # .pyc/.pyo files with no reparse points anywhere inside -- so a file
+    # planted inside a real __pycache__ directory (e.g. a secret dropped
+    # there by mistake or by an adversary) blocks deletion of the whole
+    # directory, rather than being silently destroyed alongside real cache
+    # files. This also means the recursive Get-ChildItem/Remove-Item here
+    # never leaves the single, already-narrowed __pycache__ directory that
+    # was already matched by the git-restricted allowlist above.
+    for script in (_text(AUTOPILOT), _text(INSTALLER)):
+        assert "if (-not $isCacheDir) { continue }" in script
+        assert "$onlyCacheContents" in script
+        assert "Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction Stop" in script
+        assert '$descendant.Extension -ne ".pyc" -and $descendant.Extension -ne ".pyo"' in script
+        assert "Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop" in script
+
+
 def test_windows_autopilot_only_invokes_paper_trading_runner_and_market_session_check():
     script = _text(AUTOPILOT)
     assert "-m paper_trading_runner" in script

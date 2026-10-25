@@ -106,11 +106,38 @@ function Remove-StalePycacheArtifacts {
         }
         try {
             if ($item.PSIsContainer) {
-                # Never recursively remove a cache directory containing any data.
+                # Never recursively remove a cache directory unless every
+                # single thing anywhere inside it is an actual bytecode
+                # cache file (.pyc/.pyo) and nothing inside it is a reparse
+                # point. This directory was already independently confirmed
+                # above to be literally named "__pycache__" and to live
+                # under the git-restricted allowlist, so this recursive
+                # Get-ChildItem/Remove-Item never leaves that single,
+                # already-narrowed directory -- it cannot reintroduce the
+                # repo-root-rooted scan that caused the 2026-10-25 incident.
+                # A directory with any unexpected content (a secret, an
+                # image, a backup, a symlink) is left untouched instead,
+                # consistent with this project's fail-closed philosophy.
                 if (-not $isCacheDir) { continue }
-                $children = @(Get-ChildItem -LiteralPath $full -Force -ErrorAction Stop)
-                if ($children.Count -ne 0) { continue }
-                Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+                $onlyCacheContents = $true
+                $descendants = @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction Stop)
+                foreach ($descendant in $descendants) {
+                    if ($descendant.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                        $onlyCacheContents = $false
+                        break
+                    }
+                    if ($descendant.PSIsContainer) {
+                        continue
+                    }
+                    if ($descendant.Extension -ne ".pyc" -and $descendant.Extension -ne ".pyo") {
+                        $onlyCacheContents = $false
+                        break
+                    }
+                }
+                if (-not $onlyCacheContents) {
+                    continue
+                }
+                Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
             } else {
                 Remove-Item -LiteralPath $full -Force -ErrorAction Stop
             }
