@@ -144,6 +144,25 @@ function Add-AutopilotLog {
     $Lines | Add-Content -LiteralPath $LogFile -Encoding UTF8
 }
 
+# Work independent audit (PR #370, comment WORK_AUDIT_PR370_V1, 2026-10-27):
+# a logging failure at a safety-critical stop decision must never be able
+# to prevent that stop. Without this, an exception from Add-AutopilotLog at
+# a deadline-enforcement or termination-confirmation-failure site would
+# propagate to the outer per-cycle catch, which only logs a generic
+# "AUTOPILOT WARNING" and then sleeps and retries -- silently resuming a
+# new cycle exactly when the script had already decided it must not. Every
+# log call at a terminal/critical decision point uses this instead of
+# Add-AutopilotLog directly; logging best-effort only, never load-bearing
+# for whether the stop actually happens.
+function Add-AutopilotLogSafe {
+    param([Parameter(Mandatory = $true)][string[]]$Lines)
+    try {
+        Add-AutopilotLog -Lines $Lines
+    } catch {
+        # Deliberately swallowed: see function comment above.
+    }
+}
+
 function Get-ApprovalDeadlineUtc {
     $raw = (Get-Content -LiteralPath $DeadlineFile -Raw).Trim()
     try {
@@ -175,13 +194,13 @@ function Disable-AutopilotTaskWithEvidence {
         $stateAfter = "UNKNOWN(state query failed: $($_.Exception.Message))"
     }
     if ($disableError) {
-        Add-AutopilotLog -Lines @("AUTOPILOT CRITICAL: Disable-ScheduledTask threw an error: $disableError. Task state after attempt: $stateAfter. $Reason An operator must verify and disable the task manually.")
+        Add-AutopilotLogSafe -Lines @("AUTOPILOT CRITICAL: Disable-ScheduledTask threw an error: $disableError. Task state after attempt: $stateAfter. $Reason An operator must verify and disable the task manually.")
     } elseif ($stateAfter -ne "Disabled") {
-        Add-AutopilotLog -Lines @("AUTOPILOT CRITICAL: Disable-ScheduledTask did not throw, but the task state after the attempt is '$stateAfter', not Disabled. $Reason An operator must verify and disable the task manually.")
+        Add-AutopilotLogSafe -Lines @("AUTOPILOT CRITICAL: Disable-ScheduledTask did not throw, but the task state after the attempt is '$stateAfter', not Disabled. $Reason An operator must verify and disable the task manually.")
     } else {
-        Add-AutopilotLog -Lines @("AUTOPILOT: scheduled task disable confirmed (state=Disabled). $Reason")
+        Add-AutopilotLogSafe -Lines @("AUTOPILOT: scheduled task disable confirmed (state=Disabled). $Reason")
     }
-    Add-AutopilotLog -Lines @("AUTOPILOT PROCESS EXITING: PID $PID terminating now. $Reason")
+    Add-AutopilotLogSafe -Lines @("AUTOPILOT PROCESS EXITING: PID $PID terminating now. $Reason")
 }
 
 # Work independent audit (PR #369, same comment): the runner was previously
@@ -191,21 +210,66 @@ function Disable-AutopilotTaskWithEvidence {
 # only re-checked at the top of the NEXT loop iteration. This starts the
 # process asynchronously and polls it against the deadline, forcibly killing
 # it the moment the deadline passes while it is still running.
+#
+# Work's follow-up independent audit (PR #370, comment WORK_AUDIT_PR370_V1,
+# 2026-10-27) found the first version of this function discarded the
+# outcome of the kill attempt: Kill()/WaitForExit() exceptions were
+# swallowed, WaitForExit's own false (timed out, not confirmed exited) was
+# discarded, and the function unconditionally returned a single boolean
+# that the caller treated as "forcibly terminated, success" -- so a
+# process that failed to actually terminate within the wait window was
+# logged and treated identically to one that genuinely exited. This now
+# returns a structured result and never claims the process exited unless
+# $Process.HasExited is independently true after the kill-and-wait
+# sequence, regardless of whether Kill()/WaitForExit() themselves threw.
+# $Process is intentionally untyped (not [System.Diagnostics.Process]) so
+# a duck-typed test double can exercise the confirmed-exit and
+# cannot-confirm-exit branches deterministically on real PowerShell,
+# without racing a real OS process.
 function Wait-ProcessWithDeadline {
     param(
-        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)]$Process,
         [Parameter(Mandatory = $true)][datetime]$DeadlineUtc,
-        [int]$PollMilliseconds = 500
+        [int]$PollMilliseconds = 500,
+        [int]$KillConfirmWaitMilliseconds = 5000
     )
+    $capturedProcessId = $null
+    try { $capturedProcessId = $Process.Id } catch {}
+
     while (-not $Process.HasExited) {
         if ((Get-Date).ToUniversalTime() -ge $DeadlineUtc) {
-            try { $Process.Kill() } catch {}
-            try { $Process.WaitForExit(5000) | Out-Null } catch {}
-            return $true
+            $killError = $null
+            try {
+                $Process.Kill()
+            } catch {
+                $killError = $_.Exception.Message
+            }
+            $waitTimedOut = $false
+            try {
+                $exitedInTime = $Process.WaitForExit($KillConfirmWaitMilliseconds)
+                $waitTimedOut = -not [bool]$exitedInTime
+            } catch {
+                $waitTimedOut = $true
+            }
+            return [PSCustomObject]@{
+                DeadlineReached             = $true
+                ConfirmedExited             = [bool]$Process.HasExited
+                WaitTimedOut                = $waitTimedOut
+                KillError                   = $killError
+                ProcessId                   = $capturedProcessId
+                KillConfirmWaitMilliseconds = $KillConfirmWaitMilliseconds
+            }
         }
         Start-Sleep -Milliseconds $PollMilliseconds
     }
-    return $false
+    return [PSCustomObject]@{
+        DeadlineReached             = $false
+        ConfirmedExited             = $true
+        WaitTimedOut                = $false
+        KillError                   = $null
+        ProcessId                   = $capturedProcessId
+        KillConfirmWaitMilliseconds = $KillConfirmWaitMilliseconds
+    }
 }
 
 $initialBranch = Get-GitSingleLine -Arguments @("branch", "--show-current")
@@ -397,7 +461,7 @@ while ($true) {
         Add-AutopilotLog -Lines @($header)
 
         if (-not (Test-Path -LiteralPath $DeadlineFile -PathType Leaf)) {
-            Add-AutopilotLog -Lines @(
+            Add-AutopilotLogSafe -Lines @(
                 "AUTOPILOT EXPIRED: approval deadline file is missing. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
                 "LIVE ORDER SENT: False"
             )
@@ -406,7 +470,7 @@ while ($true) {
         }
         $deadlineUtc = Get-ApprovalDeadlineUtc
         if ($null -eq $deadlineUtc) {
-            Add-AutopilotLog -Lines @(
+            Add-AutopilotLogSafe -Lines @(
                 "AUTOPILOT EXPIRED: approval deadline file is unreadable or malformed. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
                 "LIVE ORDER SENT: False"
             )
@@ -415,7 +479,7 @@ while ($true) {
         }
         $nowUtc = (Get-Date).ToUniversalTime()
         if ($nowUtc -ge $deadlineUtc) {
-            Add-AutopilotLog -Lines @(
+            Add-AutopilotLogSafe -Lines @(
                 "AUTOPILOT EXPIRED: approval deadline $($deadlineUtc.ToString('o')) UTC reached. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
                 "LIVE ORDER SENT: False"
             )
@@ -449,7 +513,7 @@ while ($true) {
                 # that itself takes real time, so without this second check
                 # a new runner process could still be started after the
                 # approval deadline had already passed.
-                Add-AutopilotLog -Lines @(
+                Add-AutopilotLogSafe -Lines @(
                     "AUTOPILOT EXPIRED: approval deadline $($deadlineUtc.ToString('o')) UTC reached immediately before runner start. Paper trading runner was not executed.",
                     "LIVE ORDER SENT: False"
                 )
@@ -477,7 +541,7 @@ while ($true) {
                         -RedirectStandardOutput $runnerStdoutFile `
                         -RedirectStandardError $runnerStderrFile
 
-                    $deadlineEnforced = Wait-ProcessWithDeadline -Process $runnerProc -DeadlineUtc $deadlineUtc
+                    $deadlineResult = Wait-ProcessWithDeadline -Process $runnerProc -DeadlineUtc $deadlineUtc
 
                     $runnerStdoutText = ""
                     $runnerStderrText = ""
@@ -488,20 +552,39 @@ while ($true) {
                             Where-Object { $_ -ne "" }
                     )
                     if ($runnerLines.Count -gt 0) {
-                        Add-AutopilotLog -Lines $runnerLines
+                        Add-AutopilotLogSafe -Lines $runnerLines
                     }
 
-                    if ($deadlineEnforced) {
-                        Add-AutopilotLog -Lines @(
-                            "AUTOPILOT DEADLINE ENFORCED: paper trading runner was still running when the approval deadline was reached; it was forcibly terminated. No further Paper or Live order dispatch from this process.",
+                    if ($deadlineResult.DeadlineReached -and $deadlineResult.ConfirmedExited) {
+                        # Termination independently confirmed via $Process.HasExited
+                        # after Kill()+WaitForExit -- never assumed merely because
+                        # Kill() did not throw.
+                        Add-AutopilotLogSafe -Lines @(
+                            "AUTOPILOT DEADLINE ENFORCED: paper trading runner was still running when the approval deadline was reached; it was forcibly terminated and its exit was independently confirmed (PID $($deadlineResult.ProcessId)). No further Paper or Live order dispatch from this process.",
                             "LIVE ORDER SENT: False"
                         )
-                        Disable-AutopilotTaskWithEvidence -Reason "Approval deadline enforced during an in-progress paper trading runner execution."
+                        Disable-AutopilotTaskWithEvidence -Reason "Approval deadline enforced during an in-progress paper trading runner execution; termination confirmed."
+                        break
+                    } elseif ($deadlineResult.DeadlineReached) {
+                        # Work independent audit (PR #370): termination was
+                        # attempted but could NOT be independently confirmed
+                        # (Kill()/WaitForExit threw, or the process still has
+                        # not exited after the wait window). This must never
+                        # be logged or treated as a success, and the loop must
+                        # not resume a new cycle -- an order-capable process
+                        # may still be running unattended past the approved
+                        # window.
+                        $killErrorText = if ($deadlineResult.KillError) { $deadlineResult.KillError } else { "(Kill() did not throw)" }
+                        Add-AutopilotLogSafe -Lines @(
+                            "AUTOPILOT CRITICAL: approval deadline was reached while the paper trading runner (PID $($deadlineResult.ProcessId)) was still running, and termination could NOT be independently confirmed after Kill() and a $($deadlineResult.KillConfirmWaitMilliseconds)ms wait (kill error: $killErrorText; wait timed out: $($deadlineResult.WaitTimedOut)). Treated as a safety-critical failure, not a success. The process may still be running, unconfirmed, past the approved window. An operator must manually verify and terminate PID $($deadlineResult.ProcessId) and confirm the scheduled task is disabled.",
+                            "LIVE ORDER SENT: False"
+                        )
+                        Disable-AutopilotTaskWithEvidence -Reason "Approval deadline reached but the paper trading runner process (PID $($deadlineResult.ProcessId)) could not be independently confirmed terminated."
                         break
                     } else {
                         $runnerStatus = $null
                         try { $runnerStatus = $runnerProc.ExitCode } catch {}
-                        Add-AutopilotLog -Lines @("PAPER TRADING RUNNER EXIT CODE: $runnerStatus")
+                        Add-AutopilotLogSafe -Lines @("PAPER TRADING RUNNER EXIT CODE: $runnerStatus")
                     }
                 } finally {
                     Remove-Item -LiteralPath $runnerStdoutFile -Force -ErrorAction SilentlyContinue
