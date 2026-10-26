@@ -37,6 +37,8 @@ class GeminiProvider:
         timeout: float = 30.0,
         request_function: GeminiRequestFunction | None = None,
         opener: Any | None = None,
+        max_output_tokens: int | None = 512,
+        thinking_level: str | None = "low",
     ) -> None:
         normalized_model = str(model or "").strip()
 
@@ -60,6 +62,8 @@ class GeminiProvider:
                 api_key=self.api_key,
                 timeout=self.timeout,
                 opener=opener,
+                max_output_tokens=max_output_tokens,
+                thinking_level=thinking_level,
             )
             self.request_function = self.gemini_client.request
 

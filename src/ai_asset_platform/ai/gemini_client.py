@@ -27,6 +27,8 @@ class GeminiClient:
         timeout: float = 30.0,
         endpoint: str = DEFAULT_GEMINI_ENDPOINT,
         opener: Opener | None = None,
+        max_output_tokens: int | None = 512,
+        thinking_level: str | None = "low",
     ) -> None:
         normalized_api_key = str(api_key or "").strip()
 
@@ -36,10 +38,24 @@ class GeminiClient:
         if timeout <= 0:
             raise ValueError("timeoutは0より大きい値を指定してください。")
 
+        if max_output_tokens is not None and max_output_tokens <= 0:
+            raise ValueError("max_output_tokensは0より大きい値を指定してください。")
+
         self.api_key = normalized_api_key
         self.timeout = float(timeout)
         self.endpoint = str(endpoint or DEFAULT_GEMINI_ENDPOINT).rstrip("/")
         self._opener: Opener = opener or urllib.request.urlopen
+        # AI Judgeは短い構造化JSON(signal/score/confidence/reason)だけを
+        # 必要とする単発分類タスクであり、長文生成や深い推論は不要。
+        # これらを未設定のままにすると、thinkingモデル(例: gemini-3.8-flash)が
+        # 無制限に内部思考トークンを消費し、応答が極端に遅くなる(タイムアウト超過)
+        # 余地を残す。両方とも安全側のデフォルトで明示的に制限する。
+        self.max_output_tokens = (
+            int(max_output_tokens) if max_output_tokens is not None else None
+        )
+        self.thinking_level = (
+            str(thinking_level).strip() if thinking_level else None
+        )
 
     def request(
         self,
@@ -63,13 +79,20 @@ class GeminiClient:
             raise ValueError("Geminiへ送るプロンプトが空です。")
 
         url = f"{self.endpoint}/{normalized_model}:generateContent"
+        generation_config: dict[str, Any] = {"responseMimeType": "application/json"}
+        if self.max_output_tokens is not None:
+            generation_config["maxOutputTokens"] = self.max_output_tokens
+        if self.thinking_level is not None:
+            generation_config["thinkingConfig"] = {
+                "thinkingLevel": self.thinking_level,
+            }
         body = json.dumps(
             {
                 "systemInstruction": {
                     "parts": [{"text": str(system_prompt or "").strip()}],
                 },
                 "contents": [{"parts": [{"text": user_prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json"},
+                "generationConfig": generation_config,
             }
         ).encode("utf-8")
 
