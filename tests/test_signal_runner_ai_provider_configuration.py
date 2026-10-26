@@ -7,26 +7,37 @@ from ai_asset_platform.ai.providers import (
 )
 
 
-def _clear_ai_env(monkeypatch):
+def _clear_ai_env(monkeypatch, tmp_path=None):
     for key in (
         "AI_ENABLED",
         "AI_PROVIDER",
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
+        "GEMINI_MODEL",
         "ANTHROPIC_API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
 
+    if tmp_path is not None:
+        # _resolve_env_path() falls back to the repository root's own
+        # .env when the cwd has none. Without this, a real .env left on
+        # disk (e.g. a restored GEMINI_API_KEY/GEMINI_MODEL) leaks into
+        # these "nothing configured" tests despite monkeypatch.chdir(),
+        # since monkeypatch.delenv() only clears os.environ, not that
+        # file. An empty .env in tmp_path is found first and blocks the
+        # fallback, truly isolating these tests from the real .env.
+        (tmp_path / ".env").write_text("", encoding="utf-8")
+
 
 def test_no_provider_configured_returns_none(monkeypatch, tmp_path):
-    _clear_ai_env(monkeypatch)
+    _clear_ai_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
 
     assert _create_configured_ai_provider() is None
 
 
 def test_openai_provider_is_constructed_when_configured(monkeypatch, tmp_path):
-    _clear_ai_env(monkeypatch)
+    _clear_ai_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AI_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "dummy-key")
@@ -41,7 +52,7 @@ def test_gemini_provider_is_constructed_when_configured(monkeypatch, tmp_path):
     # this raised an unrelated TypeError one level up and was silently
     # swallowed into "AI設定の読み込みに失敗したため、AI評価をスキップします",
     # which looked identical to "nothing configured" and hid the real bug.
-    _clear_ai_env(monkeypatch)
+    _clear_ai_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AI_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "dummy-key")
@@ -59,7 +70,7 @@ def test_gemini_provider_with_placeholder_model_fails_closed_to_none(monkeypatch
     # real model id. _create_configured_ai_provider() must not silently
     # construct a client that would only fail later inside a real API call;
     # it must fail closed to None here, exactly like "nothing configured".
-    _clear_ai_env(monkeypatch)
+    _clear_ai_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AI_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "dummy-key")
@@ -68,7 +79,7 @@ def test_gemini_provider_with_placeholder_model_fails_closed_to_none(monkeypatch
 
 
 def test_claude_provider_is_constructed_when_configured(monkeypatch, tmp_path):
-    _clear_ai_env(monkeypatch)
+    _clear_ai_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AI_PROVIDER", "claude")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-key")
