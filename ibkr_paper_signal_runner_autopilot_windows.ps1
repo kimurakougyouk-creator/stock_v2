@@ -153,6 +153,61 @@ function Get-ApprovalDeadlineUtc {
     }
 }
 
+# Work independent audit (PR #369, comment WORK_PAPER_PREP_SCOPE_CORRECTION_V1,
+# 2026-10-27): Disable-ScheduledTask's own failure was previously swallowed
+# unconditionally (-ErrorAction SilentlyContinue plus an empty catch), so a
+# failed disable looked identical to a successful one in the log. This
+# records, every time self-disable is attempted, whether the call itself
+# threw and whether the task's state actually reads back as Disabled
+# afterward -- never silently assuming success.
+function Disable-AutopilotTaskWithEvidence {
+    param([Parameter(Mandatory = $true)][string]$Reason)
+    $disableError = $null
+    try {
+        Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+    } catch {
+        $disableError = $_.Exception.Message
+    }
+    $stateAfter = "UNKNOWN"
+    try {
+        $stateAfter = (Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop).State.ToString()
+    } catch {
+        $stateAfter = "UNKNOWN(state query failed: $($_.Exception.Message))"
+    }
+    if ($disableError) {
+        Add-AutopilotLog -Lines @("AUTOPILOT CRITICAL: Disable-ScheduledTask threw an error: $disableError. Task state after attempt: $stateAfter. $Reason An operator must verify and disable the task manually.")
+    } elseif ($stateAfter -ne "Disabled") {
+        Add-AutopilotLog -Lines @("AUTOPILOT CRITICAL: Disable-ScheduledTask did not throw, but the task state after the attempt is '$stateAfter', not Disabled. $Reason An operator must verify and disable the task manually.")
+    } else {
+        Add-AutopilotLog -Lines @("AUTOPILOT: scheduled task disable confirmed (state=Disabled). $Reason")
+    }
+    Add-AutopilotLog -Lines @("AUTOPILOT PROCESS EXITING: PID $PID terminating now. $Reason")
+}
+
+# Work independent audit (PR #369, same comment): the runner was previously
+# invoked with a single blocking native call (& $PythonExe ...) with no
+# bound on its own runtime, so the approval deadline could not be enforced
+# against an already-started, still-running (or hung) invocation -- it was
+# only re-checked at the top of the NEXT loop iteration. This starts the
+# process asynchronously and polls it against the deadline, forcibly killing
+# it the moment the deadline passes while it is still running.
+function Wait-ProcessWithDeadline {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][datetime]$DeadlineUtc,
+        [int]$PollMilliseconds = 500
+    )
+    while (-not $Process.HasExited) {
+        if ((Get-Date).ToUniversalTime() -ge $DeadlineUtc) {
+            try { $Process.Kill() } catch {}
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            return $true
+        }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+    return $false
+}
+
 $initialBranch = Get-GitSingleLine -Arguments @("branch", "--show-current")
 $initialHead = Get-GitSingleLine -Arguments @("rev-parse", "HEAD")
 if ($initialBranch -ne "main" -or $initialHead -notmatch '^[0-9a-f]{40}$') {
@@ -346,7 +401,7 @@ while ($true) {
                 "AUTOPILOT EXPIRED: approval deadline file is missing. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
                 "LIVE ORDER SENT: False"
             )
-            try { Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null } catch {}
+            Disable-AutopilotTaskWithEvidence -Reason "Approval deadline file is missing."
             break
         }
         $deadlineUtc = Get-ApprovalDeadlineUtc
@@ -355,7 +410,7 @@ while ($true) {
                 "AUTOPILOT EXPIRED: approval deadline file is unreadable or malformed. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
                 "LIVE ORDER SENT: False"
             )
-            try { Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null } catch {}
+            Disable-AutopilotTaskWithEvidence -Reason "Approval deadline file is unreadable or malformed."
             break
         }
         $nowUtc = (Get-Date).ToUniversalTime()
@@ -364,7 +419,7 @@ while ($true) {
                 "AUTOPILOT EXPIRED: approval deadline $($deadlineUtc.ToString('o')) UTC reached. Exiting. Re-enabling requires a fresh explicit approval and re-running the installer.",
                 "LIVE ORDER SENT: False"
             )
-            try { Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null } catch {}
+            Disable-AutopilotTaskWithEvidence -Reason "Approval deadline $($deadlineUtc.ToString('o')) UTC reached at loop top."
             break
         }
 
@@ -388,6 +443,18 @@ while ($true) {
 
             if (-not $marketOpen) {
                 Add-AutopilotLog -Lines @("VERIFIED TICKER MARKET SESSION CLOSED: skip cycle. Paper trading runner was not executed.")
+            } elseif ((Get-Date).ToUniversalTime() -ge $deadlineUtc) {
+                # Work independent audit (PR #369): the top-of-loop deadline
+                # check above happens before git/cleanup/market-session work
+                # that itself takes real time, so without this second check
+                # a new runner process could still be started after the
+                # approval deadline had already passed.
+                Add-AutopilotLog -Lines @(
+                    "AUTOPILOT EXPIRED: approval deadline $($deadlineUtc.ToString('o')) UTC reached immediately before runner start. Paper trading runner was not executed.",
+                    "LIVE ORDER SENT: False"
+                )
+                Disable-AutopilotTaskWithEvidence -Reason "Approval deadline reached immediately before runner start."
+                break
             } else {
                 # paper_trading_runner.run_paper_trading() is the existing,
                 # explicit, guarded Paper-order entry point: it refuses to run
@@ -396,13 +463,50 @@ while ($true) {
                 # every order through the shared risk gate (including the
                 # emergency-stop latch) and the verified market-session guard
                 # before any broker call.
-                $runnerOutput = & $PythonExe -m paper_trading_runner 2>&1
-                $runnerStatus = $LASTEXITCODE
-                $runnerLines = @($runnerOutput | ForEach-Object { $_.ToString() })
-                if ($runnerLines.Count -gt 0) {
-                    Add-AutopilotLog -Lines $runnerLines
+                #
+                # Started asynchronously (not with the blocking `&` call
+                # operator used elsewhere in this script) so the approval
+                # deadline can still be enforced -- including a forced kill --
+                # against this specific invocation while it is running.
+                $runnerStdoutFile = [System.IO.Path]::GetTempFileName()
+                $runnerStderrFile = [System.IO.Path]::GetTempFileName()
+                try {
+                    $runnerProc = Start-Process -FilePath $PythonExe `
+                        -ArgumentList "-m paper_trading_runner" `
+                        -NoNewWindow -PassThru -WorkingDirectory $RepoDir `
+                        -RedirectStandardOutput $runnerStdoutFile `
+                        -RedirectStandardError $runnerStderrFile
+
+                    $deadlineEnforced = Wait-ProcessWithDeadline -Process $runnerProc -DeadlineUtc $deadlineUtc
+
+                    $runnerStdoutText = ""
+                    $runnerStderrText = ""
+                    try { $runnerStdoutText = Get-Content -LiteralPath $runnerStdoutFile -Raw -ErrorAction SilentlyContinue } catch {}
+                    try { $runnerStderrText = Get-Content -LiteralPath $runnerStderrFile -Raw -ErrorAction SilentlyContinue } catch {}
+                    $runnerLines = @(
+                        @($runnerStdoutText -split "`r?`n") + @($runnerStderrText -split "`r?`n") |
+                            Where-Object { $_ -ne "" }
+                    )
+                    if ($runnerLines.Count -gt 0) {
+                        Add-AutopilotLog -Lines $runnerLines
+                    }
+
+                    if ($deadlineEnforced) {
+                        Add-AutopilotLog -Lines @(
+                            "AUTOPILOT DEADLINE ENFORCED: paper trading runner was still running when the approval deadline was reached; it was forcibly terminated. No further Paper or Live order dispatch from this process.",
+                            "LIVE ORDER SENT: False"
+                        )
+                        Disable-AutopilotTaskWithEvidence -Reason "Approval deadline enforced during an in-progress paper trading runner execution."
+                        break
+                    } else {
+                        $runnerStatus = $null
+                        try { $runnerStatus = $runnerProc.ExitCode } catch {}
+                        Add-AutopilotLog -Lines @("PAPER TRADING RUNNER EXIT CODE: $runnerStatus")
+                    }
+                } finally {
+                    Remove-Item -LiteralPath $runnerStdoutFile -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $runnerStderrFile -Force -ErrorAction SilentlyContinue
                 }
-                Add-AutopilotLog -Lines @("PAPER TRADING RUNNER EXIT CODE: $runnerStatus")
             }
         }
 

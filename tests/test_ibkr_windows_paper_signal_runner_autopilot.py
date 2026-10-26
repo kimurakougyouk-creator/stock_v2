@@ -167,13 +167,138 @@ def test_windows_autopilot_reads_persisted_deadline_and_never_writes_it():
     assert deadline_missing_check_at < loop_at
 
 
-def test_windows_autopilot_self_disables_task_on_expiry():
+def test_windows_autopilot_self_disables_task_on_expiry_with_evidence():
+    # Work independent audit (PR #369, comment
+    # WORK_PAPER_PREP_SCOPE_CORRECTION_V1, 2026-10-27): the previous
+    # self-disable was `try { Disable-ScheduledTask ... -ErrorAction
+    # SilentlyContinue | Out-Null } catch {}` -- a failed disable call was
+    # indistinguishable from a successful one in the log. Replaced with a
+    # helper that always records whether the call itself threw and whether
+    # the task's state reads back as Disabled afterward. This supersedes
+    # the previous (now removed) test_windows_autopilot_self_disables_
+    # task_on_expiry, which asserted ordering against the raw
+    # Disable-ScheduledTask call directly; that literal now lives inside
+    # this helper's definition (checked separately below) rather than at
+    # each loop call site.
     script = _text(AUTOPILOT)
-    assert 'Disable-ScheduledTask -TaskName $TaskName' in script
+    assert "function Disable-AutopilotTaskWithEvidence" in script
+    assert "Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop" in script
+    assert "Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop" in script
+    assert "AUTOPILOT CRITICAL" in script
+    assert "AUTOPILOT PROCESS EXITING" in script
+
     expired_at = script.index('"AUTOPILOT EXPIRED: approval deadline')
-    disable_at = script.index('Disable-ScheduledTask -TaskName $TaskName')
+    call_at = script.index("Disable-AutopilotTaskWithEvidence", expired_at)
+    break_at = script.index("break", call_at)
+    assert expired_at < call_at < break_at
+
+
+def test_windows_autopilot_rechecks_deadline_immediately_before_runner_start():
+    # Work independent audit (PR #369): the deadline was previously checked
+    # only once, at the top of each loop iteration -- before git/cleanup/
+    # market-session work that itself takes real time -- so a new
+    # paper_trading_runner process could still be launched after the
+    # approval deadline had already passed. A second, independent check is
+    # now required immediately before the runner is started.
+    script = _text(AUTOPILOT)
+    market_open_at = script.index("if (-not $marketOpen)")
+    recheck_at = script.index(
+        "approval deadline $($deadlineUtc.ToString('o')) UTC reached "
+        "immediately before runner start"
+    )
+    recheck_disable_at = script.index(
+        "Disable-AutopilotTaskWithEvidence", recheck_at
+    )
+    runner_start_at = script.index("Start-Process -FilePath $PythonExe")
+    assert market_open_at < recheck_at < recheck_disable_at < runner_start_at
+
+
+def test_windows_autopilot_enforces_deadline_during_inprogress_runner_execution():
+    # Work independent audit (PR #369): the runner was previously invoked
+    # with a single blocking native call (`& $PythonExe -m
+    # paper_trading_runner`) with no bound on its own runtime, so a hang (or
+    # just a long run) could keep dispatch alive past the approved deadline
+    # with no mechanism to stop it. The runner must now be started
+    # asynchronously and polled against the deadline, with a forced kill if
+    # the deadline passes while it is still running.
+    script = _text(AUTOPILOT)
+    assert "function Wait-ProcessWithDeadline" in script
+    assert "$Process.Kill()" in script
+    assert "-m paper_trading_runner" in script
+
+    start_at = script.index("Start-Process -FilePath $PythonExe")
+    wait_at = script.index("Wait-ProcessWithDeadline -Process $runnerProc", start_at)
+    enforced_at = script.index('"AUTOPILOT DEADLINE ENFORCED', wait_at)
+    disable_at = script.index("Disable-AutopilotTaskWithEvidence", enforced_at)
     break_at = script.index("break", disable_at)
-    assert expired_at < disable_at < break_at
+    assert start_at < wait_at < enforced_at < disable_at < break_at
+
+
+def _extract_function_body(script: str, func_name: str) -> str:
+    pattern = r"function\s+" + re.escape(func_name) + r"\s*\{"
+    match = re.search(pattern, script)
+    assert match, f"could not find function {func_name}"
+    depth = 1
+    index = match.end()
+    while depth > 0:
+        char = script[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return script[match.start():index]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real process kill timing is Windows-specific")
+def test_wait_process_with_deadline_actually_kills_a_hanging_process_on_windows():
+    # Extracted verbatim from the real script (not reimplemented), per this
+    # project's rule that a fix must be proven against the actual function
+    # body. Runs a genuinely long-running (30s) child process against a
+    # 1-second deadline and proves it is forcibly killed well before it
+    # would naturally finish. No broker/order code is involved.
+    script = _text(AUTOPILOT)
+    function_body = _extract_function_body(script, "Wait-ProcessWithDeadline")
+
+    driver = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"{function_body}\n"
+        "$proc = Start-Process -FilePath 'powershell.exe' "
+        "-ArgumentList '-NoProfile -Command Start-Sleep -Seconds 30' "
+        "-PassThru -NoNewWindow\n"
+        "$deadline = (Get-Date).ToUniversalTime().AddSeconds(1)\n"
+        "$killed = Wait-ProcessWithDeadline -Process $proc "
+        "-DeadlineUtc $deadline -PollMilliseconds 200\n"
+        "Write-Output \"KILLED=$killed\"\n"
+        "Write-Output \"EXITED=$($proc.HasExited)\"\n"
+    )
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(driver)
+        driver_path = handle.name
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                driver_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        Path(driver_path).unlink(missing_ok=True)
+
+    combined = result.stdout + result.stderr
+    assert "KILLED=True" in combined, combined
+    assert "EXITED=True" in combined, combined
 
 
 def test_windows_autopilot_disables_bytecode_writes_and_cleans_stale_caches():
