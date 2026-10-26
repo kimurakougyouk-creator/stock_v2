@@ -170,3 +170,18 @@ PR #316が安全監査・明示的merge許可を経てmainへ統合され、バ�
 
 ### 前回からの変化点
 PR #319とPR #321が安全監査・明示的merge許可を経てmainへ統合され、Paper no-transmit smokeのguard誤停止と、ローカルworktree状態に依存していたmocked order-pathテストの不安定性を解消。Chromebook実機でPaper API handshake成功とORDER SENT=Falseまで確認できたため、Paper foundationの接続不確実性は解消した。一方、Live read-only最終ゲートは別途未実施であり、資金・権限・JASDEC/登録・Live endpoint/account/session等の外部前提もfresh evidenceで未確認。したがってLive/Paper注文・broker mutationの権限は増えておらず、Liveは引き続きNO-GO。
+
+---
+
+## 2026-10-01 (JST)
+- 分析: 完成 — 変化なし。`git diff --stat e12bc0c..HEAD` はゼロ(現在の `main` HEADは前回確認時と同じ `e12bc0cb3f2998c3ea9c18d793f138a661b177d2` で新規コミットなし)。ルート `indicators.py` は内容を直接読み `from ai_asset_platform.strategies.indicators import add_indicators` の互換シムのみであることを再確認。`tests/test_indicators.py` 存在を確認。
+- シグナル: 完成 — 変化なし。ルート `signal_engine.py` は `from ai_asset_platform.strategies.signal_engine import determine_signal` の互換シムのみ。`tests/test_signal_engine.py`/`test_signal_engine_package_migration.py` 存在を確認。
+- バックテスト: 完成 — 変化なし。`src/ai_asset_platform/reports/backtest_evaluator.py`/`backtest_report.py`/`backtest_report_export.py`/`backtest_selector.py`/`backtest_statistics.py`/`backtest_summary.py`(6ファイル)の存在と対応テスト8ファイル(`tests/test_backtest_*.py`)の存在を再確認。
+- 資産推移: 完成 — 変化なし。`src/ai_asset_platform/reports/equity_chart.py`/`equity_history.py`/`performance.py`/`performance_chart.py`/`performance_history.py`/`performance_trend.py` と対応テスト(`test_equity_chart.py`/`test_equity_history.py`/`test_performance*.py`/`test_dashboard_*.py`)の存在を再確認。
+- リスク管理: 完成(Paper運用範囲) — 変化なし。ルート `risk_manager.py` は `calculate_open_position_risk`/`calculate_position_size` の互換シムのみ。`tests/test_risk_manager_position_size.py`/`test_risk_manager_portfolio_risk.py`/`test_risk_manager_package_migration.py` 存在を確認。
+- 実運用: 一部実装 — 現在の `main` は前回ログ記録時と同じ `e12bc0cb3f2998c3ea9c18d793f138a661b177d2`(2026-09-27マージのPR #328以降、新規コミットなし)。GitHub Actions `pytest`(run #2878)・`windows-readonly-autopilot`(run #22)はこのHEADで引き続きgreen。`scripts/live_pilot_release_gate.py:64` の `LIVE_EXECUTION_VALUE = "NO-GO"` 固定、`config/strategy_promotion_policy.json` の `enabled: false`/`status: BLOCKED_PENDING_EXPLICIT_THRESHOLDS` をファイル内容で直接再確認 — 変更なし。Issue #255本文(`updated_at` 2026-09-25T09:42:55Z)を直接再取得し確認 — チェックリストは引き続き**9/10**で、唯一の未達項目は「Full CI + fresh execution-day Live read-only preflight must pass before asking the user for the one unavoidable Live action」のまま。オープン中の未マージコードPRは #323(Client Portal Gateway Live read-only evidence prototype)・#324/#325(Paper read-only autopilotランタイム隔離hardening、draft)で、いずれもmain未反映のまま変化なし。外部運用前提(JPY入金決済、日本株取引許可、JASDEC登録、Live読み取り専用API疎通)も引き続きUNVERIFIED。CLAUDE.md/HANDOFF_MASTER.mdの安全不変条件どおり、現時点でも **NO-GO(実弾`placeOrder`不可)**。
+
+### 前回からの変化点
+変化なし。6項目すべて前回(2026-09-30、PR #331記録分)から判定・根拠ともに変化なし——`main` HEADは `e12bc0c` のまま新規コミットが一切ない。Issue #255のチェックリストも9/10で変化なし、残課題(execution-day fresh Live read-only preflight)も未達のまま。CI(pytest run #2878)はgreenを維持。
+
+**【運用上の注記:本ログの継続性ギャップ、継続中】** 前回(2026-09-30)に続き、本日も `main` への直接pushがリポジトリのbranch protection(PR必須+必須ステータスチェック、`GH013`)により拒否されるかを再検証する(下記参照)。既知の未マージdocsログPRは #326(2026-09-26)/#327(2026-09-27)/#329(2026-09-28)/#330(2026-09-29)/#331(2026-09-30)の5件で、`main` 上のログは依然2026-09-25分の次が本エントリという状態。本エントリの6項目判定自体は `main` 上の実コードを独立に確認して算出しており、未マージPRの記述内容には依存していない。ユーザーには、この未マージdocsログPR群(#326/#327/#329/#330/#331、および本エントリ分)をまとめてマージするか、この低リスク日次docsタスクについてはbranch protectionの運用を見直すことを推奨する。
