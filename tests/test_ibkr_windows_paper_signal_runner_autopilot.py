@@ -242,14 +242,21 @@ def test_windows_autopilot_distinguishes_confirmed_from_unconfirmed_termination(
     # and WaitForExit's own false (timed out), and unconditionally returned
     # a single boolean the caller logged as "forcibly terminated" success.
     # A process that failed to actually terminate within the wait window
-    # was therefore indistinguishable from one that genuinely exited. The
-    # caller must now branch on an independently confirmed exit, and must
-    # never resume a new loop cycle (no "break" skipped) in either branch
-    # once the deadline was reached during an in-progress execution.
+    # was therefore indistinguishable from one that genuinely exited.
+    #
+    # Work's final limited audit (WORK_FINAL_AUDIT_PR370_V2, 2026-10-27):
+    # a confirmed termination may still `break` (a clean, routine stop),
+    # but an UNCONFIRMED one must not merely `break` either -- a plain
+    # break still lets the script reach its end and exit with code 0,
+    # indistinguishable from a routine success to anything checking only
+    # the process exit code. The unconfirmed branch must route to
+    # Exit-AutopilotCritical (a forced non-zero exit), not a bare break.
     script = _text(AUTOPILOT)
     assert "ConfirmedExited" in script
     assert "$Process.HasExited" in script
     assert "AUTOPILOT CRITICAL" in script
+    assert "function Exit-AutopilotCritical" in script
+    assert "exit 1" in script
 
     deadline_reached_at = script.index("if ($deadlineResult.DeadlineReached -and $deadlineResult.ConfirmedExited)")
     confirmed_enforced_at = script.index('"AUTOPILOT DEADLINE ENFORCED', deadline_reached_at)
@@ -257,14 +264,143 @@ def test_windows_autopilot_distinguishes_confirmed_from_unconfirmed_termination(
 
     not_confirmed_at = script.index("} elseif ($deadlineResult.DeadlineReached) {", confirmed_break_at)
     critical_at = script.index('"AUTOPILOT CRITICAL: approval deadline was reached', not_confirmed_at)
-    critical_break_at = script.index("break", critical_at)
+    critical_exit_at = script.index("Exit-AutopilotCritical", critical_at)
 
-    assert deadline_reached_at < confirmed_enforced_at < confirmed_break_at < not_confirmed_at < critical_at < critical_break_at
+    assert deadline_reached_at < confirmed_enforced_at < confirmed_break_at < not_confirmed_at < critical_at < critical_exit_at
     # Never claim a confirmed termination merely because the normal
     # (not-deadline-reached) exit-code branch runs -- that branch must sit
     # strictly after both deadline-reached branches, never between them.
     normal_exit_at = script.index('"PAPER TRADING RUNNER EXIT CODE:')
-    assert critical_break_at < normal_exit_at
+    assert critical_exit_at < normal_exit_at
+
+
+def test_windows_autopilot_task_disable_failure_also_forces_a_critical_exit():
+    # Work's final limited audit (WORK_FINAL_AUDIT_PR370_V2, 2026-10-27):
+    # a failed Disable-ScheduledTask was previously only an AUTOPILOT
+    # CRITICAL log line, with no effect on the script's own exit code --
+    # a routine expiry where the task failed to disable would still exit
+    # 0. Disable-AutopilotTaskWithEvidence must return success/failure,
+    # and every call site must route to Exit-AutopilotCritical when it
+    # returns false.
+    script = _text(AUTOPILOT)
+    assert "function Disable-AutopilotTaskWithEvidence" in script
+    assert "return $disableSucceeded" in script
+
+    call_sites = [
+        m.start() for m in re.finditer(r"Disable-AutopilotTaskWithEvidence -Reason", script)
+    ]
+    assert len(call_sites) >= 5, f"expected at least 5 call sites, found {len(call_sites)}"
+    for call_at in call_sites:
+        line_start = script.rfind("\n", 0, call_at) + 1
+        line_end = script.find("\n", call_at)
+        line = script[line_start:line_end]
+        preceding = script[max(0, line_start - 40):line_start]
+        is_guarded_call = "if (-not (Disable-AutopilotTaskWithEvidence" in line
+        is_fire_and_forget_before_unconditional_exit = "| Out-Null" in line and "elseif" not in preceding
+        assert is_guarded_call or is_fire_and_forget_before_unconditional_exit, (
+            f"call site not guarded by a disable-failure check: {line!r}"
+        )
+        if is_guarded_call:
+            # The guard's body must reach Exit-AutopilotCritical, not
+            # merely log and fall through to a plain break with exit 0.
+            brace_at = script.index("{", call_at)
+            exit_at = script.index("Exit-AutopilotCritical", brace_at)
+            closing_brace_at = script.index("}", exit_at)
+            assert brace_at < exit_at < closing_brace_at
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Disable-ScheduledTask/exit-code behavior is Windows-specific")
+def test_disable_autopilot_task_with_evidence_and_critical_exit_on_real_windows():
+    # Work's final limited audit (WORK_FINAL_AUDIT_PR370_V2): prove, with
+    # the real functions extracted verbatim and run against the real
+    # Task Scheduler API (no fake/mock), that (a) Disable-
+    # AutopilotTaskWithEvidence returns False for a task name that does
+    # not exist (a genuine Disable-ScheduledTask failure, not simulated),
+    # (b) it returns True for the real, already-Disabled autopilot task
+    # (left untouched -- disabling an already-disabled task is a safe
+    # no-op, never a start), and (c) Exit-AutopilotCritical actually
+    # terminates the whole process with a non-zero exit code rather than
+    # merely returning from a function. No Paper/Live order, no task
+    # enable/start, no Read-Only or flag change.
+    script = _text(AUTOPILOT)
+    helper_functions = "\n".join(
+        _extract_function_body(script, name)
+        for name in (
+            "Add-AutopilotLog",
+            "Add-AutopilotLogSafe",
+            "Disable-AutopilotTaskWithEvidence",
+            "Exit-AutopilotCritical",
+        )
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        log_file = Path(temp_dir) / "evidence_test.log"
+        nonexistent_task = f"stock_v2_test_nonexistent_task_{__import__('uuid').uuid4().hex}"
+
+        driver_part1 = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$LogFile = '{log_file}'\n"
+            f"{helper_functions}\n"
+            f"$TaskName = '{nonexistent_task}'\n"
+            "$r1 = Disable-AutopilotTaskWithEvidence -Reason 'test: nonexistent task'\n"
+            "Write-Output \"NONEXISTENT_TASK_DISABLE_RESULT=$r1\"\n"
+            "$TaskName = 'stock_v2 Paper Signal Runner Autopilot'\n"
+            "$r2 = Disable-AutopilotTaskWithEvidence -Reason 'test: real already-disabled task'\n"
+            "Write-Output \"REAL_TASK_DISABLE_RESULT=$r2\"\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(driver_part1)
+            driver_path1 = handle.name
+        try:
+            result1 = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", driver_path1],
+                capture_output=True, text=True, timeout=30,
+            )
+        finally:
+            Path(driver_path1).unlink(missing_ok=True)
+
+        combined1 = result1.stdout + result1.stderr
+        assert "NONEXISTENT_TASK_DISABLE_RESULT=False" in combined1, combined1
+        assert "REAL_TASK_DISABLE_RESULT=True" in combined1, combined1
+
+        # Confirm the real autopilot task is still Disabled (untouched,
+        # not started) after this test interacted with it.
+        state_check = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-Command",
+                "(Get-ScheduledTask -TaskName 'stock_v2 Paper Signal Runner Autopilot').State.ToString()",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert state_check.stdout.strip() == "Disabled", state_check.stdout + state_check.stderr
+
+        driver_part2 = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$LogFile = '{log_file}'\n"
+            f"{helper_functions}\n"
+            "Exit-AutopilotCritical -Reason 'test: confirm non-zero exit terminates the process'\n"
+            "Write-Output 'SHOULD_NOT_BE_REACHED'\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(driver_part2)
+            driver_path2 = handle.name
+        try:
+            result2 = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", driver_path2],
+                capture_output=True, text=True, timeout=30,
+            )
+        finally:
+            Path(driver_path2).unlink(missing_ok=True)
+
+        combined2 = result2.stdout + result2.stderr
+        assert "SHOULD_NOT_BE_REACHED" not in combined2, combined2
+        assert result2.returncode == 1, (
+            f"expected non-zero exit code, got {result2.returncode}: {combined2}"
+        )
 
 
 def test_windows_autopilot_logging_failure_never_blocks_a_safety_stop():
@@ -445,6 +581,18 @@ def test_venv_python_launcher_leaves_no_orphaned_child_process_after_kill():
     # leaves no order-processing descendant process still running. The
     # dummy workload is a bare time.sleep(); no broker/runner code or
     # order is ever invoked.
+    #
+    # Work's final limited audit (WORK_FINAL_AUDIT_PR370_V2, 2026-10-27):
+    # the original version of this test never checked either CIM/Get-
+    # Process query's own returncode -- a query failure (empty stdout)
+    # would be silently read as "no children found" and the test would
+    # PASS without having actually observed anything. Every diagnostic
+    # query below now asserts its own returncode is 0 before its output
+    # is trusted, so a query failure fails the test loudly instead of
+    # masquerading as a clean result. This does not claim to prove
+    # descendant termination in every possible situation -- only that
+    # what was actually, successfully observed in this run showed no
+    # orphan.
     repo_root = Path(__file__).resolve().parent.parent
     python_exe = repo_root / ".venv" / "Scripts" / "python.exe"
     assert python_exe.exists(), f"missing venv python: {python_exe}"
@@ -461,6 +609,11 @@ def test_venv_python_launcher_leaves_no_orphaned_child_process_after_kill():
             ],
             capture_output=True, text=True, timeout=15,
         )
+        assert children_check.returncode == 0, (
+            "child-process CIM query itself failed (cannot be read as "
+            f"'no children'): returncode={children_check.returncode} "
+            f"stdout={children_check.stdout!r} stderr={children_check.stderr!r}"
+        )
         children_before = [p for p in children_check.stdout.strip().split(",") if p]
 
         proc.kill()
@@ -475,6 +628,12 @@ def test_venv_python_launcher_leaves_no_orphaned_child_process_after_kill():
                     f"[bool](Get-Process -Id {child_pid} -ErrorAction SilentlyContinue)",
                 ],
                 capture_output=True, text=True, timeout=10,
+            )
+            assert still_alive.returncode == 0, (
+                f"liveness query for child PID {child_pid} itself failed "
+                "(cannot be read as 'not alive'): "
+                f"returncode={still_alive.returncode} "
+                f"stdout={still_alive.stdout!r} stderr={still_alive.stderr!r}"
             )
             if still_alive.stdout.strip() == "True":
                 leftover.append(child_pid)
