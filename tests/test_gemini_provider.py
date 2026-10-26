@@ -256,6 +256,55 @@ def test_gemini_provider_threads_generation_limits_to_client():
     assert generation_config["thinkingConfig"] == {"thinkingLevel": "medium"}
 
 
+def test_gemini_provider_default_max_output_tokens_matches_client_default():
+    # Codex review (PR #367): GeminiProvider's own default previously
+    # stayed at 512 after GeminiClient's default was raised to 2048 in
+    # PR #366. signal_runner._create_configured_ai_provider() (the real
+    # production call site) never passes max_output_tokens explicitly,
+    # so GeminiProvider's default -- not GeminiClient's -- is what
+    # actually runs in production. This mirrors that exact call shape
+    # (model/api_key/opener only) to prove the stale 512 default can't
+    # silently reintroduce the truncated-thinking/HOLD risk.
+    captured = {}
+
+    def _opener(request, timeout):  # noqa: ANN001
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        body = json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "signal": "HOLD",
+                                            "score": 50,
+                                            "confidence": 0,
+                                            "reason": "x",
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        return _FakeHTTPResponse(body)
+
+    provider = create_provider(
+        "gemini",
+        model="gemini-3.8-flash",
+        api_key="dummy-key",
+        opener=_opener,
+    )
+
+    judge_with_ai({"ticker": "7203.T"}, provider=provider)
+
+    assert captured["body"]["generationConfig"]["maxOutputTokens"] == 2048
+
+
 def test_gemini_provider_is_registered():
     assert "gemini" in get_available_providers()
 
@@ -269,6 +318,31 @@ def test_openai_and_gemini_are_both_registered():
 
     assert "openai" in available
     assert "gemini" in available
+
+
+def test_ai_judge_falls_back_to_hold_on_timeout():
+    # Root-cause investigation (2026-10-26): a real generateContent call
+    # hung well past 60s before the maxOutputTokens/thinkingConfig bounds
+    # were added in PR #366. A bare timeout from urlopen() (TimeoutError,
+    # not wrapped in urllib.error.URLError) is not caught by GeminiClient's
+    # own except clauses and propagates unchanged through
+    # GeminiProvider.evaluate(); this confirms judge_with_ai()'s broad
+    # except Exception still fails closed to a safe HOLD in that case,
+    # end to end, with no real network call.
+    def _timing_out_opener(request, timeout):  # noqa: ANN001
+        raise TimeoutError("simulated urlopen timeout")
+
+    provider = create_provider(
+        "gemini",
+        model="gemini-3.8-flash",
+        api_key="dummy-key",
+        opener=_timing_out_opener,
+    )
+
+    result = judge_with_ai({"ticker": "7203.T"}, provider=provider)
+
+    assert result.signal == "HOLD"
+    assert result.available is False
 
 
 def test_ai_judge_returns_safe_hold_without_gemini_connection():
