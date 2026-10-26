@@ -167,6 +167,29 @@ def test_thinking_config_uses_budget_field_for_gemini_2_5_models():
     assert "thinkingLevel" not in generation_config["thinkingConfig"]
 
 
+def test_thinking_config_uses_level_field_for_gemini_3_5_flash_lite():
+    # Root-cause investigation (2026-10-26): gemini-3.8-flash timed out on
+    # generateContent 3 times in isolated real-key tests, while
+    # gemini-3.5-flash-lite (Google's official low-latency stable model,
+    # https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite)
+    # succeeded in 1.19s under identical account/network/code conditions.
+    # Before switching GEMINI_MODEL in production, confirm this specific
+    # model is correctly gated to the thinkingLevel field (not
+    # thinkingBudget or omitted) by the existing model-name regex, with no
+    # real network call.
+    body = _gemini_envelope({"signal": "HOLD", "score": 50, "confidence": 0, "reason": "x"})
+    opener, captured = _opener_returning(body)
+    client = GeminiClient(api_key="dummy", opener=opener)
+
+    client.request("gemini-3.5-flash-lite", "system", {"prompt": "x"})
+
+    generation_config = json.loads(captured["request"].data.decode("utf-8"))[
+        "generationConfig"
+    ]
+    assert generation_config["thinkingConfig"] == {"thinkingLevel": "low"}
+    assert generation_config["maxOutputTokens"] == 2048
+
+
 def test_thinking_config_is_omitted_for_non_thinking_models():
     # Codex review (PR #366, comment 4373702357): older/non-thinking
     # models (e.g. 1.x, 2.0) support neither field; sending either
