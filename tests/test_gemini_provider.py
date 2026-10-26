@@ -271,6 +271,31 @@ def test_openai_and_gemini_are_both_registered():
     assert "gemini" in available
 
 
+def test_ai_judge_falls_back_to_hold_on_timeout():
+    # Root-cause investigation (2026-10-26): a real generateContent call
+    # hung well past 60s before the maxOutputTokens/thinkingConfig bounds
+    # were added in PR #366. A bare timeout from urlopen() (TimeoutError,
+    # not wrapped in urllib.error.URLError) is not caught by GeminiClient's
+    # own except clauses and propagates unchanged through
+    # GeminiProvider.evaluate(); this confirms judge_with_ai()'s broad
+    # except Exception still fails closed to a safe HOLD in that case,
+    # end to end, with no real network call.
+    def _timing_out_opener(request, timeout):  # noqa: ANN001
+        raise TimeoutError("simulated urlopen timeout")
+
+    provider = create_provider(
+        "gemini",
+        model="gemini-3.8-flash",
+        api_key="dummy-key",
+        opener=_timing_out_opener,
+    )
+
+    result = judge_with_ai({"ticker": "7203.T"}, provider=provider)
+
+    assert result.signal == "HOLD"
+    assert result.available is False
+
+
 def test_ai_judge_returns_safe_hold_without_gemini_connection():
     provider = create_provider("gemini")
 
