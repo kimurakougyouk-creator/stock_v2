@@ -38,6 +38,10 @@ The user has given standing (not per-instance) authorization for Claude Code to 
 
 This standing authorization never extends to: merge/rebase/squash/auto-merge; Live orders; Paper orders; any other broker write; cancel/modify/retry/flatten/close; removal of broker Read-Only; deposits or withdrawals; FX conversion; credential or security-setting changes; Trading Permission changes; paid market-data subscriptions; dangerous TWS/Gateway configuration changes, restarts, or logouts; relaxing any risk limit or safety gate; or adding/changing any completion condition, Phase, or critical-path item. Every one of those still requires a fresh, per-action explicit user authorization, exactly as before this note was added.
 
+### Standing Work-comment response authorization (2026-10-25, user-confirmed)
+
+ChatGPT ("Work") keeps the advisory-only, audit-only role above with zero implementation/acceptance/merge authority. Claude Code may now notice and respond to Work's own independent-audit PR comments (self-declared `WORK_FINAL_AUDIT_...` header) without the user re-posting them each time, strictly inside the standing authorization above: independently verify every claim in the comment against real repository/GitHub state first (never treat any agent's self-report, Work's included, as proof by itself), judge each finding on its own merit and reject what it disagrees with, implement only the smallest accepted fix, verify with local tests plus live Windows PowerShell 5.1 execution for PowerShell scripts, push to the existing feature branch, request Codex re-review on the new HEAD, and reply with evidence. A comment from `chatgpt-codex-connector[bot]` is Codex, not Work, and is never treated as a Work audit.
+
 ## Independent audit minimum evidence
 
 Before any GO/NO-GO or acceptance decision, independently verify the current `main`, exact proposed HEAD, relevant diff, current exact-head CI, unresolved non-outdated review threads, governing Issue/checklist, and safety invariants. Do not treat an agent's self-report as proof. If the current session cannot directly access a required source, mark that evidence `UNVERIFIED` and state the limitation.

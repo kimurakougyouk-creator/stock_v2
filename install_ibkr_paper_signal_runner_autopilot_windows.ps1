@@ -50,6 +50,103 @@ function Test-TrackedSourceClean {
     return ($unstaged -eq 0 -and $staged -eq 0)
 }
 
+function Remove-StalePycacheArtifacts {
+    # Mirrors ibkr_paper_signal_runner_autopilot_windows.ps1's function of
+    # the same name (see its own comment for the full 2026-10-25 incident
+    # rationale): deletes only bytecode-cache artifacts that git reports
+    # as ignored-and-present under the exact same fixed, narrow path set
+    # the Windows source-SHA attestation audits (src/, tests/, and the
+    # repository's own top-level files) -- never a repo-root-rooted
+    # recursive filesystem scan. .venv, .env, and results/ are never named
+    # in this pathspec, so they cannot appear in its output.
+    # --directory makes git report an ignored __pycache__ directory as a
+    # single collapsed entry (e.g. "src/__pycache__/") instead of expanding
+    # its individual files -- needed because once the files inside such a
+    # directory are gone, the directory itself is empty, and git never
+    # tracks or reports empty directories at all, ignored or not.
+    $cacheCandidates = & git -C $RepoDir ls-files --others --ignored --exclude-standard --directory -- `
+        src `
+        tests `
+        ":(top,glob)__pycache__" `
+        ":(top,glob)*.pyc" `
+        ":(top,glob)*.pyo" `
+        2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return
+    }
+    foreach ($relativePath in $cacheCandidates) {
+        if (-not $relativePath) { continue }
+        $normalized = ($relativePath -replace '\\', '/').TrimEnd('/')
+        $isAllowed = (
+            $normalized -like "src/*" -or
+            $normalized -like "tests/*" -or
+            $normalized -eq "__pycache__" -or
+            $normalized -like "__pycache__/*" -or
+            (
+                $normalized -notmatch '/' -and (
+                    $normalized.EndsWith(".pyc") -or
+                    $normalized.EndsWith(".pyo")
+                )
+            )
+        )
+        if (-not $isAllowed) {
+            continue
+        }
+        # Ignore every non-cache entry even when git marks it ignored.
+        $isBytecode = $normalized.EndsWith('.pyc') -or $normalized.EndsWith('.pyo')
+        $isCacheDir = ($normalized -match '(^|/)__pycache__$')
+        if (-not ($isBytecode -or $isCacheDir)) { continue }
+        $full = Join-Path $RepoDir $normalized
+        $item = Get-Item -LiteralPath $full -ErrorAction SilentlyContinue
+        if (-not $item) {
+            continue
+        }
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            continue
+        }
+        try {
+            if ($item.PSIsContainer) {
+                # Never recursively remove a cache directory unless every
+                # single thing anywhere inside it is an actual bytecode
+                # cache file (.pyc/.pyo) and nothing inside it is a reparse
+                # point. This directory was already independently confirmed
+                # above to be literally named "__pycache__" and to live
+                # under the git-restricted allowlist, so this recursive
+                # Get-ChildItem/Remove-Item never leaves that single,
+                # already-narrowed directory -- it cannot reintroduce the
+                # repo-root-rooted scan that caused the 2026-10-25 incident.
+                # A directory with any unexpected content (a secret, an
+                # image, a backup, a symlink) is left untouched instead,
+                # consistent with this project's fail-closed philosophy.
+                if (-not $isCacheDir) { continue }
+                $onlyCacheContents = $true
+                $descendants = @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction Stop)
+                foreach ($descendant in $descendants) {
+                    if ($descendant.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                        $onlyCacheContents = $false
+                        break
+                    }
+                    if ($descendant.PSIsContainer) {
+                        continue
+                    }
+                    if ($descendant.Extension -ne ".pyc" -and $descendant.Extension -ne ".pyo") {
+                        $onlyCacheContents = $false
+                        break
+                    }
+                }
+                if (-not $onlyCacheContents) {
+                    continue
+                }
+                Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+            } else {
+                Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+            }
+        } catch {
+            continue
+        }
+    }
+}
+
 function Set-PrivatePinFile {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -108,15 +205,7 @@ if (-not (Test-TrackedSourceClean)) {
 # this checkout first, so the tree is genuinely clean before the autopilot
 # ever starts.
 $env:PYTHONDONTWRITEBYTECODE = "1"
-Get-ChildItem -LiteralPath $RepoDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-# -Include is silently ignored when combined with -LiteralPath in Windows
-# PowerShell 5.1, which previously caused this to enumerate (and attempt to
-# delete) every file AND directory under $RepoDir, including .venv/src/tests.
-# -File plus an explicit extension check is immune to that bug.
-Get-ChildItem -LiteralPath $RepoDir -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Extension -eq ".pyc" -or $_.Extension -eq ".pyo" } |
-    Remove-Item -Force -ErrorAction SilentlyContinue
+Remove-StalePycacheArtifacts
 
 Write-Host "===== WINDOWS PAPER SIGNAL RUNNER AUTOPILOT TESTS ====="
 & $PythonExe -m pytest -q `
@@ -137,11 +226,7 @@ if ($LASTEXITCODE -ne 0) {
 # Clean again after the test run itself, belt-and-suspenders: the autopilot
 # script performs this same cleanup every cycle regardless, but leaving the
 # tree clean here too means its very first cycle does not depend on that.
-Get-ChildItem -LiteralPath $RepoDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-Get-ChildItem -LiteralPath $RepoDir -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Extension -eq ".pyc" -or $_.Extension -eq ".pyo" } |
-    Remove-Item -Force -ErrorAction SilentlyContinue
+Remove-StalePycacheArtifacts
 
 # Parse both PowerShell files with the same Windows PowerShell parser used by
 # the scheduled task. Syntax errors block staging before any task changes.

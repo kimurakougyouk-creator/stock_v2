@@ -206,6 +206,56 @@ def test_gemini_provider_explicit_request_function_overrides_real_client():
     assert provider.gemini_client is None
 
 
+def test_gemini_provider_threads_generation_limits_to_client():
+    # Root-cause investigation (2026-10-26): generationConfig previously
+    # had no maxOutputTokens/thinkingConfig, letting a thinking-capable
+    # model spend unbounded time before responding. Confirms the
+    # provider's constructor params actually reach GeminiClient rather
+    # than being silently dropped.
+    captured = {}
+
+    def _opener(request, timeout):  # noqa: ANN001
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        body = json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "signal": "HOLD",
+                                            "score": 50,
+                                            "confidence": 0,
+                                            "reason": "x",
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        return _FakeHTTPResponse(body)
+
+    provider = create_provider(
+        "gemini",
+        model="gemini-3.8-flash",
+        api_key="dummy-key",
+        opener=_opener,
+        max_output_tokens=256,
+        thinking_level="medium",
+    )
+
+    judge_with_ai({"ticker": "7203.T"}, provider=provider)
+
+    generation_config = captured["body"]["generationConfig"]
+    assert generation_config["maxOutputTokens"] == 256
+    assert generation_config["thinkingConfig"] == {"thinkingLevel": "medium"}
+
+
 def test_gemini_provider_is_registered():
     assert "gemini" in get_available_providers()
 

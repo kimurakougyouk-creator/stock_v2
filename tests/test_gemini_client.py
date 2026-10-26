@@ -123,6 +123,117 @@ def test_http_error_is_raised_as_runtime_error_without_leaking_key():
     assert "403" in str(excinfo.value)
 
 
+def test_generation_config_bounds_output_tokens_and_thinking_by_default():
+    # Root-cause investigation (2026-10-26): a real API key authenticates
+    # instantly against the lightweight models.get endpoint, but a real
+    # generateContent call hangs well past 60s even for a trivial prompt.
+    # generationConfig previously had no maxOutputTokens/thinkingConfig,
+    # so a thinking-capable model (e.g. gemini-3.8-flash) could spend an
+    # unbounded number of internal "thinking" tokens before ever
+    # producing output. The AI Judge only needs a short structured JSON
+    # classification, not deep reasoning, so both are now bounded by
+    # safe defaults unless explicitly overridden.
+    body = _gemini_envelope({"signal": "HOLD", "score": 50, "confidence": 0, "reason": "x"})
+    opener, captured = _opener_returning(body)
+    client = GeminiClient(api_key="dummy", opener=opener)
+
+    client.request("gemini-3.8-flash", "system", {"prompt": "x"})
+
+    sent_body = json.loads(captured["request"].data.decode("utf-8"))
+    generation_config = sent_body["generationConfig"]
+    # Codex review (PR #366, comment 4373702365): maxOutputTokens covers
+    # thinking tokens too; 512 left no headroom for reasoning before the
+    # final JSON, risking truncation. 2048 leaves room for "low"-level
+    # thinking plus the short response.
+    assert generation_config["maxOutputTokens"] == 2048
+    assert generation_config["thinkingConfig"] == {"thinkingLevel": "low"}
+    assert generation_config["responseMimeType"] == "application/json"
+
+
+def test_thinking_config_uses_budget_field_for_gemini_2_5_models():
+    # Codex review (PR #366, comment 4373702357): Gemini 2.5 models use
+    # thinkingConfig.thinkingBudget (an integer), not thinkingLevel, and
+    # reject the latter. The client must gate the field by model.
+    body = _gemini_envelope({"signal": "HOLD", "score": 50, "confidence": 0, "reason": "x"})
+    opener, captured = _opener_returning(body)
+    client = GeminiClient(api_key="dummy", opener=opener)
+
+    client.request("gemini-2.5-flash", "system", {"prompt": "x"})
+
+    generation_config = json.loads(captured["request"].data.decode("utf-8"))[
+        "generationConfig"
+    ]
+    assert generation_config["thinkingConfig"] == {"thinkingBudget": 512}
+    assert "thinkingLevel" not in generation_config["thinkingConfig"]
+
+
+def test_thinking_config_is_omitted_for_non_thinking_models():
+    # Codex review (PR #366, comment 4373702357): older/non-thinking
+    # models (e.g. 1.x, 2.0) support neither field; sending either
+    # unconditionally would turn a previously valid request into an API
+    # error. The default thinking_level="low" must be silently dropped
+    # for a model that doesn't recognize it, without the caller having
+    # to know to pass thinking_level=None themselves.
+    body = _gemini_envelope({"signal": "HOLD", "score": 50, "confidence": 0, "reason": "x"})
+    opener, captured = _opener_returning(body)
+    client = GeminiClient(api_key="dummy", opener=opener)
+
+    client.request("gemini-1.5-flash", "system", {"prompt": "x"})
+
+    generation_config = json.loads(captured["request"].data.decode("utf-8"))[
+        "generationConfig"
+    ]
+    assert "thinkingConfig" not in generation_config
+    # maxOutputTokens is unrelated to thinking-field gating and still applies.
+    assert generation_config["maxOutputTokens"] == 2048
+
+
+def test_generation_config_limits_are_configurable():
+    body = _gemini_envelope({"signal": "HOLD", "score": 50, "confidence": 0, "reason": "x"})
+    opener, captured = _opener_returning(body)
+    client = GeminiClient(
+        api_key="dummy",
+        opener=opener,
+        max_output_tokens=128,
+        thinking_level="high",
+    )
+
+    client.request("gemini-3.8-flash", "system", {"prompt": "x"})
+
+    generation_config = json.loads(captured["request"].data.decode("utf-8"))[
+        "generationConfig"
+    ]
+    assert generation_config["maxOutputTokens"] == 128
+    assert generation_config["thinkingConfig"] == {"thinkingLevel": "high"}
+
+
+def test_generation_config_limits_can_be_disabled_explicitly():
+    # Some older/non-thinking models could reject an unrecognized
+    # thinkingConfig field; callers must be able to opt out entirely
+    # rather than being forced into these new defaults.
+    body = _gemini_envelope({"signal": "HOLD", "score": 50, "confidence": 0, "reason": "x"})
+    opener, captured = _opener_returning(body)
+    client = GeminiClient(
+        api_key="dummy",
+        opener=opener,
+        max_output_tokens=None,
+        thinking_level=None,
+    )
+
+    client.request("gemini-1.5-flash", "system", {"prompt": "x"})
+
+    generation_config = json.loads(captured["request"].data.decode("utf-8"))[
+        "generationConfig"
+    ]
+    assert "maxOutputTokens" not in generation_config
+    assert "thinkingConfig" not in generation_config
+
+
+def test_rejects_non_positive_max_output_tokens():
+    with pytest.raises(ValueError, match="max_output_tokens"):
+        GeminiClient(api_key="dummy", max_output_tokens=0)
+
+
 def test_url_error_is_raised_as_runtime_error():
     def _opener(request, timeout):  # noqa: ANN001
         raise urllib.error.URLError("name resolution failed")
