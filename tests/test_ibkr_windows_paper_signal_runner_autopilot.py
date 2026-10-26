@@ -1,4 +1,10 @@
 from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+import pytest
 
 
 AUTOPILOT = Path("ibkr_paper_signal_runner_autopilot_windows.ps1")
@@ -181,6 +187,77 @@ def test_windows_autopilot_disables_bytecode_writes_and_cleans_stale_caches():
     assert "__pycache__" in script
     assert "git -C $RepoDir ls-files --others --ignored --exclude-standard --directory" in script
     assert "Remove-Item -LiteralPath $RepoDir -Recurse" not in script
+
+
+def _extract_here_string(script: str, var_name: str) -> str:
+    pattern = r"\$" + re.escape(var_name) + r"\s*=\s*@'\r?\n(.*?)\r?\n'@"
+    match = re.search(pattern, script, re.DOTALL)
+    assert match, f"could not find single-quoted here-string for ${var_name}"
+    return match.group(1)
+
+
+def test_market_session_check_never_uses_double_quoted_python_literals():
+    # 2026-10-26 incident: Windows PowerShell 5.1 silently strips embedded
+    # double-quote characters when a multi-line string is passed as a
+    # single argument to a native executable's -c flag. With double quotes
+    # (tickers = ["AAPL", "SPY", "9432.T"]), python received
+    # tickers = [AAPL, SPY, 9432.T] and raised "SyntaxError: invalid decimal
+    # literal" on 9432.T -- caught by the surrounding try/catch and logged
+    # as an opaque "AUTOPILOT WARNING", so this check never once reached
+    # OPEN/CLOSED and paper_trading_runner never ran on a real Windows box.
+    # This is a static guard against reintroducing double quotes; the
+    # execution test below proves the current snippet actually runs.
+    script = _text(AUTOPILOT)
+    assert "$MarketSessionCheck = @'" in script
+    snippet = _extract_here_string(script, "MarketSessionCheck")
+    assert '"' not in snippet
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real native-arg passing to -c is Windows PowerShell 5.1 specific")
+def test_market_session_check_snippet_actually_executes_on_windows():
+    # Extracted verbatim from the real script (not reimplemented) and run
+    # through the real powershell.exe -> python.exe -c native-argument path,
+    # per this project's rule that a fix for a Windows native-arg bug must
+    # be proven against the actual function body, not a reimplementation.
+    script = _text(AUTOPILOT)
+    snippet = _extract_here_string(script, "MarketSessionCheck")
+
+    driver = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$MarketSessionCheck = @'\n"
+        f"{snippet}\n"
+        "'@\n"
+        f"& '{sys.executable}' -c $MarketSessionCheck 2>&1\n"
+        "exit $LASTEXITCODE\n"
+    )
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(driver)
+        driver_path = handle.name
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                driver_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        Path(driver_path).unlink(missing_ok=True)
+
+    combined = result.stdout + result.stderr
+    assert "SyntaxError" not in combined, combined
+    assert result.returncode == 0, combined
+    assert "OPEN" in combined or "CLOSED" in combined, combined
 
 
 def test_windows_installer_computes_and_persists_approval_deadline():

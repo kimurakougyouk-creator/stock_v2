@@ -316,14 +316,24 @@ function Remove-StalePycacheArtifacts {
     }
 }
 
-$MarketSessionCheck = @"
+# Single-quoted PowerShell here-string (@' ... '@) AND exclusively
+# single-quoted Python string literals: Windows PowerShell 5.1 silently
+# strips embedded double-quote characters when passing a multi-line string
+# as a single argument to a native executable's -c flag, which corrupted
+# tickers = ["AAPL", "SPY", "9432.T"] into tickers = [AAPL, SPY, 9432.T] --
+# a SyntaxError (invalid decimal literal on 9432.T) caught by the try/catch
+# below and logged as an opaque "AUTOPILOT WARNING", so this check never
+# once reached OPEN/CLOSED and the runner below never ran. Reproduced and
+# fixed 2026-10-26; see live_pilot_operational_once.ps1's $PythonBootstrap
+# for the same single-quote convention used safely there already.
+$MarketSessionCheck = @'
 from ai_asset_platform.execution.verified_market_session import evaluate_verified_market_session
-tickers = ["AAPL", "SPY", "9432.T"]
+tickers = ['AAPL', 'SPY', '9432.T']
 results = [evaluate_verified_market_session(t) for t in tickers]
 for ticker, result in zip(tickers, results):
-    print(f"{ticker}: {result.session} ({result.reason})")
-print("OPEN" if any(r.allowed for r in results) else "CLOSED")
-"@
+    print(f'{ticker}: {result.session} ({result.reason})')
+print('OPEN' if any(r.allowed for r in results) else 'CLOSED')
+'@
 
 while ($true) {
     try {
