@@ -37,7 +37,15 @@ class GeminiProvider:
         timeout: float = 30.0,
         request_function: GeminiRequestFunction | None = None,
         opener: Any | None = None,
-        max_output_tokens: int | None = 512,
+        # Codex review (PR #367, exact-head follow-up to PR #366): this
+        # default must stay equal to GeminiClient's own default. The real
+        # production call (signal_runner._create_configured_ai_provider())
+        # never passes max_output_tokens explicitly, so whatever default
+        # lives here -- not GeminiClient's -- is what actually runs. A
+        # stale, smaller value here would silently reintroduce the
+        # truncated-thinking/HOLD risk PR #366 fixed, even though
+        # GeminiClient itself was correctly updated.
+        max_output_tokens: int | None = 2048,
         thinking_level: str | None = "low",
     ) -> None:
         normalized_model = str(model or "").strip()
