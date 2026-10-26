@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -10,6 +11,43 @@ from typing import Any, Callable
 DEFAULT_GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models"
 
 Opener = Callable[..., Any]
+
+# Codex review (PR #366, comment 4373702357): thinking control is not a
+# single universal field. Gemini 3.x/4.x models use thinkingConfig.
+# thinkingLevel ("low"/"medium"/"high"/"minimal", support varies by
+# model); Gemini 2.5 models use thinkingConfig.thinkingBudget (an
+# integer token count) instead and reject thinkingLevel; older/non-
+# thinking models (1.x, 2.0) support neither and should get no
+# thinkingConfig at all. https://ai.google.dev/gemini-api/docs/generate-content/thinking
+_THINKING_LEVEL_MODEL_PATTERN = re.compile(r"^gemini-(3\.|3-|4-)")
+_THINKING_BUDGET_MODEL_PATTERN = re.compile(r"^gemini-2\.5")
+
+# Conservative numeric budgets for the thinkingBudget family, satisfying
+# every documented 2.5-variant minimum (2.5 Flash-Lite requires >= 512).
+_THINKING_LEVEL_TO_BUDGET = {
+    "minimal": 128,
+    "low": 512,
+    "medium": 1024,
+    "high": 4096,
+}
+
+
+def _thinking_config_for_model(
+    model: str, thinking_level: str | None
+) -> dict[str, Any] | None:
+    """モデルが対応する方式(thinkingLevel/thinkingBudget)だけを返す。
+
+    未対応モデルには何も送らない(無条件送信はAPIエラーの原因になる)。
+    """
+
+    if thinking_level is None:
+        return None
+    if _THINKING_LEVEL_MODEL_PATTERN.match(model):
+        return {"thinkingLevel": thinking_level}
+    if _THINKING_BUDGET_MODEL_PATTERN.match(model):
+        budget = _THINKING_LEVEL_TO_BUDGET.get(thinking_level, 512)
+        return {"thinkingBudget": budget}
+    return None
 
 
 class GeminiClient:
@@ -27,7 +65,7 @@ class GeminiClient:
         timeout: float = 30.0,
         endpoint: str = DEFAULT_GEMINI_ENDPOINT,
         opener: Opener | None = None,
-        max_output_tokens: int | None = 512,
+        max_output_tokens: int | None = 2048,
         thinking_level: str | None = "low",
     ) -> None:
         normalized_api_key = str(api_key or "").strip()
@@ -50,6 +88,12 @@ class GeminiClient:
         # これらを未設定のままにすると、thinkingモデル(例: gemini-3.8-flash)が
         # 無制限に内部思考トークンを消費し、応答が極端に遅くなる(タイムアウト超過)
         # 余地を残す。両方とも安全側のデフォルトで明示的に制限する。
+        # Codex review (PR #366, comment 4373702365): maxOutputTokens
+        # covers thinking tokens too, so a cap sized only for the final
+        # JSON (512) can be exhausted by reasoning before any visible
+        # output is produced, truncating to empty/invalid JSON and
+        # falling back to HOLD. 2048 leaves headroom for "low"-level
+        # thinking plus the short JSON response.
         self.max_output_tokens = (
             int(max_output_tokens) if max_output_tokens is not None else None
         )
@@ -82,10 +126,11 @@ class GeminiClient:
         generation_config: dict[str, Any] = {"responseMimeType": "application/json"}
         if self.max_output_tokens is not None:
             generation_config["maxOutputTokens"] = self.max_output_tokens
-        if self.thinking_level is not None:
-            generation_config["thinkingConfig"] = {
-                "thinkingLevel": self.thinking_level,
-            }
+        thinking_config = _thinking_config_for_model(
+            normalized_model, self.thinking_level
+        )
+        if thinking_config is not None:
+            generation_config["thinkingConfig"] = thinking_config
         body = json.dumps(
             {
                 "systemInstruction": {
