@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 import pytest
 
@@ -316,12 +317,23 @@ def test_disable_autopilot_task_with_evidence_and_critical_exit_on_real_windows(
     # Task Scheduler API (no fake/mock), that (a) Disable-
     # AutopilotTaskWithEvidence returns False for a task name that does
     # not exist (a genuine Disable-ScheduledTask failure, not simulated),
-    # (b) it returns True for the real, already-Disabled autopilot task
-    # (left untouched -- disabling an already-disabled task is a safe
-    # no-op, never a start), and (c) Exit-AutopilotCritical actually
-    # terminates the whole process with a non-zero exit code rather than
-    # merely returning from a function. No Paper/Live order, no task
-    # enable/start, no Read-Only or flag change.
+    # (b) it returns True for an existing, already-Disabled task, and
+    # (c) Exit-AutopilotCritical actually terminates the whole process
+    # with a non-zero exit code rather than merely returning from a
+    # function. No Paper/Live order, no task enable/start, no Read-Only
+    # or flag change.
+    #
+    # Codex review (PR #370, finding P1, discussion_r4385795521): the
+    # prior version of this test operated directly on the real production
+    # task name ('stock_v2 Paper Signal Runner Autopilot'). On a fresh
+    # Windows install this test runs before the installer registers that
+    # task, so Disable-AutopilotTaskWithEvidence correctly returns False
+    # for a task that does not yet exist -- but the test asserted True,
+    # aborting installation. On an existing install it also disabled the
+    # real task as a side effect of merely running the test suite. This
+    # now registers and cleans up its own isolated, harmless test task
+    # instead, and never reads, disables, or otherwise touches the real
+    # production autopilot task.
     script = _text(AUTOPILOT)
     helper_functions = "\n".join(
         _extract_function_body(script, name)
@@ -333,48 +345,75 @@ def test_disable_autopilot_task_with_evidence_and_critical_exit_on_real_windows(
         )
     )
 
+    test_task_name = f"stock_v2_test_isolated_task_{uuid.uuid4().hex}"
+
     with tempfile.TemporaryDirectory() as temp_dir:
         log_file = Path(temp_dir) / "evidence_test.log"
-        nonexistent_task = f"stock_v2_test_nonexistent_task_{__import__('uuid').uuid4().hex}"
+        nonexistent_task = f"stock_v2_test_nonexistent_task_{uuid.uuid4().hex}"
 
-        driver_part1 = (
-            "$ErrorActionPreference = 'Stop'\n"
-            f"$LogFile = '{log_file}'\n"
-            f"{helper_functions}\n"
-            f"$TaskName = '{nonexistent_task}'\n"
-            "$r1 = Disable-AutopilotTaskWithEvidence -Reason 'test: nonexistent task'\n"
-            "Write-Output \"NONEXISTENT_TASK_DISABLE_RESULT=$r1\"\n"
-            "$TaskName = 'stock_v2 Paper Signal Runner Autopilot'\n"
-            "$r2 = Disable-AutopilotTaskWithEvidence -Reason 'test: real already-disabled task'\n"
-            "Write-Output \"REAL_TASK_DISABLE_RESULT=$r2\"\n"
-        )
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".ps1", delete=False, encoding="utf-8"
-        ) as handle:
-            handle.write(driver_part1)
-            driver_path1 = handle.name
         try:
-            result1 = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", driver_path1],
-                capture_output=True, text=True, timeout=30,
+            register = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-Command",
+                    "$ErrorActionPreference = 'Stop'; "
+                    "$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0'; "
+                    f"Register-ScheduledTask -TaskName '{test_task_name}' -Action $action | Out-Null; "
+                    f"Disable-ScheduledTask -TaskName '{test_task_name}' | Out-Null",
+                ],
+                capture_output=True, text=True, timeout=20,
             )
+            assert register.returncode == 0, (
+                f"failed to register isolated test task: {register.stdout} {register.stderr}"
+            )
+
+            driver_part1 = (
+                "$ErrorActionPreference = 'Stop'\n"
+                f"$LogFile = '{log_file}'\n"
+                f"{helper_functions}\n"
+                f"$TaskName = '{nonexistent_task}'\n"
+                "$r1 = Disable-AutopilotTaskWithEvidence -Reason 'test: nonexistent task'\n"
+                "Write-Output \"NONEXISTENT_TASK_DISABLE_RESULT=$r1\"\n"
+                f"$TaskName = '{test_task_name}'\n"
+                "$r2 = Disable-AutopilotTaskWithEvidence -Reason 'test: isolated already-disabled task'\n"
+                "Write-Output \"ISOLATED_TASK_DISABLE_RESULT=$r2\"\n"
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+            ) as handle:
+                handle.write(driver_part1)
+                driver_path1 = handle.name
+            try:
+                result1 = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", driver_path1],
+                    capture_output=True, text=True, timeout=30,
+                )
+            finally:
+                Path(driver_path1).unlink(missing_ok=True)
+
+            combined1 = result1.stdout + result1.stderr
+            assert "NONEXISTENT_TASK_DISABLE_RESULT=False" in combined1, combined1
+            assert "ISOLATED_TASK_DISABLE_RESULT=True" in combined1, combined1
+
+            # Confirm the isolated test task (never the real production
+            # autopilot task) is still Disabled after this test interacted
+            # with it.
+            state_check = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-Command",
+                    f"(Get-ScheduledTask -TaskName '{test_task_name}').State.ToString()",
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            assert state_check.stdout.strip() == "Disabled", state_check.stdout + state_check.stderr
         finally:
-            Path(driver_path1).unlink(missing_ok=True)
-
-        combined1 = result1.stdout + result1.stderr
-        assert "NONEXISTENT_TASK_DISABLE_RESULT=False" in combined1, combined1
-        assert "REAL_TASK_DISABLE_RESULT=True" in combined1, combined1
-
-        # Confirm the real autopilot task is still Disabled (untouched,
-        # not started) after this test interacted with it.
-        state_check = subprocess.run(
-            [
-                "powershell.exe", "-NoProfile", "-Command",
-                "(Get-ScheduledTask -TaskName 'stock_v2 Paper Signal Runner Autopilot').State.ToString()",
-            ],
-            capture_output=True, text=True, timeout=15,
-        )
-        assert state_check.stdout.strip() == "Disabled", state_check.stdout + state_check.stderr
+            subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-Command",
+                    f"Unregister-ScheduledTask -TaskName '{test_task_name}' -Confirm:$false "
+                    "-ErrorAction SilentlyContinue",
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
 
         driver_part2 = (
             "$ErrorActionPreference = 'Stop'\n"
@@ -593,6 +632,19 @@ def test_venv_python_launcher_leaves_no_orphaned_child_process_after_kill():
     # descendant termination in every possible situation -- only that
     # what was actually, successfully observed in this run showed no
     # orphan.
+    #
+    # Codex review (PR #370, finding P2, discussion_r4385795529): on
+    # Windows PowerShell 5.1, wrapping a cmdlet call in parentheses (as
+    # the prior version did) lets a non-terminating query error still
+    # leave `$?` true, so `powershell.exe -Command` can return exit code
+    # 0 even though the query itself failed -- exactly the "returncode
+    # == 0 but no real result" case the returncode assertion above was
+    # meant to catch, bypassed. Each query now explicitly sets
+    # `-ErrorAction Stop` inside a try/catch so any query failure becomes
+    # a terminating exception (exit 1), while "process not found" (the
+    # expected, non-error outcome for a genuinely dead child) is caught
+    # specifically and reported as 'False' rather than treated as a
+    # failure.
     repo_root = Path(__file__).resolve().parent.parent
     python_exe = repo_root / ".venv" / "Scripts" / "python.exe"
     assert python_exe.exists(), f"missing venv python: {python_exe}"
@@ -604,8 +656,10 @@ def test_venv_python_launcher_leaves_no_orphaned_child_process_after_kill():
         children_check = subprocess.run(
             [
                 "powershell.exe", "-NoProfile", "-Command",
-                f"(Get-CimInstance Win32_Process -Filter \"ParentProcessId={proc.pid}\" "
-                "| Select-Object -ExpandProperty ProcessId) -join ','",
+                "$ErrorActionPreference = 'Stop'; try { "
+                f"(Get-CimInstance Win32_Process -Filter \"ParentProcessId={proc.pid}\" -ErrorAction Stop "
+                "| Select-Object -ExpandProperty ProcessId) -join ',' "
+                "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
             ],
             capture_output=True, text=True, timeout=15,
         )
@@ -625,7 +679,10 @@ def test_venv_python_launcher_leaves_no_orphaned_child_process_after_kill():
             still_alive = subprocess.run(
                 [
                     "powershell.exe", "-NoProfile", "-Command",
-                    f"[bool](Get-Process -Id {child_pid} -ErrorAction SilentlyContinue)",
+                    "$ErrorActionPreference = 'Stop'; try { "
+                    f"Get-Process -Id {child_pid} -ErrorAction Stop | Out-Null; Write-Output 'True' "
+                    "} catch [Microsoft.PowerShell.Commands.ProcessCommandException] { Write-Output 'False' } "
+                    "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
                 ],
                 capture_output=True, text=True, timeout=10,
             )
@@ -634,6 +691,11 @@ def test_venv_python_launcher_leaves_no_orphaned_child_process_after_kill():
                 "(cannot be read as 'not alive'): "
                 f"returncode={still_alive.returncode} "
                 f"stdout={still_alive.stdout!r} stderr={still_alive.stderr!r}"
+            )
+            assert still_alive.stdout.strip() in ("True", "False"), (
+                f"liveness query for child PID {child_pid} returned an "
+                f"unrecognized result: stdout={still_alive.stdout!r} "
+                f"stderr={still_alive.stderr!r}"
             )
             if still_alive.stdout.strip() == "True":
                 leftover.append(child_pid)
