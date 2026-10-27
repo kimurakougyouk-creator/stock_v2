@@ -3,6 +3,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 
 import pytest
 
@@ -167,13 +169,545 @@ def test_windows_autopilot_reads_persisted_deadline_and_never_writes_it():
     assert deadline_missing_check_at < loop_at
 
 
-def test_windows_autopilot_self_disables_task_on_expiry():
+def test_windows_autopilot_self_disables_task_on_expiry_with_evidence():
+    # Work independent audit (PR #369, comment
+    # WORK_PAPER_PREP_SCOPE_CORRECTION_V1, 2026-10-27): the previous
+    # self-disable was `try { Disable-ScheduledTask ... -ErrorAction
+    # SilentlyContinue | Out-Null } catch {}` -- a failed disable call was
+    # indistinguishable from a successful one in the log. Replaced with a
+    # helper that always records whether the call itself threw and whether
+    # the task's state reads back as Disabled afterward. This supersedes
+    # the previous (now removed) test_windows_autopilot_self_disables_
+    # task_on_expiry, which asserted ordering against the raw
+    # Disable-ScheduledTask call directly; that literal now lives inside
+    # this helper's definition (checked separately below) rather than at
+    # each loop call site.
     script = _text(AUTOPILOT)
-    assert 'Disable-ScheduledTask -TaskName $TaskName' in script
+    assert "function Disable-AutopilotTaskWithEvidence" in script
+    assert "Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop" in script
+    assert "Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop" in script
+    assert "AUTOPILOT CRITICAL" in script
+    assert "AUTOPILOT PROCESS EXITING" in script
+
     expired_at = script.index('"AUTOPILOT EXPIRED: approval deadline')
-    disable_at = script.index('Disable-ScheduledTask -TaskName $TaskName')
+    call_at = script.index("Disable-AutopilotTaskWithEvidence", expired_at)
+    break_at = script.index("break", call_at)
+    assert expired_at < call_at < break_at
+
+
+def test_windows_autopilot_rechecks_deadline_immediately_before_runner_start():
+    # Work independent audit (PR #369): the deadline was previously checked
+    # only once, at the top of each loop iteration -- before git/cleanup/
+    # market-session work that itself takes real time -- so a new
+    # paper_trading_runner process could still be launched after the
+    # approval deadline had already passed. A second, independent check is
+    # now required immediately before the runner is started.
+    script = _text(AUTOPILOT)
+    market_open_at = script.index("if (-not $marketOpen)")
+    recheck_at = script.index(
+        "approval deadline $($deadlineUtc.ToString('o')) UTC reached "
+        "immediately before runner start"
+    )
+    recheck_disable_at = script.index(
+        "Disable-AutopilotTaskWithEvidence", recheck_at
+    )
+    runner_start_at = script.index("Start-Process -FilePath $PythonExe")
+    assert market_open_at < recheck_at < recheck_disable_at < runner_start_at
+
+
+def test_windows_autopilot_enforces_deadline_during_inprogress_runner_execution():
+    # Work independent audit (PR #369): the runner was previously invoked
+    # with a single blocking native call (`& $PythonExe -m
+    # paper_trading_runner`) with no bound on its own runtime, so a hang (or
+    # just a long run) could keep dispatch alive past the approved deadline
+    # with no mechanism to stop it. The runner must now be started
+    # asynchronously and polled against the deadline, with a forced kill if
+    # the deadline passes while it is still running.
+    script = _text(AUTOPILOT)
+    assert "function Wait-ProcessWithDeadline" in script
+    assert "$Process.Kill()" in script
+    assert "-m paper_trading_runner" in script
+
+    start_at = script.index("Start-Process -FilePath $PythonExe")
+    wait_at = script.index("Wait-ProcessWithDeadline -Process $runnerProc", start_at)
+    enforced_at = script.index('"AUTOPILOT DEADLINE ENFORCED', wait_at)
+    disable_at = script.index("Disable-AutopilotTaskWithEvidence", enforced_at)
     break_at = script.index("break", disable_at)
-    assert expired_at < disable_at < break_at
+    assert start_at < wait_at < enforced_at < disable_at < break_at
+
+
+def test_windows_autopilot_distinguishes_confirmed_from_unconfirmed_termination():
+    # Work's follow-up independent audit (PR #370, comment
+    # WORK_AUDIT_PR370_V1, 2026-10-27): the first version of
+    # Wait-ProcessWithDeadline discarded Kill()/WaitForExit() exceptions
+    # and WaitForExit's own false (timed out), and unconditionally returned
+    # a single boolean the caller logged as "forcibly terminated" success.
+    # A process that failed to actually terminate within the wait window
+    # was therefore indistinguishable from one that genuinely exited.
+    #
+    # Work's final limited audit (WORK_FINAL_AUDIT_PR370_V2, 2026-10-27):
+    # a confirmed termination may still `break` (a clean, routine stop),
+    # but an UNCONFIRMED one must not merely `break` either -- a plain
+    # break still lets the script reach its end and exit with code 0,
+    # indistinguishable from a routine success to anything checking only
+    # the process exit code. The unconfirmed branch must route to
+    # Exit-AutopilotCritical (a forced non-zero exit), not a bare break.
+    script = _text(AUTOPILOT)
+    assert "ConfirmedExited" in script
+    assert "$Process.HasExited" in script
+    assert "AUTOPILOT CRITICAL" in script
+    assert "function Exit-AutopilotCritical" in script
+    assert "exit 1" in script
+
+    deadline_reached_at = script.index("if ($deadlineResult.DeadlineReached -and $deadlineResult.ConfirmedExited)")
+    confirmed_enforced_at = script.index('"AUTOPILOT DEADLINE ENFORCED', deadline_reached_at)
+    confirmed_break_at = script.index("break", confirmed_enforced_at)
+
+    not_confirmed_at = script.index("} elseif ($deadlineResult.DeadlineReached) {", confirmed_break_at)
+    critical_at = script.index('"AUTOPILOT CRITICAL: approval deadline was reached', not_confirmed_at)
+    critical_exit_at = script.index("Exit-AutopilotCritical", critical_at)
+
+    assert deadline_reached_at < confirmed_enforced_at < confirmed_break_at < not_confirmed_at < critical_at < critical_exit_at
+    # Never claim a confirmed termination merely because the normal
+    # (not-deadline-reached) exit-code branch runs -- that branch must sit
+    # strictly after both deadline-reached branches, never between them.
+    normal_exit_at = script.index('"PAPER TRADING RUNNER EXIT CODE:')
+    assert critical_exit_at < normal_exit_at
+
+
+def test_windows_autopilot_task_disable_failure_also_forces_a_critical_exit():
+    # Work's final limited audit (WORK_FINAL_AUDIT_PR370_V2, 2026-10-27):
+    # a failed Disable-ScheduledTask was previously only an AUTOPILOT
+    # CRITICAL log line, with no effect on the script's own exit code --
+    # a routine expiry where the task failed to disable would still exit
+    # 0. Disable-AutopilotTaskWithEvidence must return success/failure,
+    # and every call site must route to Exit-AutopilotCritical when it
+    # returns false.
+    script = _text(AUTOPILOT)
+    assert "function Disable-AutopilotTaskWithEvidence" in script
+    assert "return $disableSucceeded" in script
+
+    call_sites = [
+        m.start() for m in re.finditer(r"Disable-AutopilotTaskWithEvidence -Reason", script)
+    ]
+    assert len(call_sites) >= 5, f"expected at least 5 call sites, found {len(call_sites)}"
+    for call_at in call_sites:
+        line_start = script.rfind("\n", 0, call_at) + 1
+        line_end = script.find("\n", call_at)
+        line = script[line_start:line_end]
+        preceding = script[max(0, line_start - 40):line_start]
+        is_guarded_call = "if (-not (Disable-AutopilotTaskWithEvidence" in line
+        is_fire_and_forget_before_unconditional_exit = "| Out-Null" in line and "elseif" not in preceding
+        assert is_guarded_call or is_fire_and_forget_before_unconditional_exit, (
+            f"call site not guarded by a disable-failure check: {line!r}"
+        )
+        if is_guarded_call:
+            # The guard's body must reach Exit-AutopilotCritical, not
+            # merely log and fall through to a plain break with exit 0.
+            brace_at = script.index("{", call_at)
+            exit_at = script.index("Exit-AutopilotCritical", brace_at)
+            closing_brace_at = script.index("}", exit_at)
+            assert brace_at < exit_at < closing_brace_at
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Disable-ScheduledTask/exit-code behavior is Windows-specific")
+def test_disable_autopilot_task_with_evidence_and_critical_exit_on_real_windows():
+    # Work's final limited audit (WORK_FINAL_AUDIT_PR370_V2): prove, with
+    # the real functions extracted verbatim and run against the real
+    # Task Scheduler API (no fake/mock), that (a) Disable-
+    # AutopilotTaskWithEvidence returns False for a task name that does
+    # not exist (a genuine Disable-ScheduledTask failure, not simulated),
+    # (b) it returns True for an existing, already-Disabled task, and
+    # (c) Exit-AutopilotCritical actually terminates the whole process
+    # with a non-zero exit code rather than merely returning from a
+    # function. No Paper/Live order, no task enable/start, no Read-Only
+    # or flag change.
+    #
+    # Codex review (PR #370, finding P1, discussion_r4385795521): the
+    # prior version of this test operated directly on the real production
+    # task name ('stock_v2 Paper Signal Runner Autopilot'). On a fresh
+    # Windows install this test runs before the installer registers that
+    # task, so Disable-AutopilotTaskWithEvidence correctly returns False
+    # for a task that does not yet exist -- but the test asserted True,
+    # aborting installation. On an existing install it also disabled the
+    # real task as a side effect of merely running the test suite. This
+    # now registers and cleans up its own isolated, harmless test task
+    # instead, and never reads, disables, or otherwise touches the real
+    # production autopilot task.
+    script = _text(AUTOPILOT)
+    helper_functions = "\n".join(
+        _extract_function_body(script, name)
+        for name in (
+            "Add-AutopilotLog",
+            "Add-AutopilotLogSafe",
+            "Disable-AutopilotTaskWithEvidence",
+            "Exit-AutopilotCritical",
+        )
+    )
+
+    test_task_name = f"stock_v2_test_isolated_task_{uuid.uuid4().hex}"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        log_file = Path(temp_dir) / "evidence_test.log"
+        nonexistent_task = f"stock_v2_test_nonexistent_task_{uuid.uuid4().hex}"
+
+        try:
+            register = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-Command",
+                    "$ErrorActionPreference = 'Stop'; "
+                    "$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0'; "
+                    f"Register-ScheduledTask -TaskName '{test_task_name}' -Action $action | Out-Null; "
+                    f"Disable-ScheduledTask -TaskName '{test_task_name}' | Out-Null",
+                ],
+                capture_output=True, text=True, timeout=20,
+            )
+            assert register.returncode == 0, (
+                f"failed to register isolated test task: {register.stdout} {register.stderr}"
+            )
+
+            driver_part1 = (
+                "$ErrorActionPreference = 'Stop'\n"
+                f"$LogFile = '{log_file}'\n"
+                f"{helper_functions}\n"
+                f"$TaskName = '{nonexistent_task}'\n"
+                "$r1 = Disable-AutopilotTaskWithEvidence -Reason 'test: nonexistent task'\n"
+                "Write-Output \"NONEXISTENT_TASK_DISABLE_RESULT=$r1\"\n"
+                f"$TaskName = '{test_task_name}'\n"
+                "$r2 = Disable-AutopilotTaskWithEvidence -Reason 'test: isolated already-disabled task'\n"
+                "Write-Output \"ISOLATED_TASK_DISABLE_RESULT=$r2\"\n"
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+            ) as handle:
+                handle.write(driver_part1)
+                driver_path1 = handle.name
+            try:
+                result1 = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", driver_path1],
+                    capture_output=True, text=True, timeout=30,
+                )
+            finally:
+                Path(driver_path1).unlink(missing_ok=True)
+
+            combined1 = result1.stdout + result1.stderr
+            assert "NONEXISTENT_TASK_DISABLE_RESULT=False" in combined1, combined1
+            assert "ISOLATED_TASK_DISABLE_RESULT=True" in combined1, combined1
+
+            # Confirm the isolated test task (never the real production
+            # autopilot task) is still Disabled after this test interacted
+            # with it.
+            state_check = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-Command",
+                    f"(Get-ScheduledTask -TaskName '{test_task_name}').State.ToString()",
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            assert state_check.stdout.strip() == "Disabled", state_check.stdout + state_check.stderr
+        finally:
+            subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-Command",
+                    f"Unregister-ScheduledTask -TaskName '{test_task_name}' -Confirm:$false "
+                    "-ErrorAction SilentlyContinue",
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+
+        driver_part2 = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$LogFile = '{log_file}'\n"
+            f"{helper_functions}\n"
+            "Exit-AutopilotCritical -Reason 'test: confirm non-zero exit terminates the process'\n"
+            "Write-Output 'SHOULD_NOT_BE_REACHED'\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(driver_part2)
+            driver_path2 = handle.name
+        try:
+            result2 = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", driver_path2],
+                capture_output=True, text=True, timeout=30,
+            )
+        finally:
+            Path(driver_path2).unlink(missing_ok=True)
+
+        combined2 = result2.stdout + result2.stderr
+        assert "SHOULD_NOT_BE_REACHED" not in combined2, combined2
+        assert result2.returncode == 1, (
+            f"expected non-zero exit code, got {result2.returncode}: {combined2}"
+        )
+
+
+def test_windows_autopilot_logging_failure_never_blocks_a_safety_stop():
+    # Work's follow-up independent audit (PR #370): an exception thrown by
+    # Add-AutopilotLog at a safety-critical stop decision (deadline
+    # expiry, termination-confirmation failure) would previously propagate
+    # to the outer per-cycle catch, which only logs a generic warning and
+    # then sleeps and retries -- silently resuming a new cycle exactly
+    # when the script had already decided it must not. Every terminal/
+    # critical log call must use the fail-safe wrapper instead, so a
+    # logging failure can never prevent the actual stop (Disable-
+    # ScheduledTask attempt + break) from happening.
+    script = _text(AUTOPILOT)
+    assert "function Add-AutopilotLogSafe" in script
+    # Every expiry/critical branch must log via the safe wrapper, not the
+    # raw function that can throw and divert control to the outer catch.
+    for marker in (
+        '"AUTOPILOT EXPIRED: approval deadline file is missing',
+        '"AUTOPILOT EXPIRED: approval deadline file is unreadable',
+        '"AUTOPILOT EXPIRED: approval deadline $($deadlineUtc.ToString(\'o\')) UTC reached. Exiting',
+        '"AUTOPILOT EXPIRED: approval deadline $($deadlineUtc.ToString(\'o\')) UTC reached immediately before runner start',
+        '"AUTOPILOT DEADLINE ENFORCED',
+        '"AUTOPILOT CRITICAL: approval deadline was reached',
+    ):
+        marker_at = script.index(marker)
+        line_start = script.rfind("\n", 0, marker_at) + 1
+        preceding = script[max(0, line_start - 80):line_start]
+        assert "Add-AutopilotLogSafe" in preceding, (
+            f"expected Add-AutopilotLogSafe immediately before: {marker!r}"
+        )
+
+
+def _extract_function_body(script: str, func_name: str) -> str:
+    pattern = r"function\s+" + re.escape(func_name) + r"\s*\{"
+    match = re.search(pattern, script)
+    assert match, f"could not find function {func_name}"
+    depth = 1
+    index = match.end()
+    while depth > 0:
+        char = script[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return script[match.start():index]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real process kill timing is Windows-specific")
+def test_wait_process_with_deadline_actually_kills_a_hanging_process_on_windows():
+    # Extracted verbatim from the real script (not reimplemented), per this
+    # project's rule that a fix must be proven against the actual function
+    # body. Runs a genuinely long-running (30s) child process against a
+    # 1-second deadline and proves it is forcibly killed well before it
+    # would naturally finish. No broker/order code is involved.
+    script = _text(AUTOPILOT)
+    function_body = _extract_function_body(script, "Wait-ProcessWithDeadline")
+
+    driver = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"{function_body}\n"
+        "$proc = Start-Process -FilePath 'powershell.exe' "
+        "-ArgumentList '-NoProfile -Command Start-Sleep -Seconds 30' "
+        "-PassThru -NoNewWindow\n"
+        "$deadline = (Get-Date).ToUniversalTime().AddSeconds(1)\n"
+        "$result = Wait-ProcessWithDeadline -Process $proc "
+        "-DeadlineUtc $deadline -PollMilliseconds 200\n"
+        "Write-Output \"DEADLINE_REACHED=$($result.DeadlineReached)\"\n"
+        "Write-Output \"CONFIRMED_EXITED=$($result.ConfirmedExited)\"\n"
+        "Write-Output \"EXITED=$($proc.HasExited)\"\n"
+    )
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(driver)
+        driver_path = handle.name
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                driver_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        Path(driver_path).unlink(missing_ok=True)
+
+    combined = result.stdout + result.stderr
+    assert "DEADLINE_REACHED=True" in combined, combined
+    assert "CONFIRMED_EXITED=True" in combined, combined
+    assert "EXITED=True" in combined, combined
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real process kill timing is Windows-specific")
+def test_wait_process_with_deadline_never_claims_success_when_termination_cannot_be_confirmed():
+    # Work's follow-up independent audit (PR #370, comment
+    # WORK_AUDIT_PR370_V1): deterministically prove, with the real function
+    # body extracted verbatim (not reimplemented), that a process which
+    # does NOT actually exit after Kill()+WaitForExit is reported as
+    # unconfirmed (ConfirmedExited=False) -- never silently treated as a
+    # successful termination. A real OS process cannot be reliably forced
+    # to survive TerminateProcess, so this uses a duck-typed PowerShell
+    # class double exposing the same HasExited/Kill()/WaitForExit(ms)/Id
+    # members Wait-ProcessWithDeadline actually calls; $Process is
+    # intentionally untyped in the real function precisely so this works.
+    script = _text(AUTOPILOT)
+    function_body = _extract_function_body(script, "Wait-ProcessWithDeadline")
+
+    driver = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"{function_body}\n"
+        "class FakeNeverExitingProcess {\n"
+        "    [bool]$HasExited = $false\n"
+        "    [int]$Id = 99999\n"
+        "    [void] Kill() { }\n"
+        "    [bool] WaitForExit([int]$ms) { Start-Sleep -Milliseconds 50; return $false }\n"
+        "}\n"
+        "class FakeExitsAfterKillProcess {\n"
+        "    [bool]$HasExited = $false\n"
+        "    [int]$Id = 88888\n"
+        "    [void] Kill() { $this.HasExited = $true }\n"
+        "    [bool] WaitForExit([int]$ms) { return $this.HasExited }\n"
+        "}\n"
+        "$pastDeadline = (Get-Date).ToUniversalTime().AddSeconds(-1)\n"
+        "$neverExiting = [FakeNeverExitingProcess]::new()\n"
+        "$r1 = Wait-ProcessWithDeadline -Process $neverExiting -DeadlineUtc $pastDeadline -PollMilliseconds 50 -KillConfirmWaitMilliseconds 100\n"
+        "Write-Output \"UNCONFIRMED_DEADLINE_REACHED=$($r1.DeadlineReached)\"\n"
+        "Write-Output \"UNCONFIRMED_CONFIRMED_EXITED=$($r1.ConfirmedExited)\"\n"
+        "$exitsAfterKill = [FakeExitsAfterKillProcess]::new()\n"
+        "$r2 = Wait-ProcessWithDeadline -Process $exitsAfterKill -DeadlineUtc $pastDeadline -PollMilliseconds 50 -KillConfirmWaitMilliseconds 100\n"
+        "Write-Output \"CONFIRMED_DEADLINE_REACHED=$($r2.DeadlineReached)\"\n"
+        "Write-Output \"CONFIRMED_CONFIRMED_EXITED=$($r2.ConfirmedExited)\"\n"
+    )
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ps1", delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(driver)
+        driver_path = handle.name
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                driver_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        Path(driver_path).unlink(missing_ok=True)
+
+    combined = result.stdout + result.stderr
+    assert "UNCONFIRMED_DEADLINE_REACHED=True" in combined, combined
+    assert "UNCONFIRMED_CONFIRMED_EXITED=False" in combined, combined
+    assert "CONFIRMED_DEADLINE_REACHED=True" in combined, combined
+    assert "CONFIRMED_CONFIRMED_EXITED=True" in combined, combined
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows process-tree verification, no broker/order code")
+def test_venv_python_launcher_leaves_no_orphaned_child_process_after_kill():
+    # Work's follow-up independent audit (PR #370): verify, using the
+    # real .venv\\Scripts\\python.exe launcher this script actually
+    # invokes (not a fake/mocked process), that killing that process
+    # leaves no order-processing descendant process still running. The
+    # dummy workload is a bare time.sleep(); no broker/runner code or
+    # order is ever invoked.
+    #
+    # Work's final limited audit (WORK_FINAL_AUDIT_PR370_V2, 2026-10-27):
+    # the original version of this test never checked either CIM/Get-
+    # Process query's own returncode -- a query failure (empty stdout)
+    # would be silently read as "no children found" and the test would
+    # PASS without having actually observed anything. Every diagnostic
+    # query below now asserts its own returncode is 0 before its output
+    # is trusted, so a query failure fails the test loudly instead of
+    # masquerading as a clean result. This does not claim to prove
+    # descendant termination in every possible situation -- only that
+    # what was actually, successfully observed in this run showed no
+    # orphan.
+    #
+    # Codex review (PR #370, finding P2, discussion_r4385795529): on
+    # Windows PowerShell 5.1, wrapping a cmdlet call in parentheses (as
+    # the prior version did) lets a non-terminating query error still
+    # leave `$?` true, so `powershell.exe -Command` can return exit code
+    # 0 even though the query itself failed -- exactly the "returncode
+    # == 0 but no real result" case the returncode assertion above was
+    # meant to catch, bypassed. Each query now explicitly sets
+    # `-ErrorAction Stop` inside a try/catch so any query failure becomes
+    # a terminating exception (exit 1), while "process not found" (the
+    # expected, non-error outcome for a genuinely dead child) is caught
+    # specifically and reported as 'False' rather than treated as a
+    # failure.
+    repo_root = Path(__file__).resolve().parent.parent
+    python_exe = repo_root / ".venv" / "Scripts" / "python.exe"
+    assert python_exe.exists(), f"missing venv python: {python_exe}"
+
+    proc = subprocess.Popen([str(python_exe), "-c", "import time; time.sleep(30)"])
+    try:
+        time.sleep(1.5)  # let it actually start before inspecting children
+
+        children_check = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-Command",
+                "$ErrorActionPreference = 'Stop'; try { "
+                f"(Get-CimInstance Win32_Process -Filter \"ParentProcessId={proc.pid}\" -ErrorAction Stop "
+                "| Select-Object -ExpandProperty ProcessId) -join ',' "
+                "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert children_check.returncode == 0, (
+            "child-process CIM query itself failed (cannot be read as "
+            f"'no children'): returncode={children_check.returncode} "
+            f"stdout={children_check.stdout!r} stderr={children_check.stderr!r}"
+        )
+        children_before = [p for p in children_check.stdout.strip().split(",") if p]
+
+        proc.kill()
+        proc.wait(timeout=10)
+        time.sleep(1.0)
+
+        leftover = []
+        for child_pid in children_before:
+            still_alive = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-Command",
+                    "$ErrorActionPreference = 'Stop'; try { "
+                    f"Get-Process -Id {child_pid} -ErrorAction Stop | Out-Null; Write-Output 'True' "
+                    "} catch [Microsoft.PowerShell.Commands.ProcessCommandException] { Write-Output 'False' } "
+                    "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert still_alive.returncode == 0, (
+                f"liveness query for child PID {child_pid} itself failed "
+                "(cannot be read as 'not alive'): "
+                f"returncode={still_alive.returncode} "
+                f"stdout={still_alive.stdout!r} stderr={still_alive.stderr!r}"
+            )
+            assert still_alive.stdout.strip() in ("True", "False"), (
+                f"liveness query for child PID {child_pid} returned an "
+                f"unrecognized result: stdout={still_alive.stdout!r} "
+                f"stderr={still_alive.stderr!r}"
+            )
+            if still_alive.stdout.strip() == "True":
+                leftover.append(child_pid)
+
+        assert leftover == [], (
+            f"orphaned child process(es) still running after parent kill: {leftover} "
+            f"(children observed before kill: {children_before})"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
 
 
 def test_windows_autopilot_disables_bytecode_writes_and_cleans_stale_caches():
