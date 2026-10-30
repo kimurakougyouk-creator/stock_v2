@@ -24,7 +24,10 @@ from ai_asset_platform.execution.verified_paper_preflight import (
     VerifiedPaperPreflightError,
     evaluate_verified_paper_preflight,
 )
-from ai_asset_platform.execution.verified_paper_scan import execute_verified_actions_from_scan
+from ai_asset_platform.execution.verified_paper_scan import (
+    classify_paper_execution_error,
+    execute_verified_actions_from_scan,
+)
 from ai_asset_platform.reports.equity_history import (
     append_equity_history,
     calculate_maximum_drawdown,
@@ -329,6 +332,12 @@ def main() -> None:
     print(f"状態        : {health.message}")
     print(f"シグナル件数: {health.signal_count}")
     print(f"エラー件数  : {health.error_count}")
+    for entry in result.get("execution_errors") or []:
+        if not isinstance(entry, dict):
+            continue
+        ticker = entry.get("ticker", "UNKNOWN")
+        label = classify_paper_execution_error(entry.get("error", ""))
+        print(f"  - {ticker}: {label}")
     print("=" * 50)
 
 

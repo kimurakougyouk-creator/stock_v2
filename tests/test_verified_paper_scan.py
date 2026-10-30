@@ -142,3 +142,77 @@ def test_executor_failure_is_collected_and_never_retried(monkeypatch):
     assert calls["count"] == 1
     assert result["paper_orders"] == []
     assert "uncertain broker state" in result["execution_errors"][0]["error"]
+
+
+def test_classify_paper_execution_error_market_session_blocked():
+    message = (
+        "verified Paper market-session guard blocked order: "
+        "market closed / venue=NASDAQ / local=2026-10-29T10:00:00"
+    )
+    assert module.classify_paper_execution_error(message) == (
+        module.EXECUTION_ERROR_CLASS_MARKET_SESSION_BLOCKED
+    )
+
+
+def test_classify_paper_execution_error_fx_evidence_unavailable():
+    message = "USD->JPY broker FX evidence is unavailable; BUY blocked"
+    assert module.classify_paper_execution_error(message) == (
+        module.EXECUTION_ERROR_CLASS_FX_EVIDENCE_UNAVAILABLE
+    )
+
+
+def test_classify_paper_execution_error_preflight_blocked():
+    assert module.classify_paper_execution_error(
+        "verified Paper preflight blocked order: allocation limit"
+    ) == module.EXECUTION_ERROR_CLASS_PREFLIGHT_BLOCKED
+    assert module.classify_paper_execution_error(
+        "verified Paper preflight failed: bad evidence"
+    ) == module.EXECUTION_ERROR_CLASS_PREFLIGHT_BLOCKED
+
+
+def test_classify_paper_execution_error_quantity_not_registered():
+    assert module.classify_paper_execution_error(
+        "broker-verified Paper quantity is not registered"
+    ) == module.EXECUTION_ERROR_CLASS_QUANTITY_NOT_REGISTERED
+    assert module.classify_paper_execution_error(
+        "broker-verified Paper quantity is invalid"
+    ) == module.EXECUTION_ERROR_CLASS_QUANTITY_NOT_REGISTERED
+
+
+def test_classify_paper_execution_error_negative_position():
+    assert module.classify_paper_execution_error(
+        "confirmed ledger contains a negative position; execution blocked"
+    ) == module.EXECUTION_ERROR_CLASS_NEGATIVE_POSITION
+
+
+def test_classify_paper_execution_error_insufficient_holdings():
+    assert module.classify_paper_execution_error(
+        "confirmed holdings are smaller than the broker-verified Paper SELL quantity"
+    ) == module.EXECUTION_ERROR_CLASS_INSUFFICIENT_HOLDINGS
+
+
+def test_classify_paper_execution_error_invalid_reference_price():
+    assert module.classify_paper_execution_error(
+        "actionable signal has no positive reference price"
+    ) == module.EXECUTION_ERROR_CLASS_INVALID_REFERENCE_PRICE
+
+
+def test_classify_paper_execution_error_holding_age_error():
+    assert module.classify_paper_execution_error(
+        "confirmed holding age cannot be reconstructed safely: KeyError('x')"
+    ) == module.EXECUTION_ERROR_CLASS_HOLDING_AGE_ERROR
+
+
+def test_classify_paper_execution_error_broker_fill_unconfirmed():
+    assert module.classify_paper_execution_error(
+        "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。status=NOT_SENT"
+    ) == module.EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED
+    assert module.classify_paper_execution_error(
+        "IBKR Paper注文は送信前に停止しました: risk blocked"
+    ) == module.EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED
+
+
+def test_classify_paper_execution_error_unknown_falls_back_without_leaking_text():
+    label = module.classify_paper_execution_error("No security definition has been found")
+    assert label == module.EXECUTION_ERROR_CLASS_UNKNOWN_ERROR
+    assert "No security definition" not in label

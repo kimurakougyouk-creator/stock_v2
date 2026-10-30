@@ -22,6 +22,59 @@ from ai_asset_platform.execution.signal_order_bridge import (
 
 OrderExecutor = Callable[[str, str, int, float, str | None, str | None], dict]
 
+EXECUTION_ERROR_CLASS_MARKET_SESSION_BLOCKED = "MARKET_SESSION_BLOCKED"
+EXECUTION_ERROR_CLASS_FX_EVIDENCE_UNAVAILABLE = "FX_EVIDENCE_UNAVAILABLE"
+EXECUTION_ERROR_CLASS_PREFLIGHT_BLOCKED = "PREFLIGHT_BLOCKED"
+EXECUTION_ERROR_CLASS_QUANTITY_NOT_REGISTERED = "QUANTITY_NOT_REGISTERED"
+EXECUTION_ERROR_CLASS_NEGATIVE_POSITION = "NEGATIVE_POSITION_BLOCKED"
+EXECUTION_ERROR_CLASS_INSUFFICIENT_HOLDINGS = "INSUFFICIENT_HOLDINGS"
+EXECUTION_ERROR_CLASS_INVALID_REFERENCE_PRICE = "INVALID_REFERENCE_PRICE"
+EXECUTION_ERROR_CLASS_HOLDING_AGE_ERROR = "HOLDING_AGE_ERROR"
+EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED = "BROKER_FILL_UNCONFIRMED"
+EXECUTION_ERROR_CLASS_STRATEGY_IDENTITY_ERROR = "STRATEGY_IDENTITY_ERROR"
+EXECUTION_ERROR_CLASS_UNKNOWN_ERROR = "UNKNOWN_ERROR"
+
+
+def classify_paper_execution_error(message: str) -> str:
+    """Map a raw Paper execution-error message to a fixed, pre-approved label.
+
+    Only the returned label (never ``message`` itself) is safe to print to the
+    autopilot log: broker result text embedded in some of these messages
+    (order_id, IBKR error strings) is not guaranteed to be free of
+    account-identifying detail, so the raw text is intentionally discarded.
+    """
+    text = str(message or "")
+
+    if "market-session guard blocked" in text:
+        return EXECUTION_ERROR_CLASS_MARKET_SESSION_BLOCKED
+    if "broker FX evidence is unavailable" in text:
+        return EXECUTION_ERROR_CLASS_FX_EVIDENCE_UNAVAILABLE
+    if "preflight blocked order" in text or "preflight failed" in text:
+        return EXECUTION_ERROR_CLASS_PREFLIGHT_BLOCKED
+    if "quantity is not registered" in text or "quantity is invalid" in text:
+        return EXECUTION_ERROR_CLASS_QUANTITY_NOT_REGISTERED
+    if "negative position" in text:
+        return EXECUTION_ERROR_CLASS_NEGATIVE_POSITION
+    if "confirmed holdings are smaller" in text:
+        return EXECUTION_ERROR_CLASS_INSUFFICIENT_HOLDINGS
+    if "no positive reference price" in text:
+        return EXECUTION_ERROR_CLASS_INVALID_REFERENCE_PRICE
+    if "holding age cannot be reconstructed" in text:
+        return EXECUTION_ERROR_CLASS_HOLDING_AGE_ERROR
+    if (
+        "Filledを確認できなかった" in text
+        or "送信前に停止しました" in text
+        or "結果を取得できませんでした" in text
+    ):
+        return EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED
+    if (
+        "strategy checkout changed" in text
+        or "source SHA is unavailable" in text
+        or "parameter identity is unavailable" in text
+    ):
+        return EXECUTION_ERROR_CLASS_STRATEGY_IDENTITY_ERROR
+    return EXECUTION_ERROR_CLASS_UNKNOWN_ERROR
+
 
 def _safe_position_holding_days(ticker: str, settings: PlatformSettings) -> int | None:
     """Use explicit account calendar for real settings; keep legacy test adapters compatible."""
