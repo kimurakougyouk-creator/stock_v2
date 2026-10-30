@@ -87,6 +87,33 @@ def test_paper_runner_main_prints_error_health(monkeypatch, capsys):
     assert "エラー件数  : 1" in output
 
 
+def test_paper_runner_main_prints_classified_label_never_raw_broker_text(monkeypatch, capsys):
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "run_paper_trading",
+        lambda: {
+            "records": [{} for _ in range(3)],
+            "errors": ["IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。status=NOT_SENT / message=contract rejected / errors=[{'code': 200, 'message': 'No security definition'}]"],
+            "execution_errors": [
+                {
+                    "ticker": "AAPL",
+                    "error": (
+                        "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。"
+                        "status=NOT_SENT / message=contract rejected / "
+                        "errors=[{'code': 200, 'message': 'No security definition'}]"
+                    ),
+                }
+            ],
+        },
+    )
+    paper_trading_runner.main()
+    output = capsys.readouterr().out
+    assert "AAPL: BROKER_FILL_UNCONFIRMED" in output
+    assert "No security definition" not in output
+    assert "contract rejected" not in output
+    assert "NOT_SENT" not in output
+
+
 def test_unconfirmed_ibkr_result_exposes_observed_details():
     result = SimpleNamespace(status="NOT_SENT", sent=False, order_id=None, reached_terminal=False, timed_out=False, last_known_status=None, filled_quantity=0.0, avg_fill_price=None, message="contract rejected", errors=[{"code": 200, "message": "No security definition"}])
     execution = SimpleNamespace(attempted=True, reason="submitted", broker_result=result)
