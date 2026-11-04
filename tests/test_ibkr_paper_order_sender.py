@@ -153,6 +153,41 @@ def test_order_ref_is_left_unset_without_order_intent_id():
     assert prepared.order.orderRef == ""
 
 
+def test_order_disables_etrade_only_and_firm_quote_only():
+    # Regression for the natural-strategy Paper BUY failure discovered
+    # 2026-11-04: ibapi.Order's own constructor defaults both fields to
+    # True, which current TWS rejects with error 10268 ("EtradeOnly order
+    # attribute is not supported") during API validation -- the exact same
+    # bug class fixed for the Live sender in PR #347
+    # (live_pilot_single_send.py), but never applied here until now. Every
+    # one of the 36 natural AAPL BUY signals observed in
+    # results/ibkr_paper_signal_runner_autopilot.log between 2026-10-28 and
+    # 2026-10-31 failed with this path unfixed.
+    prepared = prepare_ibkr_paper_order(
+        OrderRequest(symbol="AAPL", side=OrderSide.BUY, quantity=1),
+        create_ibkr_paper_config(),
+    )
+    assert prepared.order.eTradeOnly is False
+    assert prepared.order.firmQuoteOnly is False
+
+
+def test_explicit_instrument_order_disables_etrade_only_and_firm_quote_only():
+    instrument = InstrumentSpec(
+        symbol="9432",
+        asset_class=AssetClass.STOCK,
+        exchange="TSEJ",
+        currency="JPY",
+        verified_paper_test_quantity=100,
+    )
+    prepared = prepare_ibkr_paper_order_for_instrument(
+        OrderRequest(symbol="9432", side=OrderSide.BUY, quantity=100),
+        instrument,
+        create_ibkr_paper_config(),
+    )
+    assert prepared.order.eTradeOnly is False
+    assert prepared.order.firmQuoteOnly is False
+
+
 def test_blocks_non_paper_configuration():
     with pytest.raises(RuntimeError, match="Paper Trading設定ではない"):
         prepare_ibkr_paper_order(
