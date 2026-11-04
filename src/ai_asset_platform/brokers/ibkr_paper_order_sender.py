@@ -73,6 +73,15 @@ def prepare_ibkr_paper_order_for_instrument(
     ib_order.totalQuantity = request.quantity
     ib_order.tif = "DAY"
     ib_order.outsideRth = bool(request.outside_rth)
+    # Same regression as the 2026-10-13 second Live pilot attempt
+    # (live_pilot_single_send.py): ibapi.Order's own constructor defaults
+    # these two long-deprecated SMART-routing-only fields to True. Current
+    # TWS rejects any order that still carries them as True with error
+    # 10268 ("EtradeOnly order attribute is not supported") during API
+    # validation, before the order is ever admitted into the book -- this
+    # path never received the fix PR #347 applied only to the Live sender.
+    ib_order.eTradeOnly = False
+    ib_order.firmQuoteOnly = False
 
     if request.order_type is OrderType.MARKET:
         ib_order.orderType = "MKT"
