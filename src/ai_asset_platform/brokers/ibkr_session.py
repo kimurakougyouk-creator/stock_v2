@@ -191,6 +191,11 @@ class IbkrPaperSession:
         return self.client.isConnected()
 
     @property
+    def managed_accounts(self) -> tuple[str, ...]:
+        """Account IDs the broker returned for this exact connection (managedAccounts callback)."""
+        return tuple(self.client.accounts)
+
+    @property
     def message_loop_alive(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
 

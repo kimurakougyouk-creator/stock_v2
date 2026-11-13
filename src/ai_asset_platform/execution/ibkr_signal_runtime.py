@@ -84,6 +84,20 @@ def _exact_runtime_source_sha(repository_root: Path = Path(".")) -> str:
     return sha
 
 
+_PAPER_ACCOUNT_PREFIX = "DU"
+
+
+def _managed_accounts_are_confirmed_paper(accounts: tuple[str, ...]) -> bool:
+    """IBKR's own Paper-account convention: every managed account ID starts with 'DU'.
+
+    Zero accounts (callback not yet observed, or empty) is treated as NOT confirmed,
+    never as an implicit pass -- this guard is fail-closed by design.
+    """
+    return bool(accounts) and all(
+        account.strip().upper().startswith(_PAPER_ACCOUNT_PREFIX) for account in accounts
+    )
+
+
 def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
     errors: list[str] = []
     for use_gateway in (True, False):
@@ -91,12 +105,24 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
         broker = IbkrBrokerAdapter(config=config, enable_paper_order_transmission=True)
         try:
             if broker.connect():
+                accounts = broker.managed_accounts()
+                if not _managed_accounts_are_confirmed_paper(accounts):
+                    errors.append(
+                        f"port={config.port}: connected account is not confirmed Paper "
+                        f"(managed account count={len(accounts)})"
+                    )
+                    continue
                 return broker
             errors.append(f"port={config.port}: connect returned False")
         except Exception as exc:
             errors.append(f"port={config.port}: {exc}")
         finally:
             if not broker.is_connected():
+                try:
+                    broker.disconnect()
+                except Exception:
+                    pass
+            elif not _managed_accounts_are_confirmed_paper(broker.managed_accounts()):
                 try:
                     broker.disconnect()
                 except Exception:
