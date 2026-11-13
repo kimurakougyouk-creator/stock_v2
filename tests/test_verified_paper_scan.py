@@ -212,6 +212,17 @@ def test_classify_paper_execution_error_broker_fill_unconfirmed():
     ) == module.EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED
 
 
+def test_classify_paper_execution_error_broker_connection_failed():
+    label = module.classify_paper_execution_error(
+        "IBKR Paperへ接続できません: port=4002: connect returned False | port=7497: timeout"
+    )
+    assert label == module.EXECUTION_ERROR_CLASS_BROKER_CONNECTION_FAILED
+    assert "port=4002" not in label
+
+    label = module.classify_paper_execution_error("IBKRへ接続されていません")
+    assert label == module.EXECUTION_ERROR_CLASS_BROKER_CONNECTION_FAILED
+
+
 def test_classify_paper_execution_error_unknown_falls_back_without_leaking_text():
     label = module.classify_paper_execution_error("No security definition has been found")
     assert label == module.EXECUTION_ERROR_CLASS_UNKNOWN_ERROR
