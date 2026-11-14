@@ -88,6 +88,25 @@ def test_error_callback_still_sets_ready_for_connectivity_codes_only():
     assert any(e["code"] == 1100 for e in client.errors)
 
 
+def test_error_callback_tolerates_the_legacy_3arg_ibapi_calling_convention():
+    """実機で確認した2026-11-14の発見: 実際にインストールされているibapi
+
+    9.81.1系は、error()を(reqId, errorCode, errorString)の3引数で呼ぶ。
+    以前の固定5引数シグネチャでは、実機で本当に発生するこの呼び出しが
+    TypeErrorでクラッシュし、メッセージループが静かに停止して診断情報が
+    一件も残らなかった(原因不明のUNKNOWN_ERRORの一因)。
+    """
+    client = _IbkrPaperClient()
+
+    # 旧ibapiの実際の呼び出し形: reqId, errorCode, errorString のみ。
+    client.error(-1, 502, "Couldn't connect to TWS. Confirm that \"Enable ActiveX and Socket EClients\" is enabled.")
+
+    assert len(client.errors) == 1
+    assert client.errors[0]["code"] == 502
+    assert client.errors[0]["error_time"] is None
+    assert client.ready.is_set() is True
+
+
 # --- openOrder()コールバック: 観測のみ、注文の変更・取消はしない ---
 
 

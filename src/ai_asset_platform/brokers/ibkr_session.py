@@ -144,26 +144,36 @@ class _IbkrPaperClient(EWrapper, EClient):
             "status": getattr(orderState, "status", None),
         }
 
-    def error(
-        self,
-        reqId,
-        errorTime,
-        errorCode,
-        errorString,
-        advancedOrderRejectJson="",
-    ):
+    def error(self, reqId, *args):
+        """EWrapper.errorの引数形はibapiのバージョンで異なる(例: 9.81.1系は
+        (reqId, errorCode, errorString)の3引数、10.19以降は
+        (reqId, errorTime, errorCode, errorString, advancedOrderRejectJson)の
+        4〜5引数)。固定引数で宣言すると実行環境のibapiバージョンと食い違った
+        場合にこのコールバック自体がTypeErrorで失敗し、メッセージループが
+        死んでerrorsへの観測が一件も残らない(診断不能になる)ため、*argsで
+        両方の呼び出し形を受け止める。
+        """
+        if len(args) >= 3:
+            error_time, error_code, error_string = args[0], args[1], args[2]
+            advanced_order_reject_json = args[3] if len(args) > 3 else ""
+        else:
+            error_time = None
+            error_code = args[0] if len(args) > 0 else -1
+            error_string = args[1] if len(args) > 1 else ""
+            advanced_order_reject_json = ""
+
         # 観測用に全コード・全メッセージを保持する(既存の接続用ready.set()は維持)。
         self.errors.append(
             {
                 "req_id": reqId,
-                "error_time": errorTime,
-                "code": int(errorCode),
-                "message": str(errorString),
-                "advanced_order_reject_json": advancedOrderRejectJson,
+                "error_time": error_time,
+                "code": int(error_code),
+                "message": str(error_string),
+                "advanced_order_reject_json": advanced_order_reject_json,
             }
         )
 
-        if errorCode in {502, 503, 504, 1100}:
+        if error_code in {502, 503, 504, 1100}:
             self.ready.set()
 
 
