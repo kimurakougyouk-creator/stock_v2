@@ -16,6 +16,7 @@ from ai_asset_platform.core.settings import SETTINGS
 from ai_asset_platform.reports.strategy_source_attestation import (
     attest_strategy_source,
 )
+from ai_asset_platform.execution.broker_open_order_guard import evaluate_open_order_guard
 from ai_asset_platform.execution.broker_position_guard import evaluate_broker_position_guard
 from ai_asset_platform.execution.confirmed_fill_evidence import confirmed_fill_from_broker_result
 from ai_asset_platform.execution.ibkr_execution_reconcile import (
@@ -305,6 +306,10 @@ def execute_approved_signal_via_ibkr_paper(
         )
 
     instrument = _instrument_for_ticker(ticker)
+    open_order_guard = evaluate_open_order_guard(ticker=ticker, symbol=instrument.symbol)
+    if not open_order_guard.allowed:
+        return SignalExecutionResult(False, f"broker open order guard blocked: {open_order_guard.reason}")
+
     broker = _connect_first_available_paper_broker(expected_account_id=guard_account_id)
     service = ExecutionService(broker=broker, account=Account(initial_cash=0.0), risk_gate=build_shared_risk_gate())
     try:
