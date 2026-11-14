@@ -157,6 +157,12 @@ class IbkrBrokerAdapter(BrokerAdapter):
     def is_connected(self) -> bool:
         return self._session is not None and self._session.connected
 
+    def managed_accounts(self) -> tuple[str, ...]:
+        """Account IDs the broker returned for THIS connection, not a separate probe."""
+        if self._session is None:
+            return ()
+        return self._session.managed_accounts
+
     def disconnect(self) -> None:
         if self._session is not None:
             self._session.disconnect()

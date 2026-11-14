@@ -8,6 +8,7 @@ the account-currency preflight in the final order callback.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from ai_asset_platform.execution import order_manager
@@ -32,7 +33,27 @@ EXECUTION_ERROR_CLASS_INVALID_REFERENCE_PRICE = "INVALID_REFERENCE_PRICE"
 EXECUTION_ERROR_CLASS_HOLDING_AGE_ERROR = "HOLDING_AGE_ERROR"
 EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED = "BROKER_FILL_UNCONFIRMED"
 EXECUTION_ERROR_CLASS_STRATEGY_IDENTITY_ERROR = "STRATEGY_IDENTITY_ERROR"
+EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_NOT_CONFIRMED = "PAPER_ACCOUNT_NOT_CONFIRMED"
+EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_MISMATCH = "PAPER_ACCOUNT_MISMATCH"
 EXECUTION_ERROR_CLASS_UNKNOWN_ERROR = "UNKNOWN_ERROR"
+
+_IBKR_ERROR_CODES_RE = re.compile(r"ibkr_error_codes=\[([0-9, ]*)\]")
+
+
+def _extract_ibkr_error_codes(text: str) -> list[int]:
+    """Pull only the numeric IBKR error codes out of a connection-failure message.
+
+    Never extracts or returns the raw message text itself -- only digits
+    inside the already-safe ``ibkr_error_codes=[...]`` marker written by
+    _connect_first_available_paper_broker.
+    """
+    codes: set[int] = set()
+    for match in _IBKR_ERROR_CODES_RE.finditer(text):
+        for piece in match.group(1).split(","):
+            piece = piece.strip()
+            if piece.isdigit():
+                codes.add(int(piece))
+    return sorted(codes)
 
 
 def classify_paper_execution_error(message: str) -> str:
@@ -73,6 +94,16 @@ def classify_paper_execution_error(message: str) -> str:
         or "parameter identity is unavailable" in text
     ):
         return EXECUTION_ERROR_CLASS_STRATEGY_IDENTITY_ERROR
+    if "connected account is not confirmed Paper" in text:
+        return EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_NOT_CONFIRMED
+    if "broker position guard account id is unavailable" in text:
+        return EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_NOT_CONFIRMED
+    if "order-connection account does not match" in text:
+        return EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_MISMATCH
+    if "IBKR Paperへ接続できません" in text:
+        codes = _extract_ibkr_error_codes(text)
+        if codes:
+            return f"{EXECUTION_ERROR_CLASS_UNKNOWN_ERROR}(ibkr_error_codes={codes})"
     return EXECUTION_ERROR_CLASS_UNKNOWN_ERROR
 
 

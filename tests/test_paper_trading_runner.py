@@ -114,6 +114,42 @@ def test_paper_runner_main_prints_classified_label_never_raw_broker_text(monkeyp
     assert "NOT_SENT" not in output
 
 
+def test_paper_runner_main_prints_ibkr_error_code_on_connection_failure(monkeypatch, capsys):
+    """End-to-end: a simulated Paper connection failure must reach the final
+    log line as a diagnosable IBKR error code, never as a bare UNKNOWN_ERROR
+    and never with the raw message text or account id leaked.
+
+    Regression for the gap identified in PR #374 after merge-readiness
+    review: classify_paper_execution_error previously discarded the error
+    code captured by _connect_first_available_paper_broker before main()
+    printed it.
+    """
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "run_paper_trading",
+        lambda: {
+            "records": [{} for _ in range(1)],
+            "errors": [],
+            "execution_errors": [
+                {
+                    "ticker": "AAPL",
+                    "error": (
+                        "IBKR Paperへ接続できません: port=4002: connect returned False "
+                        "(ibkr_error_codes=[326]) | port=7497: connect returned False "
+                        "(ibkr_error_codes=[502])"
+                    ),
+                }
+            ],
+        },
+    )
+    paper_trading_runner.main()
+    output = capsys.readouterr().out
+    assert "AAPL: UNKNOWN_ERROR(ibkr_error_codes=[326, 502])" in output
+    assert "connect returned False" not in output
+    assert "port=4002" not in output
+    assert "port=7497" not in output
+
+
 def test_unconfirmed_ibkr_result_exposes_observed_details():
     result = SimpleNamespace(status="NOT_SENT", sent=False, order_id=None, reached_terminal=False, timed_out=False, last_known_status=None, filled_quantity=0.0, avg_fill_price=None, message="contract rejected", errors=[{"code": 200, "message": "No security definition"}])
     execution = SimpleNamespace(attempted=True, reason="submitted", broker_result=result)
