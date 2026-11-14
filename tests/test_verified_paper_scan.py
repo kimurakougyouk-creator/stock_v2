@@ -235,6 +235,22 @@ def test_classify_paper_execution_error_position_guard_account_id_unavailable():
     assert label == module.EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_NOT_CONFIRMED
 
 
+def test_classify_paper_execution_error_connection_failed_keeps_error_codes():
+    label = module.classify_paper_execution_error(
+        "IBKR Paperへ接続できません: port=4002: connect returned False "
+        "(ibkr_error_codes=[326]) | port=7497: connect returned False "
+        "(ibkr_error_codes=[502])"
+    )
+    assert label == "UNKNOWN_ERROR(ibkr_error_codes=[326, 502])"
+
+
+def test_classify_paper_execution_error_connection_failed_without_codes_falls_back():
+    label = module.classify_paper_execution_error(
+        "IBKR Paperへ接続できません: port=4002: Connection refused | port=7497: Connection refused"
+    )
+    assert label == module.EXECUTION_ERROR_CLASS_UNKNOWN_ERROR
+
+
 def test_classify_paper_execution_error_unknown_falls_back_without_leaking_text():
     label = module.classify_paper_execution_error("No security definition has been found")
     assert label == module.EXECUTION_ERROR_CLASS_UNKNOWN_ERROR
