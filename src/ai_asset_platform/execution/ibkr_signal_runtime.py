@@ -150,7 +150,10 @@ def _connect_first_available_paper_broker(
                     )
                     continue
                 return broker
-            errors.append(f"port={config.port}: connect returned False")
+            codes = sorted({int(e.get("code")) for e in broker.last_failed_errors if e.get("code") is not None})
+            errors.append(
+                f"port={config.port}: connect returned False (ibkr_error_codes={codes})"
+            )
         except Exception as exc:
             errors.append(f"port={config.port}: {exc}")
         finally:

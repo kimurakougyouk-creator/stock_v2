@@ -12,6 +12,7 @@ class FakeBroker:
         self.connected = False
         self.disconnect_calls = 0
         self._managed_accounts_calls = 0
+        self.last_failed_errors = []
         assert enable_paper_order_transmission is True
         self.__class__.created_ports.append(config.port)
 
@@ -200,6 +201,45 @@ def test_connect_rejects_endpoint_whose_account_does_not_match_position_guard(mo
         FakeBroker.connect = original_connect
 
     assert FakeBroker.created_ports == [4002, 7497]
+
+
+def test_connect_failure_surfaces_ibkr_error_codes_without_raw_message(monkeypatch):
+    """A failed connect must carry the IBKR error CODE for future diagnosis,
+
+    but never the raw error message text (which is not guaranteed to be
+    free of account-identifying detail, per the existing logging policy).
+    """
+    FakeBroker.created_ports = []
+    FakeBroker.successful_port = None
+    FakeBroker.accounts_by_port = {}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
+    monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
+    FakeBroker._failed_errors_by_port = {
+        4002: [{"code": 326, "message": "Unable to connect as the client id is already in use. DU1234567"}],
+        7497: [{"code": 502, "message": "Couldn't connect to TWS"}],
+    }
+    original_init = FakeBroker.__init__
+
+    def _init_with_failed_errors(self, *, config, enable_paper_order_transmission):
+        original_init(self, config=config, enable_paper_order_transmission=enable_paper_order_transmission)
+        self.last_failed_errors = FakeBroker._failed_errors_by_port.get(config.port, [])
+
+    monkeypatch.setattr(FakeBroker, "__init__", _init_with_failed_errors)
+    try:
+        try:
+            module._connect_first_available_paper_broker()
+        except RuntimeError as exc:
+            detail = str(exc)
+            assert "326" in detail
+            assert "502" in detail
+            assert "DU1234567" not in detail
+            assert "already in use" not in detail
+            assert "Couldn't connect to TWS" not in detail
+        else:
+            raise AssertionError("unreachable Paper endpoints must fail closed")
+    finally:
+        monkeypatch.setattr(FakeBroker, "__init__", original_init)
+        del FakeBroker._failed_errors_by_port
 
 
 def test_connect_rejects_endpoint_with_zero_managed_accounts(monkeypatch):
