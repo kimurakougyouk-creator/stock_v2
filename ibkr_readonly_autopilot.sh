@@ -9,6 +9,14 @@ LOG_DIR="$REPO_DIR/results"
 LOG_FILE="$LOG_DIR/ibkr_readonly_autopilot.log"
 ROTATED_LOG_FILE="$LOG_FILE.1"
 MONITOR_LOG="$LOG_DIR/ibkr_paper_operations_monitor_latest.log"
+TRUSTED_PYTHON="/usr/bin/python3"
+ISOLATED_RUNNER="$REPO_DIR/scripts/run_isolated_venv_python.py"
+STRICT_MONITOR_MODULE="ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict"
+
+# Python is always launched with -I -S through the attested runner below.
+# Clear inherited Python path/home hints anyway so non-Python helper commands
+# cannot accidentally propagate them to a future child process.
+unset PYTHONPATH PYTHONHOME
 
 cd "$REPO_DIR"
 mkdir -p "$LOG_DIR"
@@ -85,37 +93,31 @@ while true; do
       echo "AUTOPILOT SOURCE BLOCKED: local HEAD $current_head differs from pinned audited HEAD $PINNED_HEAD. Rerun the tested installer after review."
     elif ! tracked_source_is_clean; then
       echo "AUTOPILOT SOURCE BLOCKED: tracked source differs from pinned HEAD outside runtime output directories. Monitoring code was not executed."
-    elif [[ -f .venv/bin/activate ]]; then
-      source .venv/bin/activate
-      unset PYTHONPATH
-      # Install-time migration/verification (install_ibkr_readonly_autopilot.sh)
-      # is not enough on its own for a daemon that loops indefinitely: .venv's
-      # binding could change between cycles without a restart, and each cycle
-      # spawns a fresh monitor subprocess that would pick up whatever is
-      # there *then*. Re-verify every cycle, immediately before the monitor
-      # -- read-only, no migration attempt (this daemon never touches pip or
-      # git) -- and skip the monitor entirely on failure.
-      if ! python scripts/verify_exact_checkout_import.py; then
-        echo "AUTOPILOT SOURCE BLOCKED: exact checkout runtime binding failed this cycle. Monitoring code was not executed."
-      else
-        set +e
-        # Strict unattended policy: run only the IBKR-scoped read-only monitor.
-        # Legacy local PAPER simulation rows are excluded from live Paper-account
-        # risk state, while a complete broker snapshot is checked for every actual
-        # non-zero position. No order API request is used by this path.
-        python -m ai_asset_platform.brokers.ibkr_paper_operations_monitor_strict \
+    elif [[ -x .venv/bin/python && -f "$ISOLATED_RUNNER" && -x "$TRUSTED_PYTHON" ]]; then
+      set +e
+      # Strict unattended policy: execute only the read-only Paper monitor
+      # through the already-audited isolated bootstrap. The bootstrap attests
+      # the current source, verifies the venv dependency bytes, blocks startup
+      # hooks/cwd shadowing with -I -S, and (via the explicit flag below)
+      # verifies the pinned ibapi manifest before importing broker modules.
+      #
+      # Existing monitor environment variables remain inherited unchanged;
+      # Python-specific path/home injection is ignored by -I and cleared above.
+      AI_ASSET_PLATFORM_ROOT="$REPO_DIR" \
+      AI_ASSET_REQUIRE_PINNED_IBAPI=1 \
+        "$TRUSTED_PYTHON" -I -S "$ISOLATED_RUNNER" \
+          -m "$STRICT_MONITOR_MODULE" \
           2>&1 | tee "$MONITOR_LOG"
-        monitor_status=${PIPESTATUS[0]}
-        set -e
-        if [[ "$monitor_status" -eq 2 ]]; then
-          echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
-        elif [[ "$monitor_status" -eq 1 ]]; then
-          echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
-        fi
-        echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
+      monitor_status=${PIPESTATUS[0]}
+      set -e
+      if [[ "$monitor_status" -eq 2 ]]; then
+        echo "PAPER OPERATIONS CRITICAL: manual review is required; no order was changed, cancelled, or retried."
+      elif [[ "$monitor_status" -eq 1 ]]; then
+        echo "PAPER OPERATIONS WARNING: monitoring continues; no order was changed, cancelled, or retried."
       fi
+      echo "PAPER OPERATIONS MONITOR LOG: $MONITOR_LOG"
     else
-      echo "SKIP: .venv/bin/activate not found. No order was sent."
+      echo "AUTOPILOT SOURCE BLOCKED: trusted Python, isolated runner, or .venv Python is unavailable. Monitoring code was not executed."
     fi
     echo "PINNED AUDITED HEAD: $PINNED_HEAD"
     echo "ORDER API REQUEST SENT: False"
