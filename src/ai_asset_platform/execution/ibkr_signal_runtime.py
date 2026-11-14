@@ -118,7 +118,18 @@ def _await_managed_accounts(broker: IbkrBrokerAdapter) -> tuple[str, ...]:
     return accounts
 
 
-def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
+def _connect_first_available_paper_broker(
+    *, expected_account_id: str | None = None
+) -> IbkrBrokerAdapter:
+    """Connect to a confirmed-Paper IBKR endpoint for the actual order.
+
+    When ``expected_account_id`` is given (the account already confirmed by
+    the pre-order broker_position_guard snapshot, which is a SEPARATE
+    connection), this connection's managed account must match it exactly.
+    Without this check, the holdings safety check and the order transmission
+    could silently run against two different "DU"-prefixed Paper accounts.
+    Fail-closed: a mismatch is treated the same as "not confirmed Paper".
+    """
     errors: list[str] = []
     for use_gateway in (True, False):
         config = create_ibkr_paper_config(use_gateway=use_gateway)
@@ -132,6 +143,12 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
                         f"(managed account count={len(accounts)})"
                     )
                     continue
+                if expected_account_id is not None and accounts != (expected_account_id,):
+                    errors.append(
+                        f"port={config.port}: order-connection account does not match "
+                        "the account verified by the pre-order position guard"
+                    )
+                    continue
                 return broker
             errors.append(f"port={config.port}: connect returned False")
         except Exception as exc:
@@ -143,6 +160,14 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
                 except Exception:
                     pass
             elif not _managed_accounts_are_confirmed_paper(broker.managed_accounts()):
+                try:
+                    broker.disconnect()
+                except Exception:
+                    pass
+            elif (
+                expected_account_id is not None
+                and broker.managed_accounts() != (expected_account_id,)
+            ):
                 try:
                     broker.disconnect()
                 except Exception:
@@ -266,8 +291,18 @@ def execute_approved_signal_via_ibkr_paper(
     if not position_guard.allowed:
         return SignalExecutionResult(False, f"broker position guard blocked: {position_guard.reason}")
 
+    guard_account_id = (
+        str(position_guard.account.account_id).strip()
+        if position_guard.account is not None and position_guard.account.account_id
+        else None
+    )
+    if guard_account_id is None:
+        return SignalExecutionResult(
+            False, "broker position guard account id is unavailable; Paper order blocked"
+        )
+
     instrument = _instrument_for_ticker(ticker)
-    broker = _connect_first_available_paper_broker()
+    broker = _connect_first_available_paper_broker(expected_account_id=guard_account_id)
     service = ExecutionService(broker=broker, account=Account(initial_cash=0.0), risk_gate=build_shared_risk_gate())
     try:
         execution = execute_signal_via_ibkr_paper(

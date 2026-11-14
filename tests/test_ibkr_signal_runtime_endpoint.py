@@ -158,6 +158,50 @@ def test_connect_waits_for_delayed_managed_accounts_callback(monkeypatch):
     assert FakeBroker.created_ports == [4002]
 
 
+def test_connect_accepts_endpoint_matching_expected_account_id(monkeypatch):
+    FakeBroker.created_ports = []
+    FakeBroker.successful_port = 4002
+    FakeBroker.accounts_by_port = {4002: ("DU1234567",)}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
+    monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
+
+    broker = module._connect_first_available_paper_broker(expected_account_id="DU1234567")
+
+    assert broker.config.port == 4002
+    assert broker.managed_accounts() == ("DU1234567",)
+
+
+def test_connect_rejects_endpoint_whose_account_does_not_match_position_guard(monkeypatch):
+    """Regression for the position-guard-vs-order-connection account mismatch gap.
+
+    Both connections can independently be valid 'DU'-prefixed Paper accounts
+    while being different sub-accounts. The order-placing connection must be
+    rejected unless it matches the account already confirmed by the pre-order
+    broker_position_guard snapshot.
+    """
+    FakeBroker.created_ports = []
+    FakeBroker.successful_port = None
+    FakeBroker.accounts_by_port = {4002: ("DU9999999",), 7497: ("DU9999999",)}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
+    monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
+
+    original_connect = FakeBroker.connect
+    FakeBroker.connect = lambda self: True
+    try:
+        try:
+            module._connect_first_available_paper_broker(expected_account_id="DU1234567")
+        except RuntimeError as exc:
+            assert "order-connection account does not match" in str(exc)
+            assert "DU9999999" not in str(exc)
+            assert "DU1234567" not in str(exc)
+        else:
+            raise AssertionError("a mismatched account must never be accepted")
+    finally:
+        FakeBroker.connect = original_connect
+
+    assert FakeBroker.created_ports == [4002, 7497]
+
+
 def test_connect_rejects_endpoint_with_zero_managed_accounts(monkeypatch):
     FakeBroker.created_ports = []
     FakeBroker.successful_port = None
