@@ -88,6 +88,36 @@ def test_open_order_guard_checks_the_instrument_symbol_not_the_ticker(monkeypatc
     assert captured["symbol"] == "9432"
 
 
+def test_open_order_guard_is_bound_to_the_same_account_as_the_order_connection(monkeypatch):
+    """Codex finding on PR #375: the open-order snapshot must be bound to the
+    exact account the position guard verified, or Gateway/TWS exposing
+    different accounts could let a duplicate order through."""
+    _pass_through_guards(monkeypatch, account_id="DU9999999")
+    captured = {}
+
+    def _fake_guard(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(allowed=False, reason="an open order already exists at the broker for this symbol (order_id=[1])")
+
+    monkeypatch.setattr(module, "evaluate_open_order_guard", _fake_guard)
+    monkeypatch.setattr(
+        module,
+        "_connect_first_available_paper_broker",
+        lambda **kwargs: pytest.fail("broker connection must not happen while an open order exists"),
+    )
+
+    module.execute_approved_signal_via_ibkr_paper(
+        ticker="AAPL",
+        signal="BUY",
+        shares=1,
+        order_intent_id="signal-runner:AAPL:BUY:1:bar5",
+        process_start_source_sha="a" * 40,
+        strategy_parameters_sha="b" * 64,
+    )
+
+    assert captured["expected_account_id"] == "DU9999999"
+
+
 def test_open_order_guard_allows_broker_connection_when_no_open_order_exists(monkeypatch):
     _pass_through_guards(monkeypatch)
     monkeypatch.setattr(

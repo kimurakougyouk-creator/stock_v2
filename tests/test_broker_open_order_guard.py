@@ -55,8 +55,26 @@ def test_guard_calls_broker_when_no_snapshot_is_supplied(monkeypatch):
     monkeypatch.setattr(
         module,
         "preview_ibkr_paper_all_open_orders",
-        lambda: calls.append(True) or _snapshot(orders=()),
+        lambda **kwargs: calls.append(kwargs) or _snapshot(orders=()),
     )
     result = module.evaluate_open_order_guard(ticker="AAPL", symbol="AAPL")
-    assert calls == [True]
+    assert calls == [{"expected_account_id": None}]
     assert result.allowed is True
+
+
+def test_guard_forwards_expected_account_id_to_the_broker_probe(monkeypatch):
+    """Codex finding on PR #375: the open-order probe independently tries
+    Gateway then TWS and must be bound to the same account the order-placing
+    connection was verified against, or a Gateway/TWS account mismatch could
+    return an empty snapshot from the wrong account and wrongly allow a
+    duplicate order through."""
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "preview_ibkr_paper_all_open_orders",
+        lambda **kwargs: calls.append(kwargs) or _snapshot(orders=()),
+    )
+    module.evaluate_open_order_guard(
+        ticker="AAPL", symbol="AAPL", expected_account_id="DU1234567"
+    )
+    assert calls == [{"expected_account_id": "DU1234567"}]

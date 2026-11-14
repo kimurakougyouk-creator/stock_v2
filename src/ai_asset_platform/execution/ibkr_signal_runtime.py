@@ -306,7 +306,9 @@ def execute_approved_signal_via_ibkr_paper(
         )
 
     instrument = _instrument_for_ticker(ticker)
-    open_order_guard = evaluate_open_order_guard(ticker=ticker, symbol=instrument.symbol)
+    open_order_guard = evaluate_open_order_guard(
+        ticker=ticker, symbol=instrument.symbol, expected_account_id=guard_account_id
+    )
     if not open_order_guard.allowed:
         return SignalExecutionResult(False, f"broker open order guard blocked: {open_order_guard.reason}")
 

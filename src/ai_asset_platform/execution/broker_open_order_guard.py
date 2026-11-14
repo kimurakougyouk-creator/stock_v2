@@ -39,9 +39,16 @@ def evaluate_open_order_guard(
     *,
     ticker: str,
     symbol: str,
+    expected_account_id: str | None = None,
     snapshot: IbkrAllOpenOrdersSnapshot | None = None,
 ) -> OpenOrderGuardResult:
-    """Block a new order when one is already open at the broker for ``symbol``."""
+    """Block a new order when one is already open at the broker for ``symbol``.
+
+    ``expected_account_id`` binds the open-order snapshot to the exact same
+    account the order-placing connection will be verified against, so a
+    Gateway/TWS account mismatch cannot return an empty snapshot from the
+    wrong account and wrongly allow a duplicate order through.
+    """
     normalized_ticker = str(ticker).strip().upper()
     normalized_symbol = str(symbol).strip().upper()
     if not normalized_ticker or not normalized_symbol:
@@ -49,7 +56,11 @@ def evaluate_open_order_guard(
             False, "invalid order identity for open order guard", normalized_ticker, normalized_symbol, ()
         )
 
-    broker_snapshot = snapshot if snapshot is not None else preview_ibkr_paper_all_open_orders()
+    broker_snapshot = (
+        snapshot
+        if snapshot is not None
+        else preview_ibkr_paper_all_open_orders(expected_account_id=expected_account_id)
+    )
     if not broker_snapshot.ready:
         return OpenOrderGuardResult(
             False, "broker open-order snapshot is not ready", normalized_ticker, normalized_symbol, ()
