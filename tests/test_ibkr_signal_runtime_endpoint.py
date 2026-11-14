@@ -5,11 +5,13 @@ class FakeBroker:
     created_ports = []
     successful_port = None
     accounts_by_port = {}
+    delayed_calls_before_arrival_by_port = {}
 
     def __init__(self, *, config, enable_paper_order_transmission):
         self.config = config
         self.connected = False
         self.disconnect_calls = 0
+        self._managed_accounts_calls = 0
         assert enable_paper_order_transmission is True
         self.__class__.created_ports.append(config.port)
 
@@ -25,6 +27,10 @@ class FakeBroker:
         self.connected = False
 
     def managed_accounts(self):
+        self._managed_accounts_calls += 1
+        delay = self.__class__.delayed_calls_before_arrival_by_port.get(self.config.port, 0)
+        if self._managed_accounts_calls <= delay:
+            return ()
         return self.__class__.accounts_by_port.get(self.config.port, ("DU1234567",))
 
 
@@ -32,6 +38,7 @@ def test_signal_runtime_falls_back_from_gateway_4002_to_tws_7497(monkeypatch):
     FakeBroker.created_ports = []
     FakeBroker.successful_port = 7497
     FakeBroker.accounts_by_port = {}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
     monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
 
     broker = module._connect_first_available_paper_broker()
@@ -45,6 +52,7 @@ def test_signal_runtime_prefers_gateway_4002_when_reachable(monkeypatch):
     FakeBroker.created_ports = []
     FakeBroker.successful_port = 4002
     FakeBroker.accounts_by_port = {}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
     monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
 
     broker = module._connect_first_available_paper_broker()
@@ -58,6 +66,7 @@ def test_endpoint_failure_happens_before_any_order_execution(monkeypatch):
     FakeBroker.created_ports = []
     FakeBroker.successful_port = None
     FakeBroker.accounts_by_port = {}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
     monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
 
     called = {"execute": 0}
@@ -90,6 +99,7 @@ def test_connect_rejects_endpoint_whose_account_is_not_confirmed_paper(monkeypat
     FakeBroker.created_ports = []
     FakeBroker.successful_port = None  # both ports report connect() == True below
     FakeBroker.accounts_by_port = {4002: ("U7654321",), 7497: ("U7654321",)}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
     monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
 
     original_connect = FakeBroker.connect
@@ -111,6 +121,7 @@ def test_connect_rejects_endpoint_whose_account_is_not_confirmed_paper(monkeypat
 def test_connect_falls_back_when_gateway_account_is_not_confirmed_paper(monkeypatch):
     FakeBroker.created_ports = []
     FakeBroker.accounts_by_port = {4002: ("U7654321",), 7497: ("DU1234567",)}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
     monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
 
     original_connect = FakeBroker.connect
@@ -125,10 +136,33 @@ def test_connect_falls_back_when_gateway_account_is_not_confirmed_paper(monkeypa
     assert FakeBroker.created_ports == [4002, 7497]
 
 
+def test_connect_waits_for_delayed_managed_accounts_callback(monkeypatch):
+    """Codex finding (PR #374): connect() only waits on nextValidId, not managedAccounts.
+
+    managedAccounts can legitimately arrive after connect() returns, so a
+    valid Paper endpoint must not be rejected just because its account list
+    is still empty on the very first read.
+    """
+    FakeBroker.created_ports = []
+    FakeBroker.successful_port = 4002
+    FakeBroker.accounts_by_port = {4002: ("DU1234567",)}
+    # Empty on the first 2 reads, present from the 3rd read onward.
+    FakeBroker.delayed_calls_before_arrival_by_port = {4002: 2}
+    monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    broker = module._connect_first_available_paper_broker()
+
+    assert broker.config.port == 4002
+    assert broker.managed_accounts() == ("DU1234567",)
+    assert FakeBroker.created_ports == [4002]
+
+
 def test_connect_rejects_endpoint_with_zero_managed_accounts(monkeypatch):
     FakeBroker.created_ports = []
     FakeBroker.successful_port = None
     FakeBroker.accounts_by_port = {4002: (), 7497: ()}
+    FakeBroker.delayed_calls_before_arrival_by_port = {}
     monkeypatch.setattr(module, "IbkrBrokerAdapter", FakeBroker)
 
     original_connect = FakeBroker.connect

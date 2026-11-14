@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import subprocess
+import time
 
 from ai_asset_platform.account import Account
 from ai_asset_platform.brokers.ibkr import IbkrBrokerAdapter
@@ -85,6 +86,8 @@ def _exact_runtime_source_sha(repository_root: Path = Path(".")) -> str:
 
 
 _PAPER_ACCOUNT_PREFIX = "DU"
+_ACCOUNT_VERIFICATION_TIMEOUT_SECONDS = 2.0
+_ACCOUNT_VERIFICATION_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _managed_accounts_are_confirmed_paper(accounts: tuple[str, ...]) -> bool:
@@ -98,6 +101,23 @@ def _managed_accounts_are_confirmed_paper(accounts: tuple[str, ...]) -> bool:
     )
 
 
+def _await_managed_accounts(broker: IbkrBrokerAdapter) -> tuple[str, ...]:
+    """Wait up to a short bound for IBKR's managedAccounts callback.
+
+    connect() only waits on the nextValidId readiness event; managedAccounts
+    can legitimately arrive slightly after it (timing is not guaranteed by the
+    IBKR API), so an empty accounts tuple immediately after connect() does not
+    by itself mean the endpoint lacks a Paper account. Mirrors the existing
+    bounded-wait pattern in ibkr_first_paper_test.py's _verify_required_account.
+    """
+    deadline = time.monotonic() + _ACCOUNT_VERIFICATION_TIMEOUT_SECONDS
+    accounts = broker.managed_accounts()
+    while not accounts and time.monotonic() < deadline:
+        time.sleep(_ACCOUNT_VERIFICATION_POLL_INTERVAL_SECONDS)
+        accounts = broker.managed_accounts()
+    return accounts
+
+
 def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
     errors: list[str] = []
     for use_gateway in (True, False):
@@ -105,7 +125,7 @@ def _connect_first_available_paper_broker() -> IbkrBrokerAdapter:
         broker = IbkrBrokerAdapter(config=config, enable_paper_order_transmission=True)
         try:
             if broker.connect():
-                accounts = broker.managed_accounts()
+                accounts = _await_managed_accounts(broker)
                 if not _managed_accounts_are_confirmed_paper(accounts):
                     errors.append(
                         f"port={config.port}: connected account is not confirmed Paper "
