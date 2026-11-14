@@ -235,6 +235,22 @@ def test_classify_paper_execution_error_position_guard_account_id_unavailable():
     assert label == module.EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_NOT_CONFIRMED
 
 
+def test_classify_paper_execution_error_open_order_already_exists():
+    label = module.classify_paper_execution_error(
+        "broker open order guard blocked: an open order already exists at the broker "
+        "for this symbol (order_id=[7])"
+    )
+    assert label == module.EXECUTION_ERROR_CLASS_OPEN_ORDER_ALREADY_EXISTS
+    assert "order_id" not in label
+
+
+def test_classify_paper_execution_error_open_order_snapshot_not_ready():
+    label = module.classify_paper_execution_error(
+        "broker open order guard blocked: broker open-order snapshot is not ready"
+    )
+    assert label == module.EXECUTION_ERROR_CLASS_OPEN_ORDER_ALREADY_EXISTS
+
+
 def test_classify_paper_execution_error_connection_failed_keeps_error_codes():
     label = module.classify_paper_execution_error(
         "IBKR Paperへ接続できません: port=4002: connect returned False "

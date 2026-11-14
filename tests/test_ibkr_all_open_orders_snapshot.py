@@ -42,6 +42,13 @@ def test_open_order_callback_captures_manual_review_evidence():
     ]
 
 
+def test_managed_accounts_callback_captures_account_list():
+    probe = module._AllOpenOrdersProbe()
+    assert probe.accounts == []
+    probe.managedAccounts("DUR570982")
+    assert probe.accounts == ["DUR570982"]
+
+
 def test_open_order_end_marks_snapshot_ready():
     probe = module._AllOpenOrdersProbe()
     assert not probe.orders_ready.is_set()

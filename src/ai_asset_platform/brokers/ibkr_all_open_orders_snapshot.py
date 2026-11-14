@@ -6,6 +6,7 @@ module deliberately takes no corrective broker action.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from threading import Event, Thread
 
@@ -16,6 +17,15 @@ from ai_asset_platform.brokers.ibkr_config import create_ibkr_paper_config
 from ai_asset_platform.brokers.ibkr_thread_runner import (
     run_ibapi_message_loop_safely,
 )
+
+# managedAccounts can legitimately arrive slightly after the nextValidId
+# readiness event (timing is not guaranteed by the IBKR API), so this probe
+# polls briefly for it rather than trusting an empty accounts tuple
+# immediately after connect(). Mirrors the bounded wait already used for the
+# order-placing connection in ibkr_signal_runtime.py's
+# ``_await_managed_accounts``.
+_ACCOUNT_VERIFICATION_TIMEOUT_SECONDS = 3.0
+_ACCOUNT_VERIFICATION_POLL_INTERVAL_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -71,10 +81,16 @@ class _AllOpenOrdersProbe(EWrapper, EClient):
         self.orders_ready = Event()
         self.orders: list[IbkrOpenOrderEvidence] = []
         self.errors: list[str] = []
+        self.accounts: list[str] = []
         self.fatal = False
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         self.connected_ready.set()
+
+    def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
+        self.accounts = [
+            account.strip() for account in accountsList.split(",") if account.strip()
+        ]
 
     def openOrder(self, orderId, contract, order, orderState) -> None:  # noqa: N802
         self.orders.append(
@@ -118,9 +134,20 @@ class _AllOpenOrdersProbe(EWrapper, EClient):
 
 
 def preview_ibkr_paper_all_open_orders(
-    *, timeout: float = 10.0
+    *, timeout: float = 10.0, expected_account_id: str | None = None
 ) -> IbkrAllOpenOrdersSnapshot:
-    """Collect all currently open Paper orders without taking broker action."""
+    """Collect all currently open Paper orders without taking broker action.
+
+    ``expected_account_id``, when given, binds this probe to the exact same
+    account the order-placing connection was verified against
+    (``_connect_first_available_paper_broker(expected_account_id=...)``).
+    Without this, Gateway (port 4002) and TWS (port 7497) can expose
+    different Paper accounts: this probe independently tries both ports and
+    would otherwise accept the first one that answers, regardless of which
+    account it belongs to -- an empty snapshot from the wrong account would
+    then wrongly authorize a duplicate order against a symbol that already
+    has a resting order on the account actually being traded.
+    """
     collected_errors: list[str] = []
     for use_gateway in (True, False):
         config = create_ibkr_paper_config(use_gateway=use_gateway)
@@ -139,6 +166,16 @@ def preview_ibkr_paper_all_open_orders(
             if not probe.connected_ready.wait(timeout) or probe.fatal:
                 collected_errors.extend(probe.errors)
                 continue
+            if expected_account_id is not None:
+                deadline = time.monotonic() + _ACCOUNT_VERIFICATION_TIMEOUT_SECONDS
+                while not probe.accounts and time.monotonic() < deadline:
+                    time.sleep(_ACCOUNT_VERIFICATION_POLL_INTERVAL_SECONDS)
+                if tuple(probe.accounts) != (expected_account_id,):
+                    collected_errors.append(
+                        f"{config.port}: open-order snapshot account does not match "
+                        "the account verified by the pre-order position guard"
+                    )
+                    continue
             probe.reqAllOpenOrders()
             if not probe.orders_ready.wait(timeout) or probe.fatal:
                 collected_errors.extend(probe.errors)
