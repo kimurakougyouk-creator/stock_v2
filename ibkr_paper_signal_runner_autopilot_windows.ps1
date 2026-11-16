@@ -592,21 +592,38 @@ while ($true) {
                 # operator used elsewhere in this script) so the approval
                 # deadline can still be enforced -- including a forced kill --
                 # against this specific invocation while it is running.
-                $runnerStdoutFile = [System.IO.Path]::GetTempFileName()
-                $runnerStderrFile = [System.IO.Path]::GetTempFileName()
+                # Deliberately NOT `Start-Process -NoNewWindow -PassThru` with
+                # file-based -RedirectStandardOutput/-RedirectStandardError:
+                # on this environment (Windows PowerShell 5.1), either
+                # -NoNewWindow or that redirection style independently makes
+                # the returned Process object's .ExitCode always read back
+                # $null after the process has exited -- confirmed
+                # reproducible 100% of the time (every historical "PAPER
+                # TRADING RUNNER EXIT CODE:" log line was blank). Building the
+                # .NET Process object directly, with CreateNoWindow=$true and
+                # in-memory async stream reads, was verified live to return
+                # the real exit code reliably instead.
+                $runnerPsi = New-Object System.Diagnostics.ProcessStartInfo
+                $runnerPsi.FileName = $PythonExe
+                $runnerPsi.Arguments = "-m paper_trading_runner"
+                $runnerPsi.WorkingDirectory = $RepoDir
+                $runnerPsi.UseShellExecute = $false
+                $runnerPsi.CreateNoWindow = $true
+                $runnerPsi.RedirectStandardOutput = $true
+                $runnerPsi.RedirectStandardError = $true
+                $runnerProc = New-Object System.Diagnostics.Process
+                $runnerProc.StartInfo = $runnerPsi
                 try {
-                    $runnerProc = Start-Process -FilePath $PythonExe `
-                        -ArgumentList "-m paper_trading_runner" `
-                        -NoNewWindow -PassThru -WorkingDirectory $RepoDir `
-                        -RedirectStandardOutput $runnerStdoutFile `
-                        -RedirectStandardError $runnerStderrFile
+                    [void]$runnerProc.Start()
+                    $runnerStdoutTask = $runnerProc.StandardOutput.ReadToEndAsync()
+                    $runnerStderrTask = $runnerProc.StandardError.ReadToEndAsync()
 
                     $deadlineResult = Wait-ProcessWithDeadline -Process $runnerProc -DeadlineUtc $deadlineUtc
 
                     $runnerStdoutText = ""
                     $runnerStderrText = ""
-                    try { $runnerStdoutText = Get-Content -LiteralPath $runnerStdoutFile -Raw -ErrorAction SilentlyContinue } catch {}
-                    try { $runnerStderrText = Get-Content -LiteralPath $runnerStderrFile -Raw -ErrorAction SilentlyContinue } catch {}
+                    try { $runnerStdoutText = $runnerStdoutTask.Result } catch {}
+                    try { $runnerStderrText = $runnerStderrTask.Result } catch {}
                     $runnerLines = @(
                         @($runnerStdoutText -split "`r?`n") + @($runnerStderrText -split "`r?`n") |
                             Where-Object { $_ -ne "" }
@@ -651,12 +668,17 @@ while ($true) {
                         Exit-AutopilotCritical -Reason "Paper trading runner process (PID $($deadlineResult.ProcessId)) could not be independently confirmed terminated after the approval deadline was reached."
                     } else {
                         $runnerStatus = $null
-                        try { $runnerStatus = $runnerProc.ExitCode } catch {}
-                        Add-AutopilotLogSafe -Lines @("PAPER TRADING RUNNER EXIT CODE: $runnerStatus")
+                        $runnerStatusError = $null
+                        try { $runnerStatus = $runnerProc.ExitCode } catch { $runnerStatusError = $_.Exception.Message }
+                        if ($null -eq $runnerStatus) {
+                            $runnerStatusNote = if ($runnerStatusError) { " (exit code unavailable: $runnerStatusError)" } else { " (exit code unavailable)" }
+                        } else {
+                            $runnerStatusNote = ""
+                        }
+                        Add-AutopilotLogSafe -Lines @("PAPER TRADING RUNNER EXIT CODE: $runnerStatus$runnerStatusNote")
                     }
                 } finally {
-                    Remove-Item -LiteralPath $runnerStdoutFile -Force -ErrorAction SilentlyContinue
-                    Remove-Item -LiteralPath $runnerStderrFile -Force -ErrorAction SilentlyContinue
+                    try { $runnerProc.Dispose() } catch {}
                 }
             }
         }

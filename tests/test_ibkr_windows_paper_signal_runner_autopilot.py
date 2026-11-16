@@ -211,7 +211,7 @@ def test_windows_autopilot_rechecks_deadline_immediately_before_runner_start():
     recheck_disable_at = script.index(
         "Disable-AutopilotTaskWithEvidence", recheck_at
     )
-    runner_start_at = script.index("Start-Process -FilePath $PythonExe")
+    runner_start_at = script.index("$runnerProc.Start()")
     assert market_open_at < recheck_at < recheck_disable_at < runner_start_at
 
 
@@ -228,7 +228,7 @@ def test_windows_autopilot_enforces_deadline_during_inprogress_runner_execution(
     assert "$Process.Kill()" in script
     assert "-m paper_trading_runner" in script
 
-    start_at = script.index("Start-Process -FilePath $PythonExe")
+    start_at = script.index("$runnerProc.Start()")
     wait_at = script.index("Wait-ProcessWithDeadline -Process $runnerProc", start_at)
     enforced_at = script.index('"AUTOPILOT DEADLINE ENFORCED', wait_at)
     disable_at = script.index("Disable-AutopilotTaskWithEvidence", enforced_at)
@@ -273,6 +273,35 @@ def test_windows_autopilot_distinguishes_confirmed_from_unconfirmed_termination(
     # strictly after both deadline-reached branches, never between them.
     normal_exit_at = script.index('"PAPER TRADING RUNNER EXIT CODE:')
     assert critical_exit_at < normal_exit_at
+
+
+def test_windows_autopilot_exit_code_capture_avoids_known_passthru_bug():
+    # Work audit (2026-11-17): every historical "PAPER TRADING RUNNER EXIT
+    # CODE:" log line was blank, and the empty `catch {}` around reading
+    # $runnerProc.ExitCode recorded no reason why. Live verification on
+    # this Windows PowerShell 5.1 environment found the real cause: with
+    # `Start-Process -PassThru`, either `-NoNewWindow` or file-based
+    # `-RedirectStandardOutput`/`-RedirectStandardError` independently
+    # makes the returned Process object's .ExitCode always read back
+    # $null after exit (confirmed reproducible, no exception thrown). The
+    # fix builds the .NET Process object directly (ProcessStartInfo with
+    # CreateNoWindow + UseShellExecute=$false) and reads output via async
+    # streams instead, which was verified live to return the real exit
+    # code. The script must never go back to the broken cmdlet pattern,
+    # and any future read failure must be logged with its reason rather
+    # than silently swallowed.
+    script = _text(AUTOPILOT)
+    assert "Start-Process -FilePath $PythonExe" not in script
+    assert "Start-Process" not in re.sub(r"(?m)^\s*#.*$", "", script)
+    assert "$runnerPsi.CreateNoWindow = $true" in script
+    assert "$runnerPsi.UseShellExecute = $false" in script
+    assert "$runnerProc.StandardOutput.ReadToEndAsync()" in script
+    assert "$runnerProc.StandardError.ReadToEndAsync()" in script
+
+    exit_code_at = script.index('"PAPER TRADING RUNNER EXIT CODE:')
+    catch_at = script.rindex("catch { $runnerStatusError", 0, exit_code_at)
+    assert catch_at < exit_code_at
+    assert "exit code unavailable" in script
 
 
 def test_windows_autopilot_task_disable_failure_also_forces_a_critical_exit():
