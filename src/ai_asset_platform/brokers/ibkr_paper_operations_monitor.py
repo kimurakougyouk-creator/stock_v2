@@ -444,11 +444,11 @@ def evaluate_paper_operations(
         if reconciliation.ledger_changed:
             _append_unique(critical, "read-only reconciliation unexpectedly changed the ledger")
         if not reconciliation.account_ready:
-            _append_unique(warnings, "broker Paper account snapshot is not ready")
+            _append_unique(critical, "broker Paper account snapshot is not ready")
         if not reconciliation.execution_snapshot_ready:
             _append_unique(warnings, "broker execution snapshot is not ready")
         if reconciliation.endpoint_port not in _VALID_ENDPOINT_PORTS:
-            _append_unique(warnings, "verified IBKR Paper endpoint is unavailable")
+            _append_unique(critical, "verified IBKR Paper endpoint is unavailable")
         if str(reconciliation.account_currency or "").strip().upper() != str(
             settings.account_currency
         ).strip().upper():

@@ -177,6 +177,34 @@ def test_complete_clean_snapshot_is_healthy():
     assert result.live_order_sent is False
 
 
+def test_account_not_ready_is_critical_not_warning():
+    result = _evaluate(reconciliation=_reconciliation(account_ready=False))
+    assert result.status == "CRITICAL"
+    assert "broker Paper account snapshot is not ready" in result.critical_reasons
+    assert result.account_ready is False
+
+
+def test_endpoint_unavailable_is_critical_not_warning():
+    result = _evaluate(reconciliation=_reconciliation(endpoint_port=None))
+    assert result.status == "CRITICAL"
+    assert "verified IBKR Paper endpoint is unavailable" in result.critical_reasons
+
+
+def test_execution_snapshot_not_ready_alone_remains_warning():
+    result = _evaluate(reconciliation=_reconciliation(execution_snapshot_ready=False))
+    assert result.status == "WARNING"
+    assert result.critical_reasons == ()
+    assert "broker execution snapshot is not ready" in result.warning_reasons
+
+
+def test_recovered_connection_returns_to_healthy():
+    disconnected = _evaluate(reconciliation=_reconciliation(account_ready=False))
+    assert disconnected.status == "CRITICAL"
+    recovered = _evaluate(reconciliation=_reconciliation(account_ready=True))
+    assert recovered.status == "HEALTHY"
+    assert recovered.critical_reasons == ()
+
+
 def test_missing_first_structured_runtime_report_is_warning_not_false_success():
     result = _evaluate(runtime_report=None)
     assert result.status == "WARNING"

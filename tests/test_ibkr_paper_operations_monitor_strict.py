@@ -92,6 +92,22 @@ def test_unready_account_is_unknown_currency_not_confirmed_mismatch():
     assert finalized.warning_reasons == result.warning_reasons
 
 
+def test_unready_account_critical_reason_survives_strict_finalization():
+    result = _result(
+        critical=("broker Paper account snapshot is not ready",),
+        warnings=(),
+        account_ready=False,
+    )
+
+    finalized = module._finalize_strict_result(
+        result,
+        account=SimpleNamespace(ready=False, positions=()),
+    )
+
+    assert finalized.status == "CRITICAL"
+    assert "broker Paper account snapshot is not ready" in finalized.critical_reasons
+
+
 def test_complete_broker_snapshot_rejects_positions_outside_verified_scope():
     account = SimpleNamespace(
         ready=True,
