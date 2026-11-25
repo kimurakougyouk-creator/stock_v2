@@ -235,6 +235,11 @@ def test_connect_failure_surfaces_ibkr_error_codes_without_raw_message(monkeypat
             assert "DU1234567" not in detail
             assert "already in use" not in detail
             assert "Couldn't connect to TWS" not in detail
+            # Structured attribute, built only from each port's
+            # last_failed_errors[].code (int) -- never from the message
+            # text above -- so a caller (paper_trading_runner) can persist
+            # a validated code without parsing this exception's text.
+            assert exc.ibkr_error_codes == [326, 502]
         else:
             raise AssertionError("unreachable Paper endpoints must fail closed")
     finally:

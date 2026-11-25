@@ -132,6 +132,13 @@ def _connect_first_available_paper_broker(
     Fail-closed: a mismatch is treated the same as "not confirmed Paper".
     """
     errors: list[str] = []
+    # Collected only from broker.last_failed_errors -- the connection probe's
+    # own structured error list (list[dict], the 'code' key already an int
+    # from the ibapi error() callback) -- never from any text. Never
+    # includes each entry's 'message' free text. Attached to the final
+    # exception below so callers can persist a validated code without
+    # parsing this function's error-detail strings.
+    structured_error_codes: set[int] = set()
     for use_gateway in (True, False):
         config = create_ibkr_paper_config(use_gateway=use_gateway)
         broker = IbkrBrokerAdapter(config=config, enable_paper_order_transmission=True)
@@ -152,6 +159,7 @@ def _connect_first_available_paper_broker(
                     continue
                 return broker
             codes = sorted({int(e.get("code")) for e in broker.last_failed_errors if e.get("code") is not None})
+            structured_error_codes.update(codes)
             errors.append(
                 f"port={config.port}: connect returned False (ibkr_error_codes={codes})"
             )
@@ -177,7 +185,12 @@ def _connect_first_available_paper_broker(
                 except Exception:
                     pass
     detail = " | ".join(errors) if errors else "no Paper endpoint was reachable"
-    raise RuntimeError(f"IBKR Paperへ接続できません: {detail}")
+    error = RuntimeError(f"IBKR Paperへ接続できません: {detail}")
+    # Plain attribute, not parsed back out of `detail` by any caller -- see
+    # paper_trading_runner._validated_ibkr_error_codes() for the final
+    # type/range check applied before persistence.
+    error.ibkr_error_codes = sorted(structured_error_codes)
+    raise error
 
 
 def _capture_account_fx_rate(

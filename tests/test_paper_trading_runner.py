@@ -186,7 +186,9 @@ def test_structured_execution_diagnostic_never_persists_account_id_or_token(monk
     assert record["label"] == "EXECUTION_NOT_ATTEMPTED"
 
 
-def test_structured_execution_diagnostic_extracts_connection_error_codes_safely(monkeypatch, tmp_path):
+def test_structured_execution_diagnostic_records_connection_error_codes_passed_in_structurally(
+    monkeypatch, tmp_path
+):
     diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
     monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
     raw_error = (
@@ -194,12 +196,40 @@ def test_structured_execution_diagnostic_extracts_connection_error_codes_safely(
         "port=4002: connect returned False (ibkr_error_codes=[326]) | "
         "port=7497: connect returned False (ibkr_error_codes=[502])"
     )
-    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error)
+    # Codes are passed in exactly as _connect_first_available_paper_broker's
+    # raised exception now carries them (its own .ibkr_error_codes
+    # attribute, built from broker.last_failed_errors -- never parsed back
+    # out of this message text).
+    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error, [326, 502])
 
     record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
     assert record["label"] == "UNKNOWN_ERROR(ibkr_error_codes=[326, 502])"
     assert record["ibkr_error_codes"] == [326, 502]
     assert set(record) == {"recorded_at", "ticker", "label", "ibkr_error_codes"}
+
+
+def test_structured_execution_diagnostic_never_parses_codes_out_of_raw_error_text(monkeypatch, tmp_path):
+    # Codex P1 (HEAD 03ce62c): the legacy connection-marker parser was still
+    # applied unconditionally to raw_error, so an order-rejection message
+    # text containing a coincidental/crafted "ibkr_error_codes=[...]"
+    # substring -- including an implausibly large number -- was captured and
+    # bypassed range validation entirely. With all text-based extraction
+    # removed, no ibkr_error_codes=[...]-shaped substring in raw_error can
+    # ever reach the diagnostic, regardless of its size or where it appears.
+    diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
+    monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
+    raw_error = (
+        "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。"
+        "status=NOT_SENT / message=rejected, fake embedded marker: "
+        "ibkr_error_codes=[12345678901234567890] / errors=[{'code': 201, 'message': 'rejected'}]"
+    )
+    # Only the real, structured order-result code is passed in -- exactly as
+    # paper_trading_runner.main() does via entry.get("ibkr_error_codes").
+    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error, [201])
+
+    record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
+    assert record["ibkr_error_codes"] == [201]
+    assert "12345678901234567890" not in json.dumps(record)
 
 
 def test_order_result_raw_error_codes_reads_only_the_structured_code_field():
@@ -265,14 +295,13 @@ def test_structured_execution_diagnostic_extracts_order_result_error_codes_witho
     assert set(record) == {"recorded_at", "ticker", "label", "ibkr_error_codes"}
 
 
-def test_structured_execution_diagnostic_merges_connection_and_order_result_codes(monkeypatch, tmp_path):
+def test_structured_execution_diagnostic_sorts_and_dedups_structured_codes(monkeypatch, tmp_path):
     diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
     monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
-    raw_error = "port=4002: connect returned False (ibkr_error_codes=[326])"
-    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error, [201])
+    paper_trading_runner._record_execution_diagnostic("AAPL", "some error", [502, 201, 326, 201])
 
     record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
-    assert record["ibkr_error_codes"] == [201, 326]
+    assert record["ibkr_error_codes"] == [201, 326, 502]
 
 
 def test_execute_confirmed_order_attaches_validated_codes_from_structured_broker_result(monkeypatch):
@@ -305,6 +334,37 @@ def test_execute_confirmed_order_attaches_validated_codes_from_structured_broker
     with pytest.raises(RuntimeError) as excinfo:
         paper_trading_runner._execute_confirmed_ibkr_paper_order("9432.T", "BUY", 100, 150.0)
     assert excinfo.value.ibkr_error_codes == [201]
+
+
+def test_main_persists_genuine_connection_error_code_end_to_end(monkeypatch, capsys, tmp_path):
+    # End-to-end regression: a real connection-failure code (326) must still
+    # reach the persisted diagnostic now that the legacy text-marker parser
+    # has been removed from this path -- it must arrive via the structured
+    # execution_errors["ibkr_error_codes"] entry instead (exactly what
+    # verified_paper_scan.execute_verified_actions_from_scan() builds from
+    # _connect_first_available_paper_broker's exception attribute).
+    diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
+    monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
+    raw_error = (
+        "IBKR Paperへ接続できません: port=4002: connect returned False "
+        "(ibkr_error_codes=[326]) | port=7497: connect returned False "
+        "(ibkr_error_codes=[502])"
+    )
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "run_paper_trading",
+        lambda: {
+            "records": [{} for _ in range(1)],
+            "errors": [raw_error],
+            "execution_errors": [{"ticker": "AAPL", "error": raw_error, "ibkr_error_codes": [326, 502]}],
+        },
+    )
+    paper_trading_runner.main()
+    output = capsys.readouterr().out
+    assert "AAPL: UNKNOWN_ERROR(ibkr_error_codes=[326, 502])" in output
+
+    record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
+    assert record["ibkr_error_codes"] == [326, 502]
 
 
 def test_record_execution_diagnostic_never_raises_on_write_failure(monkeypatch):

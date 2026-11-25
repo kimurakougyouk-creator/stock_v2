@@ -26,7 +26,6 @@ from ai_asset_platform.execution.verified_paper_preflight import (
     evaluate_verified_paper_preflight,
 )
 from ai_asset_platform.execution.verified_paper_scan import (
-    _extract_ibkr_error_codes,
     classify_paper_execution_error,
     execute_verified_actions_from_scan,
 )
@@ -195,43 +194,43 @@ def _validated_ibkr_error_codes(raw_codes) -> list[int]:
     return sorted(codes)
 
 
-def _structured_execution_diagnostic(raw_error: str, order_result_error_codes=None) -> dict:
+def _structured_execution_diagnostic(raw_error: str, structured_error_codes=None) -> dict:
     """Reduce an execution failure to a safe, closed-vocabulary diagnostic.
 
     Only two things are ever persisted:
     - the fixed classification label from classify_paper_execution_error()'s
       own closed label set (never raw text);
-    - numeric IBKR error codes, merged from two already-safe sources:
-      verified_paper_scan._extract_ibkr_error_codes() (the narrow
-      ``ibkr_error_codes=[...]`` marker written by our own connection code on
-      a connect failure -- reads only digits out of that marker, never
-      broker/account free text) and order_result_error_codes (the broker
-      order result's *structured* ``errors`` list, passed in by the caller
-      and validated by _validated_ibkr_error_codes() -- never read out of any
-      string representation of that result).
+    - numeric IBKR error codes from ``structured_error_codes``, validated by
+      _validated_ibkr_error_codes(). The caller is responsible for sourcing
+      this list from structured broker data at its origin -- a connect
+      failure's ``broker.last_failed_errors`` (see
+      ibkr_signal_runtime._connect_first_available_paper_broker) or an order
+      result's ``errors`` list (see _order_result_raw_error_codes) -- never
+      from any text rendering of either. This function itself never reads
+      ``raw_error`` for anything but the fixed classification label.
 
-    Earlier revisions of this function tried to pull free-text fields
-    (status=, order_id=, ...), a short leftover note, and then order-result
-    error codes via regex over the ``errors=[...]`` *string* rendering of the
-    broker result. Codex review found all three could leak or misparse
-    broker/account content: an allowlisted field name or a 'code': N-shaped
-    substring appearing inside untrusted ``message=...`` free text was
-    captured as real data, and a ``]`` inside a quoted message truncated the
-    match. Reading the codes directly from the structured ``errors`` list
-    (never its string form) removes that entire class of bug: there is no
-    parsing of broker-provided text anywhere in this function.
+    Earlier revisions tried to pull numeric codes (and, before that, other
+    free-text fields) out of raw_error's *text*: first an allowlisted-field
+    regex, then a regex over the order result's ``errors=[...]`` string
+    rendering, and finally the legacy connection-failure
+    ``ibkr_error_codes=[...]`` marker parser applied unconditionally to any
+    raw_error. Codex review found each of these let broker-controlled text
+    (a coincidental or crafted substring inside the broker's own free-text
+    ``message``) reach the persisted diagnostic -- including, in the last
+    case, bypassing range validation entirely. Every text-based extraction
+    path has been removed: the only way a code reaches this function now is
+    for the caller to have already read it out of structured data at its
+    origin.
     """
     text = str(raw_error)
     diagnostic: dict = {"label": classify_paper_execution_error(text)}
-    codes = sorted(
-        set(_extract_ibkr_error_codes(text)) | set(_validated_ibkr_error_codes(order_result_error_codes))
-    )
+    codes = _validated_ibkr_error_codes(structured_error_codes)
     if codes:
         diagnostic["ibkr_error_codes"] = codes
     return diagnostic
 
 
-def _record_execution_diagnostic(ticker: str, raw_error: str, order_result_error_codes=None) -> None:
+def _record_execution_diagnostic(ticker: str, raw_error: str, structured_error_codes=None) -> None:
     """Persist only the fixed classification label and numeric IBKR error
     codes for an execution failure, so a future UNKNOWN_ERROR/
     BROKER_FILL_UNCONFIRMED occurrence can still be root-caused -- without
@@ -242,7 +241,7 @@ def _record_execution_diagnostic(ticker: str, raw_error: str, order_result_error
     never raise: a diagnostics-write failure must not fail the trading run.
     """
     try:
-        diagnostic = _structured_execution_diagnostic(raw_error, order_result_error_codes)
+        diagnostic = _structured_execution_diagnostic(raw_error, structured_error_codes)
         RAW_EXECUTION_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with RAW_EXECUTION_DIAGNOSTICS_PATH.open("a", encoding="utf-8") as file:
             file.write(
