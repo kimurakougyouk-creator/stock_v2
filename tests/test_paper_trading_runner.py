@@ -143,9 +143,10 @@ def test_paper_runner_main_records_label_and_codes_without_printing_raw_text(mon
     assert record["ticker"] == "AAPL"
     assert "recorded_at" in record
     assert record["label"] == "BROKER_FILL_UNCONFIRMED"
-    # Nothing beyond the fixed label and (when present) numeric IBKR error
-    # codes is ever persisted -- no raw text, no free-text fields.
-    assert set(record) == {"recorded_at", "ticker", "label"}
+    assert record["ibkr_error_codes"] == [200]
+    # Nothing beyond the fixed label and numeric error codes is ever
+    # persisted -- no raw text, no free-text fields.
+    assert set(record) == {"recorded_at", "ticker", "label", "ibkr_error_codes"}
     assert "No security definition" not in json.dumps(record, ensure_ascii=False)
     assert "contract rejected" not in json.dumps(record, ensure_ascii=False)
     assert "status=NOT_SENT" not in json.dumps(record, ensure_ascii=False)
@@ -193,6 +194,51 @@ def test_structured_execution_diagnostic_extracts_connection_error_codes_safely(
     assert record["label"] == "UNKNOWN_ERROR(ibkr_error_codes=[326, 502])"
     assert record["ibkr_error_codes"] == [326, 502]
     assert set(record) == {"recorded_at", "ticker", "label", "ibkr_error_codes"}
+
+
+def test_structured_execution_diagnostic_extracts_order_result_error_codes_without_message_text(
+    monkeypatch, tmp_path
+):
+    diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
+    monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
+    # Codex P2 (HEAD 8c923dc): a post-connection order rejection/timeout
+    # serializes its broker errors as errors=[{'code': N, 'message': ...}],
+    # not the connection-failure ibkr_error_codes=[...] marker; that numeric
+    # code must now be captured too, while the dict's own free-text
+    # 'message' value -- which could carry broker/account detail -- must
+    # still never reach the persisted diagnostic.
+    raw_error = (
+        "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。"
+        "status=NOT_SENT / message=contract rejected / "
+        "errors=[{'code': 201, 'message': 'Order rejected - reason: "
+        "account DU1234567 margin exceeded, credential PLACEHOLDERTOKENVALUE0123456789NOTREAL'}, "
+        "{'code': 202, 'message': 'duplicate order'}]"
+    )
+    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error)
+
+    persisted_text = diagnostics_path.read_text(encoding="utf-8")
+    assert "DU1234567" not in persisted_text
+    assert "PLACEHOLDERTOKENVALUE0123456789NOTREAL" not in persisted_text
+    assert "margin exceeded" not in persisted_text
+    assert "duplicate order" not in persisted_text
+    assert "contract rejected" not in persisted_text
+
+    record = json.loads(persisted_text.strip())
+    assert record["ibkr_error_codes"] == [201, 202]
+    assert set(record) == {"recorded_at", "ticker", "label", "ibkr_error_codes"}
+
+
+def test_structured_execution_diagnostic_merges_connection_and_order_result_codes(monkeypatch, tmp_path):
+    diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
+    monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
+    raw_error = (
+        "port=4002: connect returned False (ibkr_error_codes=[326]) | "
+        "errors=[{'code': 201, 'message': 'rejected'}]"
+    )
+    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error)
+
+    record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
+    assert record["ibkr_error_codes"] == [201, 326]
 
 
 def test_record_execution_diagnostic_never_raises_on_write_failure(monkeypatch):

@@ -1,5 +1,6 @@
 """Paper Trading専用ランナー。"""
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -157,6 +158,25 @@ def _sync_confirmed_fill_to_reporting() -> bool:
 
 RAW_EXECUTION_DIAGNOSTICS_PATH = Path("results") / "paper_execution_raw_diagnostics.jsonl"
 
+# Matches only the bracketed payload of _describe_unconfirmed_ibkr_result()'s
+# own "errors=[{'code': 200, 'message': '...'}, ...]" rendering. Only digits
+# following a 'code': key inside that bracket are ever read out of it -- the
+# dict's 'message' value (broker free text) is never touched or captured.
+_ORDER_ERRORS_BRACKET_PATTERN = re.compile(r"errors=\[[^\]]*\]")
+_ORDER_ERROR_CODE_DIGIT_PATTERN = re.compile(r"'code':\s*(\d+)")
+
+
+def _extract_order_result_error_codes(text: str) -> list[int]:
+    """Pull only numeric broker error codes out of an order result's own
+    already-bracketed ``errors=[...]`` payload (post-connection order
+    rejections/timeouts), without reading anything else out of it.
+    """
+    codes: set[int] = set()
+    for bracket in _ORDER_ERRORS_BRACKET_PATTERN.findall(text):
+        for match in _ORDER_ERROR_CODE_DIGIT_PATTERN.finditer(bracket):
+            codes.add(int(match.group(1)))
+    return sorted(codes)
+
 
 def _structured_execution_diagnostic(raw_error: str) -> dict:
     """Reduce raw_error text to a safe, closed-vocabulary diagnostic.
@@ -164,24 +184,27 @@ def _structured_execution_diagnostic(raw_error: str) -> dict:
     Only two things are ever persisted:
     - the fixed classification label from classify_paper_execution_error()'s
       own closed label set (never raw text);
-    - numeric IBKR error codes, extracted by the same narrow, already-safe
-      ``ibkr_error_codes=[...]`` marker parser used by
-      verified_paper_scan._extract_ibkr_error_codes(), which only ever reads
-      digits out of a marker written by our own connection code -- never out
-      of broker/account free text.
+    - numeric IBKR error codes, merged from two already-safe, narrow
+      extractors: verified_paper_scan._extract_ibkr_error_codes() (the
+      ``ibkr_error_codes=[...]`` marker written by our own connection code
+      on a connect failure) and _extract_order_result_error_codes() (the
+      ``errors=[{'code': N, ...}]`` payload written by
+      _describe_unconfirmed_ibkr_result() on a post-connection order
+      rejection/timeout). Both read only digits out of an already-bracketed,
+      code-shaped position -- never broker/account free text.
 
     An earlier revision of this function also tried to pull free-text fields
     (status=, order_id=, ...) and a short leftover note out of raw_error.
     Codex review found both could still leak broker/account content: an
     allowlisted field name appearing inside an untrusted ``message=...``
     payload was captured unredacted, and a value containing "/" defeated the
-    note's own stripping. Rather than patching those regexes further, this
-    extraction is dropped entirely -- there is no longer any path from
-    untrusted raw_error text into the persisted diagnostic.
+    note's own stripping. That extraction stays removed -- there is no path
+    from untrusted raw_error text into the persisted diagnostic other than
+    the two narrow numeric-code extractors above.
     """
     text = str(raw_error)
     diagnostic: dict = {"label": classify_paper_execution_error(text)}
-    codes = _extract_ibkr_error_codes(text)
+    codes = sorted(set(_extract_ibkr_error_codes(text)) | set(_extract_order_result_error_codes(text)))
     if codes:
         diagnostic["ibkr_error_codes"] = codes
     return diagnostic
