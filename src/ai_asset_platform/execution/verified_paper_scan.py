@@ -32,6 +32,8 @@ EXECUTION_ERROR_CLASS_INSUFFICIENT_HOLDINGS = "INSUFFICIENT_HOLDINGS"
 EXECUTION_ERROR_CLASS_INVALID_REFERENCE_PRICE = "INVALID_REFERENCE_PRICE"
 EXECUTION_ERROR_CLASS_HOLDING_AGE_ERROR = "HOLDING_AGE_ERROR"
 EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED = "BROKER_FILL_UNCONFIRMED"
+EXECUTION_ERROR_CLASS_EXECUTION_NOT_ATTEMPTED = "EXECUTION_NOT_ATTEMPTED"
+EXECUTION_ERROR_CLASS_BROKER_RESULT_MISSING = "BROKER_RESULT_MISSING"
 EXECUTION_ERROR_CLASS_STRATEGY_IDENTITY_ERROR = "STRATEGY_IDENTITY_ERROR"
 EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_NOT_CONFIRMED = "PAPER_ACCOUNT_NOT_CONFIRMED"
 EXECUTION_ERROR_CLASS_PAPER_ACCOUNT_MISMATCH = "PAPER_ACCOUNT_MISMATCH"
@@ -83,11 +85,11 @@ def classify_paper_execution_error(message: str) -> str:
         return EXECUTION_ERROR_CLASS_INVALID_REFERENCE_PRICE
     if "holding age cannot be reconstructed" in text:
         return EXECUTION_ERROR_CLASS_HOLDING_AGE_ERROR
-    if (
-        "Filledを確認できなかった" in text
-        or "送信前に停止しました" in text
-        or "結果を取得できませんでした" in text
-    ):
+    if "送信前に停止しました" in text:
+        return EXECUTION_ERROR_CLASS_EXECUTION_NOT_ATTEMPTED
+    if "結果を取得できませんでした" in text:
+        return EXECUTION_ERROR_CLASS_BROKER_RESULT_MISSING
+    if "Filledを確認できなかった" in text:
         return EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED
     if (
         "strategy checkout changed" in text
@@ -236,7 +238,16 @@ def execute_verified_actions_from_scan(
                 strategy_parameters_sha,
             )
         except Exception as exc:
-            execution_errors.append({"ticker": ticker, "error": str(exc)})
+            error_entry = {"ticker": ticker, "error": str(exc)}
+            # execute_order (paper_trading_runner._execute_confirmed_ibkr_paper_order)
+            # may attach the broker result's own structured, already-validated
+            # error codes to the exception so callers can persist them without
+            # ever parsing this message's text. Absent for every other error
+            # path here, so this is a no-op for those.
+            structured_codes = getattr(exc, "ibkr_error_codes", None)
+            if structured_codes:
+                error_entry["ibkr_error_codes"] = structured_codes
+            execution_errors.append(error_entry)
             continue
 
         enriched = dict(paper_order)
