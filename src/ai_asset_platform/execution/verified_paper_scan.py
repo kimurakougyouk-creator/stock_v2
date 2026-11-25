@@ -238,7 +238,16 @@ def execute_verified_actions_from_scan(
                 strategy_parameters_sha,
             )
         except Exception as exc:
-            execution_errors.append({"ticker": ticker, "error": str(exc)})
+            error_entry = {"ticker": ticker, "error": str(exc)}
+            # execute_order (paper_trading_runner._execute_confirmed_ibkr_paper_order)
+            # may attach the broker result's own structured, already-validated
+            # error codes to the exception so callers can persist them without
+            # ever parsing this message's text. Absent for every other error
+            # path here, so this is a no-op for those.
+            structured_codes = getattr(exc, "ibkr_error_codes", None)
+            if structured_codes:
+                error_entry["ibkr_error_codes"] = structured_codes
+            execution_errors.append(error_entry)
             continue
 
         enriched = dict(paper_order)

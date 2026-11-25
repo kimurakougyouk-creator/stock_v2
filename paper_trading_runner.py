@@ -1,6 +1,5 @@
 """Paper Trading専用ランナー。"""
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -158,72 +157,92 @@ def _sync_confirmed_fill_to_reporting() -> bool:
 
 RAW_EXECUTION_DIAGNOSTICS_PATH = Path("results") / "paper_execution_raw_diagnostics.jsonl"
 
-# Matches only the bracketed payload of _describe_unconfirmed_ibkr_result()'s
-# own "errors=[{'code': 200, 'message': '...'}, ...]" rendering. Only digits
-# following a 'code': key inside that bracket are ever read out of it -- the
-# dict's 'message' value (broker free text) is never touched or captured.
-_ORDER_ERRORS_BRACKET_PATTERN = re.compile(r"errors=\[[^\]]*\]")
-_ORDER_ERROR_CODE_DIGIT_PATTERN = re.compile(r"'code':\s*(\d+)")
+# A real IBKR error/info code is a small non-negative integer (observed
+# range: 100s-2100s; TWS documents nothing above five digits). Anything
+# outside this bound is rejected rather than persisted, so a value that
+# merely happens to be an int -- e.g. something embedded in unrelated
+# broker/account content -- can never pass through as a plausible code.
+_MAX_PLAUSIBLE_IBKR_ERROR_CODE = 99999
 
 
-def _extract_order_result_error_codes(text: str) -> list[int]:
-    """Pull only numeric broker error codes out of an order result's own
-    already-bracketed ``errors=[...]`` payload (post-connection order
-    rejections/timeouts), without reading anything else out of it.
+def _order_result_raw_error_codes(broker_result) -> list:
+    """Read the already-typed 'code' value out of each entry in the broker
+    order result's own structured ``errors`` list (``list[dict]``, populated
+    directly from the ibapi error() callback's integer error_code argument --
+    see ibkr_session.py). Returns the raw values as-is for the caller to
+    type/range-validate; the dict's 'message' key (broker free text) is
+    never read here or anywhere downstream.
     """
-    codes: set[int] = set()
-    for bracket in _ORDER_ERRORS_BRACKET_PATTERN.findall(text):
-        for match in _ORDER_ERROR_CODE_DIGIT_PATTERN.finditer(bracket):
-            codes.add(int(match.group(1)))
+    if broker_result is None:
+        return []
+    errors = getattr(broker_result, "errors", None) or []
+    return [entry.get("code") for entry in errors if isinstance(entry, dict)]
+
+
+def _validated_ibkr_error_codes(raw_codes) -> list[int]:
+    """Keep only values that are already a plausible IBKR error code: a
+    non-bool int within the documented range. Never parses, searches, or
+    otherwise reads text -- this only type/range-checks values that were
+    already extracted from structured data.
+    """
+    if not raw_codes:
+        return []
+    codes = {
+        code
+        for code in raw_codes
+        if isinstance(code, int) and not isinstance(code, bool) and 0 <= code <= _MAX_PLAUSIBLE_IBKR_ERROR_CODE
+    }
     return sorted(codes)
 
 
-def _structured_execution_diagnostic(raw_error: str) -> dict:
-    """Reduce raw_error text to a safe, closed-vocabulary diagnostic.
+def _structured_execution_diagnostic(raw_error: str, order_result_error_codes=None) -> dict:
+    """Reduce an execution failure to a safe, closed-vocabulary diagnostic.
 
     Only two things are ever persisted:
     - the fixed classification label from classify_paper_execution_error()'s
       own closed label set (never raw text);
-    - numeric IBKR error codes, merged from two already-safe, narrow
-      extractors: verified_paper_scan._extract_ibkr_error_codes() (the
-      ``ibkr_error_codes=[...]`` marker written by our own connection code
-      on a connect failure) and _extract_order_result_error_codes() (the
-      ``errors=[{'code': N, ...}]`` payload written by
-      _describe_unconfirmed_ibkr_result() on a post-connection order
-      rejection/timeout). Both read only digits out of an already-bracketed,
-      code-shaped position -- never broker/account free text.
+    - numeric IBKR error codes, merged from two already-safe sources:
+      verified_paper_scan._extract_ibkr_error_codes() (the narrow
+      ``ibkr_error_codes=[...]`` marker written by our own connection code on
+      a connect failure -- reads only digits out of that marker, never
+      broker/account free text) and order_result_error_codes (the broker
+      order result's *structured* ``errors`` list, passed in by the caller
+      and validated by _validated_ibkr_error_codes() -- never read out of any
+      string representation of that result).
 
-    An earlier revision of this function also tried to pull free-text fields
-    (status=, order_id=, ...) and a short leftover note out of raw_error.
-    Codex review found both could still leak broker/account content: an
-    allowlisted field name appearing inside an untrusted ``message=...``
-    payload was captured unredacted, and a value containing "/" defeated the
-    note's own stripping. That extraction stays removed -- there is no path
-    from untrusted raw_error text into the persisted diagnostic other than
-    the two narrow numeric-code extractors above.
+    Earlier revisions of this function tried to pull free-text fields
+    (status=, order_id=, ...), a short leftover note, and then order-result
+    error codes via regex over the ``errors=[...]`` *string* rendering of the
+    broker result. Codex review found all three could leak or misparse
+    broker/account content: an allowlisted field name or a 'code': N-shaped
+    substring appearing inside untrusted ``message=...`` free text was
+    captured as real data, and a ``]`` inside a quoted message truncated the
+    match. Reading the codes directly from the structured ``errors`` list
+    (never its string form) removes that entire class of bug: there is no
+    parsing of broker-provided text anywhere in this function.
     """
     text = str(raw_error)
     diagnostic: dict = {"label": classify_paper_execution_error(text)}
-    codes = sorted(set(_extract_ibkr_error_codes(text)) | set(_extract_order_result_error_codes(text)))
+    codes = sorted(
+        set(_extract_ibkr_error_codes(text)) | set(_validated_ibkr_error_codes(order_result_error_codes))
+    )
     if codes:
         diagnostic["ibkr_error_codes"] = codes
     return diagnostic
 
 
-def _record_execution_diagnostic(ticker: str, raw_error: str) -> None:
+def _record_execution_diagnostic(ticker: str, raw_error: str, order_result_error_codes=None) -> None:
     """Persist only the fixed classification label and numeric IBKR error
-    codes derived from the execution-error text that
-    classify_paper_execution_error() discards before printing, so a future
-    UNKNOWN_ERROR/BROKER_FILL_UNCONFIRMED occurrence can still be
-    root-caused -- without ever persisting the raw error text, an account
-    identifier, or anything shaped like a credential/token: see
-    _structured_execution_diagnostic().
+    codes for an execution failure, so a future UNKNOWN_ERROR/
+    BROKER_FILL_UNCONFIRMED occurrence can still be root-caused -- without
+    ever persisting the raw error text, an account identifier, or anything
+    shaped like a credential/token: see _structured_execution_diagnostic().
 
     Never printed to stdout/the autopilot log -- file-only, append-only. Must
     never raise: a diagnostics-write failure must not fail the trading run.
     """
     try:
-        diagnostic = _structured_execution_diagnostic(raw_error)
+        diagnostic = _structured_execution_diagnostic(raw_error, order_result_error_codes)
         RAW_EXECUTION_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with RAW_EXECUTION_DIAGNOSTICS_PATH.open("a", encoding="utf-8") as file:
             file.write(
@@ -355,7 +374,13 @@ def _execute_confirmed_ibkr_paper_order(
         else None
     )
     if confirmed is None:
-        raise RuntimeError(_describe_unconfirmed_ibkr_result(execution))
+        error = RuntimeError(_describe_unconfirmed_ibkr_result(execution))
+        # Carry the broker result's own structured error codes on the
+        # exception so the diagnostic writer can persist them without ever
+        # having to parse this message's text (see
+        # _order_result_raw_error_codes / _validated_ibkr_error_codes).
+        error.ibkr_error_codes = _order_result_raw_error_codes(result)
+        raise error
     confirmed_quantity, confirmed_price = confirmed
     reporting_safe = _sync_confirmed_fill_to_reporting()
     return {
@@ -426,7 +451,7 @@ def main() -> None:
         ticker = entry.get("ticker", "UNKNOWN")
         raw_error = entry.get("error", "")
         label = classify_paper_execution_error(raw_error)
-        _record_execution_diagnostic(ticker, raw_error)
+        _record_execution_diagnostic(ticker, raw_error, entry.get("ibkr_error_codes"))
         print(f"  - {ticker}: {label}")
     print("=" * 50)
 

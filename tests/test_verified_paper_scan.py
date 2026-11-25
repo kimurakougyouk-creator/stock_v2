@@ -144,6 +144,38 @@ def test_executor_failure_is_collected_and_never_retried(monkeypatch):
     assert "uncertain broker state" in result["execution_errors"][0]["error"]
 
 
+def test_executor_failure_carries_structured_error_codes_without_extra_keys(monkeypatch):
+    monkeypatch.setattr(module.order_manager, "get_open_positions", lambda: {})
+    monkeypatch.setattr(module, "verified_paper_test_quantity_for_ticker", lambda ticker: 1)
+
+    def fail(*args):
+        exc = RuntimeError("broker rejected the order")
+        exc.ibkr_error_codes = [201]
+        raise exc
+
+    result = module.execute_verified_actions_from_scan(
+        {"records": [_record()], "errors": []},
+        execute_order=fail,
+        settings=_settings(),
+    )
+    assert result["execution_errors"][0]["ibkr_error_codes"] == [201]
+
+
+def test_executor_failure_without_error_codes_attribute_omits_the_key(monkeypatch):
+    monkeypatch.setattr(module.order_manager, "get_open_positions", lambda: {})
+    monkeypatch.setattr(module, "verified_paper_test_quantity_for_ticker", lambda ticker: 1)
+
+    def fail(*args):
+        raise RuntimeError("uncertain broker state")
+
+    result = module.execute_verified_actions_from_scan(
+        {"records": [_record()], "errors": []},
+        execute_order=fail,
+        settings=_settings(),
+    )
+    assert "ibkr_error_codes" not in result["execution_errors"][0]
+
+
 def test_classify_paper_execution_error_market_session_blocked():
     message = (
         "verified Paper market-session guard blocked order: "

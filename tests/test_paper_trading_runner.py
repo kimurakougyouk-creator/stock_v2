@@ -115,7 +115,9 @@ def test_paper_runner_main_prints_classified_label_never_raw_broker_text(monkeyp
     assert "NOT_SENT" not in output
 
 
-def test_paper_runner_main_records_label_and_codes_without_printing_raw_text(monkeypatch, capsys, tmp_path):
+def test_paper_runner_main_records_label_and_structured_codes_without_printing_raw_text(
+    monkeypatch, capsys, tmp_path
+):
     diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
     monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
     raw_error = (
@@ -129,7 +131,11 @@ def test_paper_runner_main_records_label_and_codes_without_printing_raw_text(mon
         lambda: {
             "records": [{} for _ in range(1)],
             "errors": [raw_error],
-            "execution_errors": [{"ticker": "AAPL", "error": raw_error}],
+            # ibkr_error_codes here is exactly what
+            # verified_paper_scan.execute_verified_actions_from_scan() would
+            # add from the real exception's own attribute -- i.e. already
+            # validated, structured data, never parsed from `raw_error`.
+            "execution_errors": [{"ticker": "AAPL", "error": raw_error, "ibkr_error_codes": [200]}],
         },
     )
     paper_trading_runner.main()
@@ -196,17 +202,45 @@ def test_structured_execution_diagnostic_extracts_connection_error_codes_safely(
     assert set(record) == {"recorded_at", "ticker", "label", "ibkr_error_codes"}
 
 
+def test_order_result_raw_error_codes_reads_only_the_structured_code_field():
+    # Codex P1/P2 (HEAD 6cd2803): a regex over the errors=[...] *string*
+    # rendering could treat a 'code': NNN...-shaped substring inside the
+    # broker's own free-text 'message' as a real code (P1), and a ']'
+    # inside a quoted message could truncate the match and drop a real,
+    # later code (P2). Reading the structured list directly -- never its
+    # string form -- makes both impossible: only the dict's actual 'code'
+    # key is ever read, and 'message' text is never touched.
+    broker_result = SimpleNamespace(
+        errors=[
+            {
+                "code": 201,
+                "message": (
+                    "Order rejected - account DU1234567 margin exceeded, "
+                    "credential PLACEHOLDERTOKENVALUE0123456789NOTREAL, "
+                    "fake embedded marker: 'code': 12345678901234567890"
+                ),
+            },
+            {"code": 2104, "message": "Market data farm connection is OK:[farm]"},
+            {"code": 202, "message": "duplicate order]"},
+        ]
+    )
+    raw_codes = paper_trading_runner._order_result_raw_error_codes(broker_result)
+    assert raw_codes == [201, 2104, 202]
+
+
+def test_validated_ibkr_error_codes_rejects_implausible_or_wrong_typed_values():
+    # Even if something upstream ever produced a non-plausible "code" (huge
+    # int, string, float, bool), the validator -- not string parsing -- is
+    # the last line of defense before persistence.
+    raw_codes = [201, 12345678901234567890, "326", 4.5, True, -1, 100000, 2104]
+    assert paper_trading_runner._validated_ibkr_error_codes(raw_codes) == [201, 2104]
+
+
 def test_structured_execution_diagnostic_extracts_order_result_error_codes_without_message_text(
     monkeypatch, tmp_path
 ):
     diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
     monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
-    # Codex P2 (HEAD 8c923dc): a post-connection order rejection/timeout
-    # serializes its broker errors as errors=[{'code': N, 'message': ...}],
-    # not the connection-failure ibkr_error_codes=[...] marker; that numeric
-    # code must now be captured too, while the dict's own free-text
-    # 'message' value -- which could carry broker/account detail -- must
-    # still never reach the persisted diagnostic.
     raw_error = (
         "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。"
         "status=NOT_SENT / message=contract rejected / "
@@ -214,7 +248,10 @@ def test_structured_execution_diagnostic_extracts_order_result_error_codes_witho
         "account DU1234567 margin exceeded, credential PLACEHOLDERTOKENVALUE0123456789NOTREAL'}, "
         "{'code': 202, 'message': 'duplicate order'}]"
     )
-    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error)
+    # The structured codes are passed in directly, exactly as
+    # verified_paper_scan would carry them from the exception attribute --
+    # never parsed out of raw_error's text.
+    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error, [201, 202])
 
     persisted_text = diagnostics_path.read_text(encoding="utf-8")
     assert "DU1234567" not in persisted_text
@@ -231,14 +268,43 @@ def test_structured_execution_diagnostic_extracts_order_result_error_codes_witho
 def test_structured_execution_diagnostic_merges_connection_and_order_result_codes(monkeypatch, tmp_path):
     diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
     monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
-    raw_error = (
-        "port=4002: connect returned False (ibkr_error_codes=[326]) | "
-        "errors=[{'code': 201, 'message': 'rejected'}]"
-    )
-    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error)
+    raw_error = "port=4002: connect returned False (ibkr_error_codes=[326])"
+    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error, [201])
 
     record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
     assert record["ibkr_error_codes"] == [201, 326]
+
+
+def test_execute_confirmed_order_attaches_validated_codes_from_structured_broker_result(monkeypatch):
+    # End-to-end: _execute_confirmed_ibkr_paper_order's own RuntimeError must
+    # carry only the broker result's real structured 'code' values -- not
+    # anything derived from its 'message' free text -- as an attribute other
+    # callers (verified_paper_scan) read without touching the message text.
+    _allow_preflight(monkeypatch, fx=1.0)
+    broker_result = SimpleNamespace(
+        status="NOT_SENT",
+        sent=False,
+        order_id=None,
+        reached_terminal=False,
+        timed_out=False,
+        last_known_status=None,
+        filled_quantity=0.0,
+        avg_fill_price=None,
+        message="contract rejected",
+        errors=[
+            {
+                "code": 201,
+                "message": "rejected, fake embedded marker: 'code': 99999999999999999999",
+            }
+        ],
+    )
+    execution = SimpleNamespace(attempted=True, reason="submitted", broker_result=broker_result)
+    monkeypatch.setattr(
+        paper_trading_runner, "execute_approved_signal_via_ibkr_paper", lambda **kwargs: execution
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        paper_trading_runner._execute_confirmed_ibkr_paper_order("9432.T", "BUY", 100, 150.0)
+    assert excinfo.value.ibkr_error_codes == [201]
 
 
 def test_record_execution_diagnostic_never_raises_on_write_failure(monkeypatch):
