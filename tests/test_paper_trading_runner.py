@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -112,6 +113,45 @@ def test_paper_runner_main_prints_classified_label_never_raw_broker_text(monkeyp
     assert "No security definition" not in output
     assert "contract rejected" not in output
     assert "NOT_SENT" not in output
+
+
+def test_paper_runner_main_records_raw_diagnostic_without_printing_it(monkeypatch, capsys, tmp_path):
+    diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
+    monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
+    raw_error = (
+        "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。"
+        "status=NOT_SENT / message=contract rejected / "
+        "errors=[{'code': 200, 'message': 'No security definition'}]"
+    )
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "run_paper_trading",
+        lambda: {
+            "records": [{} for _ in range(1)],
+            "errors": [raw_error],
+            "execution_errors": [{"ticker": "AAPL", "error": raw_error}],
+        },
+    )
+    paper_trading_runner.main()
+    output = capsys.readouterr().out
+    assert "No security definition" not in output
+    assert "contract rejected" not in output
+
+    lines = diagnostics_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["ticker"] == "AAPL"
+    assert record["raw_error"] == raw_error
+    assert "recorded_at" in record
+
+
+def test_record_raw_execution_diagnostic_never_raises_on_write_failure(monkeypatch):
+    monkeypatch.setattr(
+        paper_trading_runner,
+        "RAW_EXECUTION_DIAGNOSTICS_PATH",
+        SimpleNamespace(parent=SimpleNamespace(mkdir=lambda **_: (_ for _ in ()).throw(OSError("disk full")))),
+    )
+    paper_trading_runner._record_raw_execution_diagnostic("AAPL", "some raw error")
 
 
 def test_paper_runner_main_prints_ibkr_error_code_on_connection_failure(monkeypatch, capsys):

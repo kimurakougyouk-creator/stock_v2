@@ -1,6 +1,7 @@
 """Paper Trading専用ランナー。"""
 import json
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from config import STOP_LOSS_RATE, TRADING_CAPITAL
@@ -151,6 +152,35 @@ def _sync_confirmed_fill_to_reporting() -> bool:
         encoding="utf-8",
     )
     return True
+
+
+RAW_EXECUTION_DIAGNOSTICS_PATH = Path("results") / "paper_execution_raw_diagnostics.jsonl"
+
+
+def _record_raw_execution_diagnostic(ticker: str, raw_error: str) -> None:
+    """Persist the raw execution-error text that classify_paper_execution_error()
+    discards before printing, so a future UNKNOWN_ERROR/BROKER_FILL_UNCONFIRMED
+    occurrence can actually be root-caused.
+
+    Never printed to stdout/the autopilot log -- file-only, append-only. Must
+    never raise: a diagnostics-write failure must not fail the trading run.
+    """
+    try:
+        RAW_EXECUTION_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with RAW_EXECUTION_DIAGNOSTICS_PATH.open("a", encoding="utf-8") as file:
+            file.write(
+                json.dumps(
+                    {
+                        "recorded_at": account_now().isoformat(),
+                        "ticker": ticker,
+                        "raw_error": raw_error,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
 
 
 def _describe_unconfirmed_ibkr_result(execution) -> str:
@@ -336,7 +366,9 @@ def main() -> None:
         if not isinstance(entry, dict):
             continue
         ticker = entry.get("ticker", "UNKNOWN")
-        label = classify_paper_execution_error(entry.get("error", ""))
+        raw_error = entry.get("error", "")
+        label = classify_paper_execution_error(raw_error)
+        _record_raw_execution_diagnostic(ticker, raw_error)
         print(f"  - {ticker}: {label}")
     print("=" * 50)
 
