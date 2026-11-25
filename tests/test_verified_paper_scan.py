@@ -207,9 +207,18 @@ def test_classify_paper_execution_error_broker_fill_unconfirmed():
     assert module.classify_paper_execution_error(
         "IBKR PaperでFilledを確認できなかったため、注文済みとして記録しません。status=NOT_SENT"
     ) == module.EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED
+
+
+def test_classify_paper_execution_error_execution_not_attempted():
     assert module.classify_paper_execution_error(
         "IBKR Paper注文は送信前に停止しました: risk blocked"
-    ) == module.EXECUTION_ERROR_CLASS_BROKER_FILL_UNCONFIRMED
+    ) == module.EXECUTION_ERROR_CLASS_EXECUTION_NOT_ATTEMPTED
+
+
+def test_classify_paper_execution_error_broker_result_missing():
+    assert module.classify_paper_execution_error(
+        "IBKR Paper注文結果を取得できませんでした。注文済みとして記録しません。"
+    ) == module.EXECUTION_ERROR_CLASS_BROKER_RESULT_MISSING
 
 
 def test_classify_paper_execution_error_paper_account_not_confirmed():
