@@ -1,6 +1,5 @@
 """Paper Trading専用ランナー。"""
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -27,6 +26,7 @@ from ai_asset_platform.execution.verified_paper_preflight import (
     evaluate_verified_paper_preflight,
 )
 from ai_asset_platform.execution.verified_paper_scan import (
+    _extract_ibkr_error_codes,
     classify_paper_execution_error,
     execute_verified_actions_from_scan,
 )
@@ -157,63 +157,44 @@ def _sync_confirmed_fill_to_reporting() -> bool:
 
 RAW_EXECUTION_DIAGNOSTICS_PATH = Path("results") / "paper_execution_raw_diagnostics.jsonl"
 
-# Only these IBKR result fields are ever persisted; a key not in this list
-# (e.g. "message", which carries free-text broker/account content) is never
-# captured, even if it appears in the raw error text.
-_SAFE_DIAGNOSTIC_FIELD_PATTERN = re.compile(
-    r"\b(status|sent|order_id|terminal|timeout|ib_status|filled|avg_price)=([^/]*)"
-)
-_BROKER_ERROR_CODE_PATTERN = re.compile(r"'code':\s*(\d+)")
-# IBKR account ids look like one or two letters followed by 6-9 digits
-# (e.g. DU1234567). Redacted even from the bounded leftover note below.
-_ACCOUNT_ID_PATTERN = re.compile(r"\b[A-Za-z]{1,2}\d{6,9}\b")
-# Any other long alphanumeric run (API keys, tokens, session ids) is treated
-# as a potential credential and redacted the same way.
-_LONG_TOKEN_PATTERN = re.compile(r"\b[A-Za-z0-9_\-]{16,}\b")
-_SAFE_NOTE_MAX_LENGTH = 200
-
 
 def _structured_execution_diagnostic(raw_error: str) -> dict:
-    """Reduce raw_error text to a safe, structured diagnostic.
+    """Reduce raw_error text to a safe, closed-vocabulary diagnostic.
 
-    Only an allowlisted set of IBKR result fields and numeric broker error
-    codes are kept verbatim. Anything else -- including any broker/account
-    free text such as "message=" or "errors=[...]" payloads -- is dropped
-    rather than persisted. A short leftover note is kept for non-IBKR
-    (preflight/FX/connection) reasons, but is first stripped of every
-    recognized field/value pair, then of anything shaped like an account id
-    or a long token, and finally length-capped.
+    Only two things are ever persisted:
+    - the fixed classification label from classify_paper_execution_error()'s
+      own closed label set (never raw text);
+    - numeric IBKR error codes, extracted by the same narrow, already-safe
+      ``ibkr_error_codes=[...]`` marker parser used by
+      verified_paper_scan._extract_ibkr_error_codes(), which only ever reads
+      digits out of a marker written by our own connection code -- never out
+      of broker/account free text.
+
+    An earlier revision of this function also tried to pull free-text fields
+    (status=, order_id=, ...) and a short leftover note out of raw_error.
+    Codex review found both could still leak broker/account content: an
+    allowlisted field name appearing inside an untrusted ``message=...``
+    payload was captured unredacted, and a value containing "/" defeated the
+    note's own stripping. Rather than patching those regexes further, this
+    extraction is dropped entirely -- there is no longer any path from
+    untrusted raw_error text into the persisted diagnostic.
     """
     text = str(raw_error)
-    fields = {
-        key: value.strip()
-        for key, value in _SAFE_DIAGNOSTIC_FIELD_PATTERN.findall(text)
-    }
-    error_codes = sorted({int(code) for code in _BROKER_ERROR_CODE_PATTERN.findall(text)})
-
-    # Drop every "key=value" style segment -- not only the allowlisted ones --
-    # so an unrecognized key (e.g. "message=...") never leaks into the note.
-    note = re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*=\[[^\]]*\]", "", text)
-    note = re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*=[^/]*", "", note)
-    note = _ACCOUNT_ID_PATTERN.sub("[ACCOUNT_REDACTED]", note)
-    note = _LONG_TOKEN_PATTERN.sub("[TOKEN_REDACTED]", note)
-    note = re.sub(r"\s*/\s*/\s*", " / ", note).strip(" /")
-    note = note[:_SAFE_NOTE_MAX_LENGTH]
-
-    diagnostic: dict = {"fields": fields}
-    if error_codes:
-        diagnostic["error_codes"] = error_codes
-    if note:
-        diagnostic["note"] = note
+    diagnostic: dict = {"label": classify_paper_execution_error(text)}
+    codes = _extract_ibkr_error_codes(text)
+    if codes:
+        diagnostic["ibkr_error_codes"] = codes
     return diagnostic
 
 
 def _record_execution_diagnostic(ticker: str, raw_error: str) -> None:
-    """Persist a safe, structured diagnostic derived from the execution-error
-    text that classify_paper_execution_error() discards before printing, so a
-    future UNKNOWN_ERROR/BROKER_FILL_UNCONFIRMED occurrence can actually be
+    """Persist only the fixed classification label and numeric IBKR error
+    codes derived from the execution-error text that
+    classify_paper_execution_error() discards before printing, so a future
+    UNKNOWN_ERROR/BROKER_FILL_UNCONFIRMED occurrence can still be
     root-caused -- without ever persisting the raw error text, an account
-    identifier, or anything shaped like a credential/token.
+    identifier, or anything shaped like a credential/token: see
+    _structured_execution_diagnostic().
 
     Never printed to stdout/the autopilot log -- file-only, append-only. Must
     never raise: a diagnostics-write failure must not fail the trading run.
