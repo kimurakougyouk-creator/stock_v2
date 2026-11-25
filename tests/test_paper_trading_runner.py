@@ -115,7 +115,7 @@ def test_paper_runner_main_prints_classified_label_never_raw_broker_text(monkeyp
     assert "NOT_SENT" not in output
 
 
-def test_paper_runner_main_records_raw_diagnostic_without_printing_it(monkeypatch, capsys, tmp_path):
+def test_paper_runner_main_records_structured_diagnostic_without_printing_raw_text(monkeypatch, capsys, tmp_path):
     diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
     monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
     raw_error = (
@@ -141,17 +141,48 @@ def test_paper_runner_main_records_raw_diagnostic_without_printing_it(monkeypatc
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["ticker"] == "AAPL"
-    assert record["raw_error"] == raw_error
     assert "recorded_at" in record
+    assert "raw_error" not in record
+    assert record["fields"]["status"] == "NOT_SENT"
+    assert record["error_codes"] == [200]
+    # The structured record keeps the IBKR error code for root-causing, but
+    # never the broker's free-text message content.
+    assert "No security definition" not in json.dumps(record, ensure_ascii=False)
+    assert "contract rejected" not in json.dumps(record, ensure_ascii=False)
 
 
-def test_record_raw_execution_diagnostic_never_raises_on_write_failure(monkeypatch):
+def test_structured_execution_diagnostic_never_persists_account_id_or_token(monkeypatch, tmp_path):
+    diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
+    monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
+    # Not real credentials -- random-looking placeholders shaped like an
+    # account id and a long opaque token, deliberately avoiding any
+    # recognizable third-party key prefix (e.g. "sk_live_") so this test
+    # string is not itself flagged by secret scanners.
+    placeholder_account_id = "DU1234567"
+    placeholder_token = "PLACEHOLDERTOKENVALUE0123456789NOTREAL"
+    fake_secret_error = (
+        f"IBKR Paper注文は送信前に停止しました: account {placeholder_account_id} rejected, "
+        f"session_credential={placeholder_token} invalid"
+    )
+    paper_trading_runner._record_execution_diagnostic("AAPL", fake_secret_error)
+
+    persisted_text = diagnostics_path.read_text(encoding="utf-8")
+    assert placeholder_account_id not in persisted_text
+    assert placeholder_token not in persisted_text
+    assert "[ACCOUNT_REDACTED]" in persisted_text or "[TOKEN_REDACTED]" in persisted_text
+
+    record = json.loads(persisted_text.strip())
+    assert record["ticker"] == "AAPL"
+    assert "raw_error" not in record
+
+
+def test_record_execution_diagnostic_never_raises_on_write_failure(monkeypatch):
     monkeypatch.setattr(
         paper_trading_runner,
         "RAW_EXECUTION_DIAGNOSTICS_PATH",
         SimpleNamespace(parent=SimpleNamespace(mkdir=lambda **_: (_ for _ in ()).throw(OSError("disk full")))),
     )
-    paper_trading_runner._record_raw_execution_diagnostic("AAPL", "some raw error")
+    paper_trading_runner._record_execution_diagnostic("AAPL", "some raw error")
 
 
 def test_paper_runner_main_prints_ibkr_error_code_on_connection_failure(monkeypatch, capsys):
