@@ -217,13 +217,24 @@ def _structured_execution_diagnostic(raw_error: str, structured_error_codes=None
     raw_error. Codex review found each of these let broker-controlled text
     (a coincidental or crafted substring inside the broker's own free-text
     ``message``) reach the persisted diagnostic -- including, in the last
-    case, bypassing range validation entirely. Every text-based extraction
-    path has been removed: the only way a code reaches this function now is
-    for the caller to have already read it out of structured data at its
-    origin.
+    case, bypassing range validation entirely.
+
+    classify_paper_execution_error() itself still embeds that same kind of
+    text-derived content for ONE label: for a connection failure it returns
+    ``UNKNOWN_ERROR(ibkr_error_codes=[...])``, with the bracketed codes read
+    out of raw_error's text by its own (separate, unmodified)
+    _extract_ibkr_error_codes() call -- used for main()'s printed console
+    line, where that has always been acceptable. Codex review found that
+    persisting that return value verbatim as this diagnostic's ``label``
+    reintroduced the exact same leak through a different field. Only the
+    fixed prefix before ``"("`` is ever a member of the closed label set, so
+    that prefix -- never the full return value -- is what gets persisted;
+    the printed console line (main()'s own direct call) is unaffected.
     """
     text = str(raw_error)
-    diagnostic: dict = {"label": classify_paper_execution_error(text)}
+    label = classify_paper_execution_error(text)
+    base_label = label.split("(", 1)[0]
+    diagnostic: dict = {"label": base_label}
     codes = _validated_ibkr_error_codes(structured_error_codes)
     if codes:
         diagnostic["ibkr_error_codes"] = codes

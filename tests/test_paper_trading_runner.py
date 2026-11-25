@@ -203,7 +203,10 @@ def test_structured_execution_diagnostic_records_connection_error_codes_passed_i
     paper_trading_runner._record_execution_diagnostic("AAPL", raw_error, [326, 502])
 
     record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
-    assert record["label"] == "UNKNOWN_ERROR(ibkr_error_codes=[326, 502])"
+    # Only the fixed label prefix is persisted -- classify_paper_execution_error()'s
+    # own text-derived "(ibkr_error_codes=[...])" suffix (used for main()'s
+    # printed console line) is never part of the persisted diagnostic.
+    assert record["label"] == "UNKNOWN_ERROR"
     assert record["ibkr_error_codes"] == [326, 502]
     assert set(record) == {"recorded_at", "ticker", "label", "ibkr_error_codes"}
 
@@ -230,6 +233,30 @@ def test_structured_execution_diagnostic_never_parses_codes_out_of_raw_error_tex
     record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
     assert record["ibkr_error_codes"] == [201]
     assert "12345678901234567890" not in json.dumps(record)
+
+
+def test_structured_execution_diagnostic_never_embeds_text_derived_digits_in_label(tmp_path, monkeypatch):
+    # Codex P1 (HEAD e1a6564): classify_paper_execution_error() itself
+    # returns "UNKNOWN_ERROR(ibkr_error_codes=[...])" for a connection
+    # failure, with the bracketed codes read out of raw_error's *text* by
+    # its own separate, unmodified extractor (used for main()'s printed
+    # console line). Persisting that return value verbatim as this
+    # diagnostic's "label" reintroduced the leak through a different field:
+    # an implausibly large/crafted number inside raw_error's text survived
+    # into the persisted label even with ibkr_error_codes=[] validated and
+    # empty. Only the fixed prefix before "(" may ever be persisted.
+    diagnostics_path = tmp_path / "paper_execution_raw_diagnostics.jsonl"
+    monkeypatch.setattr(paper_trading_runner, "RAW_EXECUTION_DIAGNOSTICS_PATH", diagnostics_path)
+    raw_error = (
+        "IBKR Paperへ接続できません: port=4002: connection rejected credential "
+        "ibkr_error_codes=[12345678901234567890]"
+    )
+    paper_trading_runner._record_execution_diagnostic("AAPL", raw_error, [])
+
+    record = json.loads(diagnostics_path.read_text(encoding="utf-8").strip())
+    assert record["label"] == "UNKNOWN_ERROR"
+    assert "12345678901234567890" not in json.dumps(record)
+    assert "ibkr_error_codes" not in record
 
 
 def test_order_result_raw_error_codes_reads_only_the_structured_code_field():
