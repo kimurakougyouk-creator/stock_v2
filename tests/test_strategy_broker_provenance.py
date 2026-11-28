@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+
+import ai_asset_platform.execution.strategy_broker_provenance as provenance_module
 from ai_asset_platform.brokers.ibkr_commission_snapshot import (
     IbkrCommissionEvidence,
     IbkrPaperCommissionSnapshot,
@@ -13,6 +17,8 @@ from ai_asset_platform.brokers.ibkr_execution_snapshot import (
     IbkrPaperExecutionSnapshot,
 )
 from ai_asset_platform.execution.strategy_broker_provenance import (
+    capture_broker_provenance_evidence_for_fill,
+    collect_and_verify_broker_provenance,
     verify_broker_provenance_for_strategy_fills,
 )
 
@@ -707,3 +713,289 @@ def test_module_contains_no_order_transport():
     )
     for token in forbidden:
         assert token not in source
+
+
+def test_augment_snapshot_restores_missing_exec_id_from_captured_store(tmp_path):
+    captured_path = tmp_path / "captured.jsonl"
+    execution_row = _execution()
+    commission_row = _commission()
+    completed_row = _completed_order()
+    payload = {
+        "exec_id": "exec-1",
+        "captured_at": "2026-11-27T14:45:00+00:00",
+        "order_intent_id": DEFAULT_INTENT_ID,
+        "execution": asdict(execution_row),
+        "commission": asdict(commission_row),
+        "completed_order": asdict(completed_row),
+    }
+    captured_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    merged_execution, merged_commission, merged_completed = (
+        provenance_module._augment_snapshot_with_captured_evidence(
+            _execution_snapshot(),
+            _commission_snapshot(),
+            _completed_order_snapshot(),
+            needed_exec_ids={"exec-1"},
+            captured_evidence_path=captured_path,
+        )
+    )
+    assert merged_execution.executions == (execution_row,)
+    assert merged_commission.commissions == (commission_row,)
+    assert merged_completed.orders == (completed_row,)
+
+
+def test_augment_snapshot_never_overrides_a_live_row(tmp_path):
+    captured_path = tmp_path / "captured.jsonl"
+    stale_execution = _execution(price=1.0)
+    payload = {"exec_id": "exec-1", "execution": asdict(stale_execution)}
+    captured_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    live_execution = _execution(price=172.1)
+
+    merged_execution, _, _ = provenance_module._augment_snapshot_with_captured_evidence(
+        _execution_snapshot(live_execution),
+        _commission_snapshot(),
+        _completed_order_snapshot(),
+        needed_exec_ids={"exec-1"},
+        captured_evidence_path=captured_path,
+    )
+    assert merged_execution.executions == (live_execution,)
+
+
+def test_augment_snapshot_leaves_not_connected_snapshot_fail_closed(tmp_path):
+    captured_path = tmp_path / "captured.jsonl"
+    payload = {"exec_id": "exec-1", "execution": asdict(_execution())}
+    captured_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    not_ready_snapshot = _execution_snapshot(ready=False)
+    merged_execution, _, _ = provenance_module._augment_snapshot_with_captured_evidence(
+        not_ready_snapshot,
+        _commission_snapshot(),
+        _completed_order_snapshot(),
+        needed_exec_ids={"exec-1"},
+        captured_evidence_path=captured_path,
+    )
+    # A captured row may be appended to the executions tuple, but the
+    # snapshot's own connected/ready state is never touched -- verification
+    # still fails closed on "not ready", exactly as before this change.
+    assert merged_execution.connected is False
+    assert merged_execution.ready is False
+
+
+def test_capture_persists_rows_as_they_arrive_across_retries(tmp_path, monkeypatch):
+    captured_path = tmp_path / "captured.jsonl"
+    execution_row = _execution()
+    commission_row = _commission()
+    completed_row = _completed_order()
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def fake_execution(timeout):
+        attempts["count"] += 1
+        return _execution_snapshot(execution_row)
+
+    def fake_commission(timeout):
+        if attempts["count"] >= 2:
+            return _commission_snapshot(commission_row)
+        return _commission_snapshot()
+
+    def fake_completed_orders(timeout):
+        if attempts["count"] >= 3:
+            return _completed_order_snapshot(completed_row)
+        return _completed_order_snapshot()
+
+    monkeypatch.setattr(provenance_module, "preview_ibkr_paper_execution_snapshot", fake_execution)
+    monkeypatch.setattr(provenance_module, "preview_ibkr_paper_commission_snapshot", fake_commission)
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_completed_orders", fake_completed_orders
+    )
+
+    result = capture_broker_provenance_evidence_for_fill(
+        _fill(),
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        max_attempts=5,
+        retry_interval_seconds=0.0,
+        captured_evidence_path=captured_path,
+        sleep_fn=sleeps.append,
+    )
+
+    assert result.verified is True
+    assert attempts["count"] == 3
+    saved = captured_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(saved) == 1
+    saved_row = json.loads(saved[0])
+    assert saved_row["exec_id"] == "exec-1"
+    assert saved_row["commission"] is not None
+    assert saved_row["completed_order"] is not None
+    assert sleeps == [0.0, 0.0]
+
+
+def test_capture_persists_partial_evidence_without_fabricating_when_commission_never_arrives(
+    tmp_path, monkeypatch
+):
+    captured_path = tmp_path / "captured.jsonl"
+    execution_row = _execution()
+
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_execution_snapshot",
+        lambda timeout: _execution_snapshot(execution_row),
+    )
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_commission_snapshot", lambda timeout: _commission_snapshot()
+    )
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_completed_orders",
+        lambda timeout: _completed_order_snapshot(),
+    )
+
+    result = capture_broker_provenance_evidence_for_fill(
+        _fill(),
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        max_attempts=3,
+        retry_interval_seconds=0.0,
+        captured_evidence_path=captured_path,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result.verified is False
+    saved = captured_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(saved) == 1
+    saved_row = json.loads(saved[0])
+    assert saved_row["execution"] is not None
+    assert saved_row["commission"] is None
+    assert saved_row["completed_order"] is None
+
+
+def test_capture_returns_blocked_without_persisting_when_execution_never_arrives(
+    tmp_path, monkeypatch
+):
+    captured_path = tmp_path / "captured.jsonl"
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_execution_snapshot", lambda timeout: _execution_snapshot()
+    )
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_commission_snapshot", lambda timeout: _commission_snapshot()
+    )
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_completed_orders",
+        lambda timeout: _completed_order_snapshot(),
+    )
+
+    result = capture_broker_provenance_evidence_for_fill(
+        _fill(),
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        max_attempts=2,
+        retry_interval_seconds=0.0,
+        captured_evidence_path=captured_path,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result.verified is False
+    assert not captured_path.exists()
+
+
+def test_capture_skips_already_captured_exec_id_and_does_not_duplicate(tmp_path, monkeypatch):
+    captured_path = tmp_path / "captured.jsonl"
+    existing_payload = {
+        "exec_id": "exec-1",
+        "execution": asdict(_execution()),
+        "commission": asdict(_commission()),
+        "completed_order": asdict(_completed_order()),
+    }
+    captured_path.write_text(json.dumps(existing_payload) + "\n", encoding="utf-8")
+
+    calls = {"count": 0}
+
+    def fake_execution(timeout):
+        calls["count"] += 1
+        return _execution_snapshot(_execution())
+
+    monkeypatch.setattr(provenance_module, "preview_ibkr_paper_execution_snapshot", fake_execution)
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_commission_snapshot", lambda timeout: _commission_snapshot()
+    )
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_completed_orders",
+        lambda timeout: _completed_order_snapshot(),
+    )
+
+    result = capture_broker_provenance_evidence_for_fill(
+        _fill(),
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        max_attempts=4,
+        retry_interval_seconds=0.0,
+        captured_evidence_path=captured_path,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    # Already captured -> treated as complete immediately (no further sleeps
+    # needed), and the store is never rewritten/duplicated.
+    assert calls["count"] == 1
+    saved = captured_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(saved) == 1
+    assert result.verified is True
+
+
+def test_collect_and_verify_falls_back_to_captured_evidence_when_live_snapshot_is_empty(
+    tmp_path, monkeypatch
+):
+    captured_path = tmp_path / "captured.jsonl"
+    payload = {
+        "exec_id": "exec-1",
+        "execution": asdict(_execution()),
+        "commission": asdict(_commission()),
+        "completed_order": asdict(_completed_order()),
+    }
+    captured_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_execution_snapshot", lambda timeout: _execution_snapshot()
+    )
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_commission_snapshot", lambda timeout: _commission_snapshot()
+    )
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_completed_orders",
+        lambda timeout: _completed_order_snapshot(),
+    )
+
+    result = collect_and_verify_broker_provenance(
+        [_fill()],
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        captured_evidence_path=captured_path,
+    )
+    assert result.verified is True
+
+
+def test_collect_and_verify_stays_blocked_when_nothing_was_ever_captured(tmp_path, monkeypatch):
+    captured_path = tmp_path / "captured.jsonl"  # never written to
+
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_execution_snapshot", lambda timeout: _execution_snapshot()
+    )
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_commission_snapshot", lambda timeout: _commission_snapshot()
+    )
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_completed_orders",
+        lambda timeout: _completed_order_snapshot(),
+    )
+
+    result = collect_and_verify_broker_provenance(
+        [_fill()],
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        captured_evidence_path=captured_path,
+    )
+    assert result.verified is False

@@ -24,6 +24,13 @@ from ai_asset_platform.execution.ibkr_execution_reconcile import (
 )
 from ai_asset_platform.execution.legacy_fill_sync import record_confirmed_fill
 from ai_asset_platform.execution.service import ExecutionService
+from ai_asset_platform.execution.strategy_broker_provenance import (
+    capture_broker_provenance_evidence_for_fill,
+)
+from ai_asset_platform.reports.strategy_profitability_evidence import (
+    DEFAULT_COMMISSION_REPORT_PATH,
+    _load_json_object,
+)
 from ai_asset_platform.execution.shared_risk_gate import build_shared_risk_gate
 from ai_asset_platform.execution.signal_order_bridge import (
     SignalExecutionResult,
@@ -269,6 +276,35 @@ def _broker_exec_fills(result: object | None) -> list[dict]:
     return fills
 
 
+def _best_effort_capture_broker_provenance_evidence(recorded_fill: dict) -> None:
+    """Durably capture this fill's broker evidence before it can be lost.
+
+    Runs synchronously, right after the fill is already confirmed and
+    recorded, using a separate read-only connection (never the order
+    connection). The Paper Gateway's daily auto-restart (observed to erase
+    its in-session execution/commission/completed-order history -- see the
+    2026-11-27 AAPL fill) can happen at any later point the same day, so
+    this must run now rather than being deferred to a later, manually
+    triggered check.
+
+    Never raises and never blocks order confirmation: this always runs
+    after ``record_confirmed_fill`` has already durably recorded the fill,
+    so a capture failure here can only mean this fill's broker-provenance
+    evidence stays BLOCKED until someone retries it -- never a lost or
+    corrupted order record, and never a fabricated evidence row.
+    """
+    try:
+        try:
+            local_commission_report = _load_json_object(DEFAULT_COMMISSION_REPORT_PATH)
+        except Exception:
+            local_commission_report = None
+        capture_broker_provenance_evidence_for_fill(
+            recorded_fill, local_commission_report=local_commission_report
+        )
+    except Exception:
+        return
+
+
 def execute_approved_signal_via_ibkr_paper(
     *, ticker: str, signal: str, shares: int, order_intent_id: str,
     process_start_source_sha: str | None = None,
@@ -341,7 +377,7 @@ def execute_approved_signal_via_ibkr_paper(
                 execution_time=_first_broker_execution_time(result),
             )
             raw_order_id = getattr(result, "order_id", None)
-            record_confirmed_fill(
+            recorded_fill = record_confirmed_fill(
                 ticker=ticker, side=normalized_signal,
                 filled_quantity=confirmed_quantity, avg_fill_price=confirmed_price,
                 currency=instrument.currency, order_intent_id=order_intent_id,
@@ -352,6 +388,7 @@ def execute_approved_signal_via_ibkr_paper(
                 strategy_source_sha=strategy_source_sha,
                 strategy_parameters_sha=normalized_parameters_sha,
             )
+            _best_effort_capture_broker_provenance_evidence(recorded_fill)
         return execution
     finally:
         broker.disconnect()

@@ -22,13 +22,16 @@ or transmitted here, and no Live endpoint is ever contacted.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+import json
+import time
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Iterable
 
 from ai_asset_platform.brokers.ibkr_commission_snapshot import (
+    IbkrCommissionEvidence,
     IbkrPaperCommissionSnapshot,
     preview_ibkr_paper_commission_snapshot,
 )
@@ -75,6 +78,128 @@ from ai_asset_platform.reports.strategy_profitability_evidence import (
 MAX_LOCAL_VS_BROKER_TIMESTAMP_SKEW_SECONDS = 300.0
 
 FxRateFetcher = Callable[[str, str, float, str], "float | None"]
+
+# Durable, append-only store of broker-provenance evidence captured
+# immediately after a natural fill, while the Paper Gateway still holds that
+# session's in-memory execution/commission/completed-order history. IBKR's
+# own daily Gateway auto-restart (and any undocumented API retention window)
+# can make that history permanently unavailable to a later live requery, so
+# this file is the only way such evidence survives past that restart. It is
+# only ever written by capture_broker_provenance_evidence_for_fill, each line
+# keyed by exec_id, and only ever read back as a fallback for an exec_id a
+# live, successfully-connected snapshot can no longer see -- never used to
+# override a row a live query DOES still return.
+DEFAULT_CAPTURED_EVIDENCE_PATH = Path("results/broker_provenance_captured_evidence.jsonl")
+
+DEFAULT_CAPTURE_MAX_ATTEMPTS = 6
+DEFAULT_CAPTURE_RETRY_INTERVAL_SECONDS = 10.0
+
+
+def _load_captured_evidence_by_exec_id(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    captured: dict[str, dict] = {}
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                exec_id = str(row.get("exec_id", "")).strip()
+                if exec_id:
+                    captured[exec_id] = row
+    except OSError:
+        return {}
+    return captured
+
+
+def _append_captured_evidence(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _augment_snapshot_with_captured_evidence(
+    execution_snapshot: IbkrPaperExecutionSnapshot,
+    commission_snapshot: IbkrPaperCommissionSnapshot,
+    completed_order_snapshot: IbkrPaperCompletedOrderSnapshot,
+    *,
+    needed_exec_ids: Iterable[str],
+    captured_evidence_path: Path = DEFAULT_CAPTURED_EVIDENCE_PATH,
+) -> tuple[
+    IbkrPaperExecutionSnapshot, IbkrPaperCommissionSnapshot, IbkrPaperCompletedOrderSnapshot
+]:
+    """Restore exec_ids a live snapshot can no longer see from the durable store.
+
+    Only ever adds a row for an exec_id a live, already-connected snapshot is
+    missing; never replaces a row the live snapshot DOES return, and never
+    changes the ``connected``/``ready`` state of a snapshot that failed to
+    connect at all -- that case stays fail-closed exactly as before.
+    """
+    needed = {str(value).strip() for value in needed_exec_ids if str(value).strip()}
+    if not needed:
+        return execution_snapshot, commission_snapshot, completed_order_snapshot
+
+    live_execution_ids = {row.exec_id for row in execution_snapshot.executions if row.exec_id}
+    live_commission_ids = {row.exec_id for row in commission_snapshot.commissions if row.exec_id}
+    missing_executions = needed - live_execution_ids
+    missing_commissions = needed - live_commission_ids
+    if not missing_executions and not missing_commissions:
+        return execution_snapshot, commission_snapshot, completed_order_snapshot
+
+    captured = _load_captured_evidence_by_exec_id(captured_evidence_path)
+    added_executions: list[IbkrExecutionEvidence] = []
+    added_commissions: list[IbkrCommissionEvidence] = []
+    added_completed_orders: list[IbkrCompletedOrderEvidence] = []
+    seen_perm_ids = {row.perm_id for row in completed_order_snapshot.orders}
+
+    for exec_id in missing_executions | missing_commissions:
+        row = captured.get(exec_id)
+        if row is None:
+            continue
+        if exec_id in missing_executions and row.get("execution"):
+            try:
+                added_executions.append(IbkrExecutionEvidence(**row["execution"]))
+            except TypeError:
+                continue
+        if exec_id in missing_commissions and row.get("commission"):
+            try:
+                added_commissions.append(IbkrCommissionEvidence(**row["commission"]))
+            except TypeError:
+                pass
+        completed_row = row.get("completed_order")
+        if completed_row:
+            try:
+                candidate = IbkrCompletedOrderEvidence(**completed_row)
+            except TypeError:
+                continue
+            if candidate.perm_id not in seen_perm_ids:
+                added_completed_orders.append(candidate)
+                seen_perm_ids.add(candidate.perm_id)
+
+    if not added_executions and not added_commissions and not added_completed_orders:
+        return execution_snapshot, commission_snapshot, completed_order_snapshot
+
+    if added_executions:
+        execution_snapshot = replace(
+            execution_snapshot,
+            executions=execution_snapshot.executions + tuple(added_executions),
+        )
+    if added_commissions:
+        commission_snapshot = replace(
+            commission_snapshot,
+            commissions=commission_snapshot.commissions + tuple(added_commissions),
+        )
+    if added_completed_orders:
+        completed_order_snapshot = replace(
+            completed_order_snapshot,
+            orders=completed_order_snapshot.orders + tuple(added_completed_orders),
+        )
+    return execution_snapshot, commission_snapshot, completed_order_snapshot
 
 
 @dataclass(frozen=True)
@@ -455,6 +580,7 @@ def collect_and_verify_broker_provenance(
     local_commission_report: dict | None,
     account_currency: str | None = None,
     timeout: float = 10.0,
+    captured_evidence_path: Path = DEFAULT_CAPTURED_EVIDENCE_PATH,
 ) -> BrokerProvenanceResult:
     """Connect to the Paper broker and verify the supplied natural strategy fills.
 
@@ -467,9 +593,27 @@ def collect_and_verify_broker_provenance(
     injected ``fx_rate_fetcher``.
     """
     normalized_account_currency = str(account_currency or SETTINGS.account_currency)
+    fills = list(strategy_fills)
     execution_snapshot = preview_ibkr_paper_execution_snapshot(timeout=timeout)
     commission_snapshot = preview_ibkr_paper_commission_snapshot(timeout=timeout)
     completed_order_snapshot = preview_ibkr_paper_completed_orders(timeout=timeout)
+
+    needed_exec_ids = {
+        str(exec_row.get("exec_id", "")).strip()
+        for fill in fills
+        if isinstance(fill, dict)
+        for exec_row in list(fill.get("broker_exec_fills") or [])
+        if isinstance(exec_row, dict)
+    }
+    execution_snapshot, commission_snapshot, completed_order_snapshot = (
+        _augment_snapshot_with_captured_evidence(
+            execution_snapshot,
+            commission_snapshot,
+            completed_order_snapshot,
+            needed_exec_ids=needed_exec_ids,
+            captured_evidence_path=captured_evidence_path,
+        )
+    )
 
     def _fetch_fx_rate(
         base_currency: str,
@@ -486,7 +630,157 @@ def collect_and_verify_broker_provenance(
         )
 
     return verify_broker_provenance_for_strategy_fills(
-        strategy_fills,
+        fills,
+        execution_snapshot=execution_snapshot,
+        commission_snapshot=commission_snapshot,
+        completed_order_snapshot=completed_order_snapshot,
+        local_commission_report=local_commission_report,
+        account_currency=normalized_account_currency,
+        fx_rate_fetcher=_fetch_fx_rate,
+    )
+
+
+def capture_broker_provenance_evidence_for_fill(
+    fill: dict,
+    *,
+    local_commission_report: dict | None,
+    account_currency: str | None = None,
+    timeout: float = 10.0,
+    max_attempts: int = DEFAULT_CAPTURE_MAX_ATTEMPTS,
+    retry_interval_seconds: float = DEFAULT_CAPTURE_RETRY_INTERVAL_SECONDS,
+    captured_evidence_path: Path = DEFAULT_CAPTURED_EVIDENCE_PATH,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> BrokerProvenanceResult:
+    """Durably capture broker-provenance evidence for ONE just-confirmed natural fill.
+
+    Intended to be called once, synchronously, right after
+    ``legacy_fill_sync.record_confirmed_fill`` durably records a natural
+    Paper fill -- while the Paper Gateway still holds this session's
+    in-memory execution/commission/completed-order history, and well before
+    any later same-day or next-day Gateway auto-restart could erase it (see
+    the 2026-11-27 AAPL fill, whose evidence was lost to exactly that
+    restart because nothing captured it beforehand).
+
+    IBKR's own execution and commission reports can arrive a few seconds
+    apart, so this retries a bounded number of times rather than giving up
+    on the first empty commission read. Every row actually observed is
+    persisted to ``captured_evidence_path`` even if the fill's other rows
+    never arrive within the retry budget -- a partial capture is still real,
+    independently-fetched broker evidence and must not be discarded. Nothing
+    is ever fabricated: if a row never appears, the final verification
+    below simply stays BLOCKED for this fill, exactly as it would without
+    this function ever having run.
+
+    Read-only throughout; never creates, changes, cancels, retries, or
+    transmits an order, and never contacts a Live endpoint. Never raises --
+    any exception is a best-effort capture failure, not a Paper order
+    failure, since this always runs after the order is already confirmed.
+    """
+    needed_exec_ids = {
+        str(row.get("exec_id", "")).strip()
+        for row in list(fill.get("broker_exec_fills") or [])
+        if isinstance(row, dict) and str(row.get("exec_id", "")).strip()
+    }
+    normalized_account_currency = str(account_currency or SETTINGS.account_currency)
+    if not needed_exec_ids:
+        return BrokerProvenanceResult(
+            False, ("fill has no broker_exec_fills to capture",), 0, 1
+        )
+
+    already_captured = set(_load_captured_evidence_by_exec_id(captured_evidence_path))
+    collected: dict[str, dict] = {}
+    execution_snapshot: IbkrPaperExecutionSnapshot | None = None
+    commission_snapshot: IbkrPaperCommissionSnapshot | None = None
+    completed_order_snapshot: IbkrPaperCompletedOrderSnapshot | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        execution_snapshot = preview_ibkr_paper_execution_snapshot(timeout=timeout)
+        commission_snapshot = preview_ibkr_paper_commission_snapshot(timeout=timeout)
+        completed_order_snapshot = preview_ibkr_paper_completed_orders(timeout=timeout)
+
+        executions_by_id = {
+            row.exec_id: row for row in execution_snapshot.executions if row.exec_id
+        }
+        commissions_by_id = {
+            row.exec_id: row for row in commission_snapshot.commissions if row.exec_id
+        }
+        completed_by_perm_id = {row.perm_id: row for row in completed_order_snapshot.orders}
+
+        for exec_id in needed_exec_ids:
+            if exec_id in already_captured:
+                continue
+            execution_row = executions_by_id.get(exec_id)
+            if execution_row is None:
+                continue
+            entry = collected.setdefault(
+                exec_id, {"execution": None, "commission": None, "completed_order": None}
+            )
+            entry["execution"] = execution_row
+            commission_row = commissions_by_id.get(exec_id)
+            if commission_row is not None:
+                entry["commission"] = commission_row
+            completed_row = completed_by_perm_id.get(execution_row.perm_id)
+            if completed_row is not None:
+                entry["completed_order"] = completed_row
+
+        all_complete = all(
+            exec_id in already_captured
+            or (
+                exec_id in collected
+                and collected[exec_id]["execution"] is not None
+                and collected[exec_id]["commission"] is not None
+                and collected[exec_id]["completed_order"] is not None
+            )
+            for exec_id in needed_exec_ids
+        )
+        if all_complete or attempt == max_attempts:
+            break
+        sleep_fn(retry_interval_seconds)
+
+    for exec_id, entry in collected.items():
+        if entry["execution"] is None:
+            continue
+        payload = {
+            "exec_id": exec_id,
+            "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "order_intent_id": str(fill.get("order_intent_id", "")),
+            "execution": asdict(entry["execution"]),
+            "commission": asdict(entry["commission"]) if entry["commission"] is not None else None,
+            "completed_order": (
+                asdict(entry["completed_order"]) if entry["completed_order"] is not None else None
+            ),
+        }
+        _append_captured_evidence(captured_evidence_path, payload)
+
+    assert execution_snapshot is not None
+    assert commission_snapshot is not None
+    assert completed_order_snapshot is not None
+    execution_snapshot, commission_snapshot, completed_order_snapshot = (
+        _augment_snapshot_with_captured_evidence(
+            execution_snapshot,
+            commission_snapshot,
+            completed_order_snapshot,
+            needed_exec_ids=needed_exec_ids,
+            captured_evidence_path=captured_evidence_path,
+        )
+    )
+
+    def _fetch_fx_rate(
+        base_currency: str,
+        quote_currency: str,
+        reference_timestamp: float,
+        end_datetime: str,
+    ) -> float | None:
+        return default_fx_rate_fetcher(
+            base_currency,
+            quote_currency,
+            reference_timestamp,
+            end_datetime,
+            timeout=timeout,
+        )
+
+    return verify_broker_provenance_for_strategy_fills(
+        [fill],
         execution_snapshot=execution_snapshot,
         commission_snapshot=commission_snapshot,
         completed_order_snapshot=completed_order_snapshot,
