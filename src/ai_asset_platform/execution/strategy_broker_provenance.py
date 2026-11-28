@@ -144,20 +144,43 @@ def _augment_snapshot_with_captured_evidence(
     if not needed:
         return execution_snapshot, commission_snapshot, completed_order_snapshot
 
-    live_execution_ids = {row.exec_id for row in execution_snapshot.executions if row.exec_id}
+    live_executions_by_id = {
+        row.exec_id: row for row in execution_snapshot.executions if row.exec_id
+    }
     live_commission_ids = {row.exec_id for row in commission_snapshot.commissions if row.exec_id}
-    missing_executions = needed - live_execution_ids
+    live_perm_ids = {row.perm_id for row in completed_order_snapshot.orders}
+    missing_executions = needed - set(live_executions_by_id)
     missing_commissions = needed - live_commission_ids
-    if not missing_executions and not missing_commissions:
-        return execution_snapshot, commission_snapshot, completed_order_snapshot
 
     captured = _load_captured_evidence_by_exec_id(captured_evidence_path)
+
+    # A completed order is keyed by perm_id, not exec_id, so "missing" must be
+    # determined per exec_id via whichever execution row (live, or otherwise
+    # the captured one) carries that exec_id's perm_id -- not merely gated on
+    # whether the execution/commission rows themselves are missing. Otherwise
+    # an exec_id whose execution and commission are both live, but whose
+    # completed order the Gateway has already lost, would never be restored.
+    missing_completed_orders: set[str] = set()
+    for exec_id in needed:
+        live_execution = live_executions_by_id.get(exec_id)
+        perm_id = live_execution.perm_id if live_execution is not None else None
+        if perm_id is None:
+            captured_row = captured.get(exec_id)
+            captured_execution = captured_row.get("execution") if captured_row else None
+            if captured_execution:
+                perm_id = captured_execution.get("perm_id")
+        if perm_id is None or perm_id not in live_perm_ids:
+            missing_completed_orders.add(exec_id)
+
+    if not missing_executions and not missing_commissions and not missing_completed_orders:
+        return execution_snapshot, commission_snapshot, completed_order_snapshot
+
     added_executions: list[IbkrExecutionEvidence] = []
     added_commissions: list[IbkrCommissionEvidence] = []
     added_completed_orders: list[IbkrCompletedOrderEvidence] = []
-    seen_perm_ids = {row.perm_id for row in completed_order_snapshot.orders}
+    seen_perm_ids = set(live_perm_ids)
 
-    for exec_id in missing_executions | missing_commissions:
+    for exec_id in missing_executions | missing_commissions | missing_completed_orders:
         row = captured.get(exec_id)
         if row is None:
             continue
@@ -171,15 +194,16 @@ def _augment_snapshot_with_captured_evidence(
                 added_commissions.append(IbkrCommissionEvidence(**row["commission"]))
             except TypeError:
                 pass
-        completed_row = row.get("completed_order")
-        if completed_row:
-            try:
-                candidate = IbkrCompletedOrderEvidence(**completed_row)
-            except TypeError:
-                continue
-            if candidate.perm_id not in seen_perm_ids:
-                added_completed_orders.append(candidate)
-                seen_perm_ids.add(candidate.perm_id)
+        if exec_id in missing_completed_orders:
+            completed_row = row.get("completed_order")
+            if completed_row:
+                try:
+                    candidate = IbkrCompletedOrderEvidence(**completed_row)
+                except TypeError:
+                    continue
+                if candidate.perm_id not in seen_perm_ids:
+                    added_completed_orders.append(candidate)
+                    seen_perm_ids.add(candidate.perm_id)
 
     if not added_executions and not added_commissions and not added_completed_orders:
         return execution_snapshot, commission_snapshot, completed_order_snapshot
@@ -687,8 +711,51 @@ def capture_broker_provenance_evidence_for_fill(
             False, ("fill has no broker_exec_fills to capture",), 0, 1
         )
 
-    already_captured = set(_load_captured_evidence_by_exec_id(captured_evidence_path))
+    def _is_complete(entry: dict) -> bool:
+        return (
+            entry["execution"] is not None
+            and entry["commission"] is not None
+            and entry["completed_order"] is not None
+        )
+
+    def _signature(entry: dict) -> tuple[bool, bool, bool]:
+        return (
+            entry["execution"] is not None,
+            entry["commission"] is not None,
+            entry["completed_order"] is not None,
+        )
+
+    # Seed from whatever a previous call (possibly interrupted mid-retry, or
+    # completed with some rows still missing) already persisted, so a partial
+    # capture can be completed by a later call instead of being treated as
+    # permanently done the moment any row for its exec_id exists on disk.
+    existing_rows = _load_captured_evidence_by_exec_id(captured_evidence_path)
     collected: dict[str, dict] = {}
+    persisted_signature: dict[str, tuple[bool, bool, bool]] = {}
+    for exec_id in needed_exec_ids:
+        existing_row = existing_rows.get(exec_id)
+        entry = collected.setdefault(
+            exec_id, {"execution": None, "commission": None, "completed_order": None}
+        )
+        if existing_row is None:
+            continue
+        if existing_row.get("execution"):
+            try:
+                entry["execution"] = IbkrExecutionEvidence(**existing_row["execution"])
+            except TypeError:
+                pass
+        if existing_row.get("commission"):
+            try:
+                entry["commission"] = IbkrCommissionEvidence(**existing_row["commission"])
+            except TypeError:
+                pass
+        if existing_row.get("completed_order"):
+            try:
+                entry["completed_order"] = IbkrCompletedOrderEvidence(**existing_row["completed_order"])
+            except TypeError:
+                pass
+        persisted_signature[exec_id] = _signature(entry)
+
     execution_snapshot: IbkrPaperExecutionSnapshot | None = None
     commission_snapshot: IbkrPaperCommissionSnapshot | None = None
     completed_order_snapshot: IbkrPaperCompletedOrderSnapshot | None = None
@@ -704,53 +771,67 @@ def capture_broker_provenance_evidence_for_fill(
         commissions_by_id = {
             row.exec_id: row for row in commission_snapshot.commissions if row.exec_id
         }
+        # A commission collector that reports a duplicate-conflict for this
+        # exec_id has already failed closed (snapshot.ready is False) -- the
+        # single retained row it still exposes in .commissions must never be
+        # captured as though it were a trustworthy, unconflicted reading,
+        # since a later restoration from the durable store would otherwise
+        # resurrect it into a fresh snapshot with no conflict record at all.
+        conflicted_exec_ids = {
+            exec_id
+            for exec_id in needed_exec_ids
+            if any(
+                f"exec_id={exec_id}" in conflict
+                for conflict in commission_snapshot.duplicate_conflicts
+            )
+        }
         completed_by_perm_id = {row.perm_id: row for row in completed_order_snapshot.orders}
 
         for exec_id in needed_exec_ids:
-            if exec_id in already_captured:
+            entry = collected[exec_id]
+            if _is_complete(entry):
                 continue
             execution_row = executions_by_id.get(exec_id)
-            if execution_row is None:
-                continue
-            entry = collected.setdefault(
-                exec_id, {"execution": None, "commission": None, "completed_order": None}
-            )
-            entry["execution"] = execution_row
-            commission_row = commissions_by_id.get(exec_id)
-            if commission_row is not None:
-                entry["commission"] = commission_row
-            completed_row = completed_by_perm_id.get(execution_row.perm_id)
-            if completed_row is not None:
-                entry["completed_order"] = completed_row
+            if execution_row is not None:
+                entry["execution"] = execution_row
+            if exec_id not in conflicted_exec_ids:
+                commission_row = commissions_by_id.get(exec_id)
+                if commission_row is not None:
+                    entry["commission"] = commission_row
+            perm_id_source = execution_row if execution_row is not None else entry["execution"]
+            if perm_id_source is not None:
+                completed_row = completed_by_perm_id.get(perm_id_source.perm_id)
+                if completed_row is not None:
+                    entry["completed_order"] = completed_row
 
-        all_complete = all(
-            exec_id in already_captured
-            or (
-                exec_id in collected
-                and collected[exec_id]["execution"] is not None
-                and collected[exec_id]["commission"] is not None
-                and collected[exec_id]["completed_order"] is not None
-            )
-            for exec_id in needed_exec_ids
-        )
+        # Persist every row that newly gained evidence THIS attempt, before
+        # sleeping or looping into another collector call that could itself
+        # raise -- so a crash, restart, or exception never discards evidence
+        # that was already independently observed from the broker.
+        for exec_id in needed_exec_ids:
+            entry = collected[exec_id]
+            if entry["execution"] is None:
+                continue
+            signature = _signature(entry)
+            if persisted_signature.get(exec_id) == signature:
+                continue
+            payload = {
+                "exec_id": exec_id,
+                "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "order_intent_id": str(fill.get("order_intent_id", "")),
+                "execution": asdict(entry["execution"]),
+                "commission": asdict(entry["commission"]) if entry["commission"] is not None else None,
+                "completed_order": (
+                    asdict(entry["completed_order"]) if entry["completed_order"] is not None else None
+                ),
+            }
+            _append_captured_evidence(captured_evidence_path, payload)
+            persisted_signature[exec_id] = signature
+
+        all_complete = all(_is_complete(collected[exec_id]) for exec_id in needed_exec_ids)
         if all_complete or attempt == max_attempts:
             break
         sleep_fn(retry_interval_seconds)
-
-    for exec_id, entry in collected.items():
-        if entry["execution"] is None:
-            continue
-        payload = {
-            "exec_id": exec_id,
-            "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "order_intent_id": str(fill.get("order_intent_id", "")),
-            "execution": asdict(entry["execution"]),
-            "commission": asdict(entry["commission"]) if entry["commission"] is not None else None,
-            "completed_order": (
-                asdict(entry["completed_order"]) if entry["completed_order"] is not None else None
-            ),
-        }
-        _append_captured_evidence(captured_evidence_path, payload)
 
     assert execution_snapshot is not None
     assert commission_snapshot is not None
