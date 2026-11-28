@@ -777,6 +777,9 @@ def capture_broker_provenance_evidence_for_fill(
         # captured as though it were a trustworthy, unconflicted reading,
         # since a later restoration from the durable store would otherwise
         # resurrect it into a fresh snapshot with no conflict record at all.
+        # The rejection is enforced on every attempt (not merely the first
+        # time it is seen), so a commission accepted before the conflict
+        # was detected is retroactively cleared rather than left in place.
         conflicted_exec_ids = {
             exec_id
             for exec_id in needed_exec_ids
@@ -785,7 +788,18 @@ def capture_broker_provenance_evidence_for_fill(
                 for conflict in commission_snapshot.duplicate_conflicts
             )
         }
-        completed_by_perm_id = {row.perm_id: row for row in completed_order_snapshot.orders}
+        # Mirror verify_broker_provenance_for_strategy_fills' own conflict
+        # detection for completed orders: two different rows sharing one
+        # perm_id are never resolved by picking either one, and must never
+        # be captured either -- same reasoning as the commission case above.
+        completed_by_perm_id: dict[int, IbkrCompletedOrderEvidence] = {}
+        conflicted_perm_ids: set[int] = set()
+        for row in completed_order_snapshot.orders:
+            previous = completed_by_perm_id.get(row.perm_id)
+            if previous is not None and previous != row:
+                conflicted_perm_ids.add(row.perm_id)
+                continue
+            completed_by_perm_id[row.perm_id] = row
 
         for exec_id in needed_exec_ids:
             entry = collected[exec_id]
@@ -794,15 +808,20 @@ def capture_broker_provenance_evidence_for_fill(
             execution_row = executions_by_id.get(exec_id)
             if execution_row is not None:
                 entry["execution"] = execution_row
-            if exec_id not in conflicted_exec_ids:
+            if exec_id in conflicted_exec_ids:
+                entry["commission"] = None
+            else:
                 commission_row = commissions_by_id.get(exec_id)
                 if commission_row is not None:
                     entry["commission"] = commission_row
             perm_id_source = execution_row if execution_row is not None else entry["execution"]
             if perm_id_source is not None:
-                completed_row = completed_by_perm_id.get(perm_id_source.perm_id)
-                if completed_row is not None:
-                    entry["completed_order"] = completed_row
+                if perm_id_source.perm_id in conflicted_perm_ids:
+                    entry["completed_order"] = None
+                else:
+                    completed_row = completed_by_perm_id.get(perm_id_source.perm_id)
+                    if completed_row is not None:
+                        entry["completed_order"] = completed_row
 
         # Persist every row that newly gained evidence THIS attempt, before
         # sleeping or looping into another collector call that could itself

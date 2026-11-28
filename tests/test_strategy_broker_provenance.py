@@ -1057,6 +1057,111 @@ def test_capture_rejects_conflicted_commission_and_stays_blocked(tmp_path, monke
     assert saved_row["commission"] is None
 
 
+def test_capture_retroactively_clears_commission_accepted_before_conflict_detected(
+    tmp_path, monkeypatch
+):
+    # Codex re-flagged P1 on PR #381 commit 61c1c1b: a commission accepted on
+    # an earlier attempt (before any conflict was visible) must not survive
+    # unexamined once a later attempt's snapshot reports a conflict for the
+    # same exec_id -- rejection must be enforced on every attempt, not only
+    # the first time the row is seen.
+    captured_path = tmp_path / "captured.jsonl"
+    execution_row = _execution()
+    attempts = {"count": 0}
+
+    def fake_commission(timeout):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return _commission_snapshot(_commission())
+        return IbkrPaperCommissionSnapshot(
+            connected=True,
+            endpoint_port=4002,
+            commissions=(_commission(),),
+            duplicate_conflicts=("conflicting commission reports for exec_id=exec-1",),
+            order_sent=False,
+            errors=(),
+        )
+
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_execution_snapshot",
+        lambda timeout: _execution_snapshot(execution_row),
+    )
+    monkeypatch.setattr(provenance_module, "preview_ibkr_paper_commission_snapshot", fake_commission)
+    monkeypatch.setattr(
+        # Completed order never arrives, so the retry loop keeps running
+        # (rather than stopping as soon as commission+execution look
+        # complete) and reaches the attempt where the conflict appears.
+        provenance_module,
+        "preview_ibkr_paper_completed_orders",
+        lambda timeout: _completed_order_snapshot(),
+    )
+
+    result = capture_broker_provenance_evidence_for_fill(
+        _fill(),
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        max_attempts=2,
+        retry_interval_seconds=0.0,
+        captured_evidence_path=captured_path,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result.verified is False
+    saved_rows = [
+        json.loads(line)
+        for line in captured_path.read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert saved_rows[-1]["commission"] is None
+
+
+def test_capture_rejects_conflicting_completed_order_rows_for_the_same_perm_id(
+    tmp_path, monkeypatch
+):
+    # Codex P1 finding on PR #381 commit 61c1c1b: two different completed-order
+    # rows sharing one perm_id must never be captured -- picking either one
+    # (as a plain dict keyed by perm_id would) could persist evidence the
+    # live verifier would otherwise reject as conflicting.
+    captured_path = tmp_path / "captured.jsonl"
+    execution_row = _execution()
+    commission_row = _commission()
+    conflicting_snapshot = _completed_order_snapshot(
+        _completed_order(order_ref=DEFAULT_INTENT_ID),
+        _completed_order(order_ref="different-intent"),
+    )
+
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_execution_snapshot",
+        lambda timeout: _execution_snapshot(execution_row),
+    )
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_commission_snapshot",
+        lambda timeout: _commission_snapshot(commission_row),
+    )
+    monkeypatch.setattr(
+        provenance_module, "preview_ibkr_paper_completed_orders", lambda timeout: conflicting_snapshot
+    )
+
+    result = capture_broker_provenance_evidence_for_fill(
+        _fill(),
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        max_attempts=2,
+        retry_interval_seconds=0.0,
+        captured_evidence_path=captured_path,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result.verified is False
+    saved_rows = [
+        json.loads(line)
+        for line in captured_path.read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert saved_rows[-1]["completed_order"] is None
+
+
 def test_capture_persists_execution_row_even_if_a_later_attempt_raises(tmp_path, monkeypatch):
     # Codex P2 finding on PR #381: evidence already observed must be durable
     # before the next, potentially-failing collector call -- not held only in
