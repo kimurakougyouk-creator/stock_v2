@@ -142,7 +142,7 @@ def preview_ibkr_paper_execution_snapshot(*, timeout: float = 10.0) -> IbkrPaper
         probe = _ExecutionSnapshotProbe()
         try:
             try:
-                probe.connect(cfg.host, cfg.port, cfg.client_id + 271)
+                probe.connect(cfg.host, cfg.port, cfg.client_id + 273)
             except OSError as exc:
                 collected.append(f"{cfg.port}: {exc}")
                 continue

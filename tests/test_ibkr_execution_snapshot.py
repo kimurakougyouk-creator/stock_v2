@@ -70,3 +70,25 @@ def test_snapshot_ready_never_implies_order_transmission():
     )
     assert snapshot.ready is True
     assert snapshot.order_sent is False
+
+
+def test_preview_connects_with_the_commission_and_completed_order_clientid_offset(monkeypatch):
+    """ibkr_execution_snapshot must use the same +273 clientId offset as
+    ibkr_commission_snapshot.py and ibkr_completed_order_evidence.py so a
+    single Paper Gateway Master Client ID can authorize all three existing,
+    unmodified read-only collectors without requiring the order-placing
+    clientId (0) or any live broker connection.
+    """
+    captured_client_ids: list[int] = []
+
+    def fake_connect(self, host, port, client_id):
+        captured_client_ids.append(client_id)
+        raise OSError("no gateway available in this test")
+
+    monkeypatch.setattr(module._ExecutionSnapshotProbe, "connect", fake_connect)
+
+    result = module.preview_ibkr_paper_execution_snapshot(timeout=0.1)
+
+    assert captured_client_ids == [273, 273]
+    assert result.connected is False
+    assert result.order_sent is False
