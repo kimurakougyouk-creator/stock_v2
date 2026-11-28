@@ -1162,6 +1162,56 @@ def test_capture_rejects_conflicting_completed_order_rows_for_the_same_perm_id(
     assert saved_rows[-1]["completed_order"] is None
 
 
+def test_capture_persists_a_changed_commission_value_not_just_its_presence(
+    tmp_path, monkeypatch
+):
+    # Codex P2 finding on PR #381 commit dd693f4: the persisted signature
+    # must compare actual evidence values, not merely which fields are
+    # populated -- observing a corrected commission value (e.g. 80.0 then
+    # 81.0) on a later attempt must still be written to disk, not silently
+    # dropped because "commission" was already non-None on an earlier write.
+    captured_path = tmp_path / "captured.jsonl"
+    execution_row = _execution()
+    attempts = {"count": 0}
+
+    def fake_commission(timeout):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return _commission_snapshot(_commission(commission=80.0))
+        return _commission_snapshot(_commission(commission=81.0))
+
+    monkeypatch.setattr(
+        provenance_module,
+        "preview_ibkr_paper_execution_snapshot",
+        lambda timeout: _execution_snapshot(execution_row),
+    )
+    monkeypatch.setattr(provenance_module, "preview_ibkr_paper_commission_snapshot", fake_commission)
+    monkeypatch.setattr(
+        # Completed order never arrives, forcing both attempts to run.
+        provenance_module,
+        "preview_ibkr_paper_completed_orders",
+        lambda timeout: _completed_order_snapshot(),
+    )
+
+    capture_broker_provenance_evidence_for_fill(
+        _fill(),
+        local_commission_report=_local_commission_report(_local_commission()),
+        account_currency="JPY",
+        max_attempts=2,
+        retry_interval_seconds=0.0,
+        captured_evidence_path=captured_path,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    saved_rows = [
+        json.loads(line)
+        for line in captured_path.read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert len(saved_rows) == 2
+    assert saved_rows[0]["commission"]["commission"] == 80.0
+    assert saved_rows[1]["commission"]["commission"] == 81.0
+
+
 def test_capture_persists_execution_row_even_if_a_later_attempt_raises(tmp_path, monkeypatch):
     # Codex P2 finding on PR #381: evidence already observed must be durable
     # before the next, potentially-failing collector call -- not held only in

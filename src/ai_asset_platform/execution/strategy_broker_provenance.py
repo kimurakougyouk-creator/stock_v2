@@ -718,12 +718,13 @@ def capture_broker_provenance_evidence_for_fill(
             and entry["completed_order"] is not None
         )
 
-    def _signature(entry: dict) -> tuple[bool, bool, bool]:
-        return (
-            entry["execution"] is not None,
-            entry["commission"] is not None,
-            entry["completed_order"] is not None,
-        )
+    def _signature(entry: dict):
+        # Compares the actual evidence objects, not merely which fields are
+        # populated -- a later attempt observing a *different* value for an
+        # already-populated field (e.g. a corrected commission report) must
+        # still be persisted, not silently dropped just because something
+        # was already on file for that field.
+        return (entry["execution"], entry["commission"], entry["completed_order"])
 
     # Seed from whatever a previous call (possibly interrupted mid-retry, or
     # completed with some rows still missing) already persisted, so a partial
@@ -731,7 +732,7 @@ def capture_broker_provenance_evidence_for_fill(
     # permanently done the moment any row for its exec_id exists on disk.
     existing_rows = _load_captured_evidence_by_exec_id(captured_evidence_path)
     collected: dict[str, dict] = {}
-    persisted_signature: dict[str, tuple[bool, bool, bool]] = {}
+    persisted_signature: dict[str, tuple] = {}
     for exec_id in needed_exec_ids:
         existing_row = existing_rows.get(exec_id)
         entry = collected.setdefault(
