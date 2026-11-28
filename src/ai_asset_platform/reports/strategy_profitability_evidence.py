@@ -1,13 +1,16 @@
 """Read-only profitability evidence for natural verified IBKR Paper strategy fills.
 
 Natural strategy fills are identified from the durable order-intent structure
-actually emitted by ``signal_runner._build_signal_order_intent_id``:
-``signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>``.
+actually emitted by a natural signal-driven order path:
+``signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>`` (legacy
+``signal_runner.py``) or ``signal-runner:paper-pilot:<ticker>:<BUY|SELL>:
+<quantity>:<bar-key>`` (current production ``paper_trading_runner.py``).
 
 The identity is validated against the fill record itself so deliberate proof,
 reset, recovery, derivative, and legacy local Paper rows are not silently mixed
-into strategy-performance metrics. Older ``signal-runner:paper-pilot:...`` proof
-identifiers do not match the natural runtime structure and are excluded.
+into strategy-performance metrics -- those always use an unrelated intent
+prefix such as ``controlled-proof:`` or ``broker-recovery:...`` and never
+start with ``signal-runner:``.
 
 This module never connects to a broker and never creates, changes, cancels, or
 transmits an order. Gross PnL is always computed from durable natural-strategy
@@ -562,24 +565,46 @@ def _is_confirmed_ibkr_fill(record: dict) -> bool:
     )
 
 
+_PAPER_PILOT_INTENT_MARKER = "paper-pilot:"
+
+
 def _natural_runtime_intent_matches_record(record: dict) -> bool:
-    """Validate the exact durable identity shape emitted by signal_runner.
+    """Validate the durable identity shape emitted by a natural signal runtime.
 
-    Expected shape:
-    signal-runner:<ticker>:<BUY|SELL>:<whole quantity>:<non-empty bar key>
+    Two shapes are accepted, both produced only by natural signal-driven order
+    paths in this codebase -- never by validation/reset/recovery/e2e tooling,
+    which always uses an unrelated intent prefix (``controlled-proof:``,
+    ``broker-recovery:...``, ``extended-paper-close:...``,
+    ``overnight-paper-e2e:...``, ``9432-paper-flat-close:...``,
+    ``aapl-paper-flat-reset:...``, etc. -- none of which start with
+    ``signal-runner:``):
 
-    The bar key can itself contain colons, so only the first four separators are
-    structural. Record ticker/side/quantity must agree with the identifier.
+    - legacy ``signal_runner.py`` (disabled in production via
+      ``allow_orders=False``, exercised by tests only):
+      ``signal-runner:<ticker>:<BUY|SELL>:<quantity>:<bar-key>``
+    - current production ``paper_trading_runner.py``
+      (``_execute_confirmed_ibkr_paper_order``, unchanged since 2026-08-22):
+      ``signal-runner:paper-pilot:<ticker>:<BUY|SELL>:<quantity>:<bar-key>``
+
+    The bar key can itself contain colons, so only the structural separators
+    before it are split on. Record ticker/side/quantity must agree with the
+    identifier.
     """
     intent = str(record.get("order_intent_id", "")).strip()
-    parts = intent.split(":", 4)
-    if len(parts) != 5 or parts[0] != "signal-runner":
+    if not intent.startswith(STRATEGY_INTENT_PREFIX):
+        return False
+    remainder = intent[len(STRATEGY_INTENT_PREFIX):]
+    if remainder.startswith(_PAPER_PILOT_INTENT_MARKER):
+        remainder = remainder[len(_PAPER_PILOT_INTENT_MARKER):]
+
+    fields = remainder.split(":", 3)
+    if len(fields) != 4:
         return False
 
-    intent_ticker = parts[1].strip().upper()
-    intent_side = parts[2].strip().upper()
-    quantity_text = parts[3].strip()
-    bar_key = parts[4].strip()
+    intent_ticker = fields[0].strip().upper()
+    intent_side = fields[1].strip().upper()
+    quantity_text = fields[2].strip()
+    bar_key = fields[3].strip()
     if not intent_ticker or intent_side not in {"BUY", "SELL"} or not bar_key:
         return False
 

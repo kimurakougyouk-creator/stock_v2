@@ -55,7 +55,18 @@ def _fill(
 def _natural_intent(
     *, ticker: str, side: str, shares: int, bar_key: str = "2026-09-01T10:00:00+09:00"
 ) -> str:
+    """Legacy signal_runner.py shape: signal-runner:<ticker>:<side>:<qty>:<bar-key>."""
     return f"{STRATEGY_INTENT_PREFIX}{ticker}:{side}:{shares}:{bar_key}"
+
+
+def _paper_pilot_intent(
+    *, ticker: str, side: str, shares: int, bar_key: str = "2026-09-01"
+) -> str:
+    """Actual current production shape emitted by paper_trading_runner.py's
+    ``_execute_confirmed_ibkr_paper_order`` (unchanged since 2026-08-22):
+    signal-runner:paper-pilot:<ticker>:<side>:<qty>:<bar-key>.
+    """
+    return f"{STRATEGY_INTENT_PREFIX}paper-pilot:{ticker}:{side}:{shares}:{bar_key}"
 
 
 def _commission_report(*rows: dict) -> dict:
@@ -78,27 +89,43 @@ def _commission(exec_id: str, commission: float, currency: str) -> dict:
 
 
 def test_natural_strategy_filter_matches_actual_signal_runner_intent_shape():
-    natural = _fill(
+    natural_legacy = _fill(
         intent=_natural_intent(ticker="9432.T", side="BUY", shares=100),
         side="BUY",
         price=150.0,
     )
-    validation = _fill(
-        intent="signal-runner:paper-pilot:9432.T:BUY:100:2026-09-01",
+    natural_paper_pilot = _fill(
+        intent=_paper_pilot_intent(ticker="AAPL", side="BUY", shares=1),
         side="BUY",
-        price=150.0,
+        price=357.98,
+        ticker="AAPL",
+        shares=1,
     )
     recovery = _fill(
         intent="broker-recovery:controlled-proof",
         side="BUY",
         price=150.0,
     )
-    legacy = dict(natural, mode="PAPER")
+    controlled_proof = _fill(
+        intent="controlled-proof:buy",
+        side="BUY",
+        price=150.0,
+    )
+    extended_close_e2e = _fill(
+        intent="extended-paper-close:SPY:SELL:1:2026-09-01",
+        side="SELL",
+        price=150.0,
+        ticker="SPY",
+        shares=1,
+    )
+    legacy_paper_mode = dict(natural_legacy, mode="PAPER")
 
-    assert is_natural_strategy_fill(natural) is True
-    assert is_natural_strategy_fill(validation) is False
+    assert is_natural_strategy_fill(natural_legacy) is True
+    assert is_natural_strategy_fill(natural_paper_pilot) is True
     assert is_natural_strategy_fill(recovery) is False
-    assert is_natural_strategy_fill(legacy) is False
+    assert is_natural_strategy_fill(controlled_proof) is False
+    assert is_natural_strategy_fill(extended_close_e2e) is False
+    assert is_natural_strategy_fill(legacy_paper_mode) is False
 
 
 def test_natural_strategy_filter_requires_record_identity_to_match_intent():
@@ -109,6 +136,19 @@ def test_natural_strategy_filter_requires_record_identity_to_match_intent():
     ) is False
     assert is_natural_strategy_fill(
         _fill(intent=intent, side="BUY", price=150.0, shares=99)
+    ) is False
+
+
+def test_natural_strategy_filter_requires_paper_pilot_record_identity_to_match_intent():
+    intent = _paper_pilot_intent(ticker="AAPL", side="BUY", shares=1)
+    assert is_natural_strategy_fill(
+        _fill(intent=intent, side="SELL", price=357.98, ticker="AAPL", shares=1)
+    ) is False
+    assert is_natural_strategy_fill(
+        _fill(intent=intent, side="BUY", price=357.98, ticker="SPY", shares=1)
+    ) is False
+    assert is_natural_strategy_fill(
+        _fill(intent=intent, side="BUY", price=357.98, ticker="AAPL", shares=2)
     ) is False
 
 
@@ -155,14 +195,18 @@ def test_no_natural_strategy_fill_never_reuses_validation_profit():
         _fill(intent="controlled-proof:buy", side="BUY", price=100.0),
         _fill(intent="controlled-proof:sell", side="SELL", price=300.0),
         _fill(
-            intent="signal-runner:paper-pilot:9432.T:BUY:100:2026-09-01",
-            side="BUY",
+            intent="extended-paper-close:SPY:SELL:1:2026-09-01",
+            side="SELL",
             price=100.0,
+            ticker="SPY",
+            shares=1,
         ),
         _fill(
-            intent="signal-runner:paper-pilot:9432.T:SELL:100:2026-09-02",
-            side="SELL",
+            intent="overnight-paper-e2e:SPY:BUY:1:2026-09-02",
+            side="BUY",
             price=300.0,
+            ticker="SPY",
+            shares=1,
         ),
     ]
 
@@ -174,6 +218,33 @@ def test_no_natural_strategy_fill_never_reuses_validation_profit():
     assert result.closed_trade_count == 0
     assert result.excluded_ibkr_fill_count == 4
     assert result.gross_performance["net_profit"] == 0.0
+
+
+def test_actual_aapl_natural_fill_format_is_recognized_and_counted():
+    """Regression guard for the 2026-11-27 23:35:30 JST AAPL natural BUY: the
+    real production order_intent_id shape (signal-runner:paper-pilot:...) must
+    be recognized as a natural strategy fill, not silently excluded.
+    """
+    records = [
+        _fill(intent="controlled-proof:buy", side="BUY", price=100.0),
+        _fill(intent="controlled-proof:sell", side="SELL", price=300.0),
+        _fill(
+            intent=_paper_pilot_intent(
+                ticker="AAPL", side="BUY", shares=1, bar_key="2026-11-27"
+            ),
+            side="BUY",
+            price=357.98,
+            ticker="AAPL",
+            shares=1,
+            currency="USD",
+        ),
+    ]
+
+    result = build_strategy_profitability_evidence(records, account_currency="USD")
+
+    assert result.strategy_fill_count == 1
+    assert result.excluded_ibkr_fill_count == 2
+    assert result.evidence_status != "NO_NATURAL_STRATEGY_FILLS"
 
 
 
